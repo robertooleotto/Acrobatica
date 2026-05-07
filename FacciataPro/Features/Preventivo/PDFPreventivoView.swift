@@ -1,47 +1,37 @@
 import SwiftUI
+import SwiftData
+import PDFKit
 
 struct PDFPreventivoView: View {
+    @Bindable var preventivo: Preventivo
     let cantiere: Cantiere
 
+    @Environment(\.modelContext) private var context
+    @Query private var aziende: [Azienda]
+
+    @State private var pdfData: Data?
     @State private var apriFirma = false
+    @State private var fileURL: URL?
 
     var body: some View {
-        VStack(spacing: 16) {
-            RoundedRectangle(cornerRadius: 8)
-                .fill(.tint.opacity(0.10))
-                .overlay(
-                    VStack {
-                        Image(systemName: "doc.richtext")
-                            .font(.system(size: 64))
-                            .foregroundStyle(.tint)
-                        Text("Anteprima PDF")
-                            .font(.headline)
-                        Text("[Da generare con PDFKit]")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                )
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text("DA IMPLEMENTARE").font(.caption.bold()).foregroundStyle(.secondary)
-                Text("• PDFKit: layout A4 con header logo + dati ditta")
-                Text("• Foto prima/dopo")
-                Text("• Tabella voci dal PricingResult")
-                Text("• Subtotale, margine, IVA, totale")
-                Text("• Footer: condizioni, validità, firma")
-                Text("• Numerazione automatica preventivi")
+        VStack(spacing: 12) {
+            if let data = pdfData {
+                PDFKitView(data: data)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+            } else {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(.tint.opacity(0.10))
+                    .overlay(ProgressView("Generazione PDF…"))
             }
-            .font(.caption)
-            .padding()
-            .background(.secondary.opacity(0.08))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
 
             HStack(spacing: 12) {
-                ShareLink(item: "Preventivo \(cantiere.nome)") {
-                    Label("Condividi", systemImage: "square.and.arrow.up")
-                        .frame(maxWidth: .infinity, minHeight: 44)
+                if let url = fileURL {
+                    ShareLink(item: url) {
+                        Label("Condividi PDF", systemImage: "square.and.arrow.up")
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                    }
+                    .buttonStyle(.bordered)
                 }
-                .buttonStyle(.bordered)
 
                 Button {
                     apriFirma = true
@@ -53,10 +43,49 @@ struct PDFPreventivoView: View {
             }
         }
         .padding()
-        .navigationTitle("PDF preventivo")
+        .navigationTitle(preventivo.numero.isEmpty ? "PDF preventivo" : preventivo.numero)
         .navigationBarTitleDisplayMode(.inline)
+        .task { generaPDF() }
         .navigationDestination(isPresented: $apriFirma) {
-            FirmaClienteView()
+            FirmaClienteView(preventivo: preventivo)
         }
+    }
+
+    private func generaPDF() {
+        let azienda = aziende.first
+        let data = PDFGenerator.genera(
+            preventivo: preventivo,
+            cantiere: cantiere,
+            azienda: azienda
+        )
+        preventivo.pdfData = data
+        try? context.save()
+        pdfData = data
+        salvaSuFile(data)
+    }
+
+    private func salvaSuFile(_ data: Data) {
+        let safe = preventivo.numero.isEmpty ? "preventivo" : preventivo.numero
+            .replacingOccurrences(of: "/", with: "-")
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(safe).pdf")
+        try? data.write(to: url)
+        fileURL = url
+    }
+}
+
+private struct PDFKitView: UIViewRepresentable {
+    let data: Data
+
+    func makeUIView(context: Context) -> PDFView {
+        let v = PDFView()
+        v.autoScales = true
+        v.displayDirection = .vertical
+        v.usePageViewController(false)
+        return v
+    }
+
+    func updateUIView(_ uiView: PDFView, context: Context) {
+        uiView.document = PDFDocument(data: data)
     }
 }

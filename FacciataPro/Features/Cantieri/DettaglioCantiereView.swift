@@ -57,14 +57,21 @@ struct DettaglioCantiereView: View {
                         .font(.callout)
                 } else {
                     ForEach(cantiere.preventivi) { p in
-                        HStack {
-                            VStack(alignment: .leading) {
-                                Text(p.numero.isEmpty ? "Preventivo" : p.numero)
-                                Text("Totale \(p.totale, specifier: "%.2f") €")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                        NavigationLink {
+                            PDFPreventivoView(preventivo: p, cantiere: cantiere)
+                        } label: {
+                            HStack {
+                                VStack(alignment: .leading) {
+                                    Text(p.numero.isEmpty ? "Preventivo" : p.numero)
+                                    Text("Totale \(p.totale, specifier: "%.2f") €")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if p.firmaClienteData != nil {
+                                    Image(systemName: "signature").foregroundStyle(.tint)
+                                }
                             }
-                            Spacer()
                         }
                     }
                 }

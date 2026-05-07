@@ -13,6 +13,7 @@ final class Facciata {
     var altezzaM: Double
     var superficieLordaMq: Double
     var superficieNettaMq: Double
+    var cicloLavorazioneId: UUID?
     var createdAt: Date
     var updatedAt: Date
 
@@ -38,6 +39,7 @@ final class Facciata {
         altezzaM: Double = 0,
         superficieLordaMq: Double = 0,
         superficieNettaMq: Double = 0,
+        cicloLavorazioneId: UUID? = nil,
         cantiere: Cantiere? = nil
     ) {
         self.id = id
@@ -50,6 +52,7 @@ final class Facciata {
         self.altezzaM = altezzaM
         self.superficieLordaMq = superficieLordaMq
         self.superficieNettaMq = superficieNettaMq
+        self.cicloLavorazioneId = cicloLavorazioneId
         self.cantiere = cantiere
         let now = Date()
         self.createdAt = now

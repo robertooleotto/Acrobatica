@@ -115,6 +115,7 @@ struct RiepilogoFacciataView: View {
             altezzaM: stato.altezzaM,
             superficieLordaMq: stato.superficieLordaMq,
             superficieNettaMq: stato.superficieNettaMq,
+            cicloLavorazioneId: stato.cicloSelezionatoId,
             cantiere: cantiere
         )
         context.insert(facciata)
