@@ -1,0 +1,54 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Xcode user state
+*.xcuserstate
+xcuserdata/
+*.xcscmblueprint
+*.xcworkspace/xcuserdata/
+
+# Build outputs
+build/
+DerivedData/
+*.dSYM.zip
+*.dSYM
+*.ipa
+*.xcarchive
+
+# Swift Package Manager
+.swiftpm/
+.build/
+Package.resolved
+Packages/
+
+# CocoaPods (se mai)
+Pods/
+Podfile.lock
+
+# Carthage
+Carthage/Build/
+Carthage/Checkouts
+
+# Fastlane
+fastlane/report.xml
+fastlane/screenshots/**/*.png
+fastlane/test_output
+
+# AppCode / IDE diversi
+.idea/
+*.iml
+
+# Swift profiling / coverage
+*.profraw
+*.gcov
+*.gcda
+*.gcno
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+secrets.plist
+GoogleService-Info.plist
