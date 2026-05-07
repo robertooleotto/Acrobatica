@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import UIKit
 
 struct RiepilogoFacciataView: View {
     let cantiere: Cantiere
@@ -9,6 +10,18 @@ struct RiepilogoFacciataView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var nomeFacciata: String = "Facciata"
+
+    private var fotoOriginale: UIImage? {
+        stato.fotoRaddrizzataData.flatMap { UIImage(data: $0) }
+            ?? stato.fotoData.flatMap { UIImage(data: $0) }
+    }
+
+    private var fotoSimulata: UIImage? {
+        guard let id = stato.varianteSelezionataId,
+              let v = stato.variantiTinta.first(where: { $0.id == id }),
+              let data = v.jpegPreview else { return nil }
+        return UIImage(data: data)
+    }
 
     var body: some View {
         Form {
@@ -30,14 +43,31 @@ struct RiepilogoFacciataView: View {
 
             Section("Foto") {
                 HStack(spacing: 8) {
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(.tint.opacity(0.15))
-                        .frame(height: 120)
-                        .overlay(Text("Originale").foregroundStyle(.secondary))
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(.tint.opacity(0.15))
-                        .frame(height: 120)
-                        .overlay(Text("Simulata").foregroundStyle(.secondary))
+                    fotoCell(image: fotoOriginale, label: "Originale")
+                    fotoCell(image: fotoSimulata, label: "Simulata")
+                }
+            }
+
+            if !stato.variantiTinta.isEmpty {
+                Section("Varianti tinta (\(stato.variantiTinta.count))") {
+                    ForEach(stato.variantiTinta) { v in
+                        HStack {
+                            Circle()
+                                .fill(Color(uiColor: ColorSimulator.uiColor(fromHex: v.coloreHex) ?? .gray))
+                                .frame(width: 22, height: 22)
+                                .overlay(Circle().stroke(.secondary.opacity(0.4)))
+                            VStack(alignment: .leading) {
+                                Text(v.nome)
+                                Text(v.coloreHex)
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if stato.varianteSelezionataId == v.id {
+                                Text("Selezionata").font(.caption).foregroundStyle(.tint)
+                            }
+                        }
+                    }
                 }
             }
 
@@ -53,6 +83,26 @@ struct RiepilogoFacciataView: View {
         }
         .navigationTitle("Riepilogo facciata")
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    @ViewBuilder
+    private func fotoCell(image: UIImage?, label: String) -> some View {
+        VStack(spacing: 4) {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(height: 120)
+                    .frame(maxWidth: .infinity)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+            } else {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(.tint.opacity(0.15))
+                    .frame(height: 120)
+                    .overlay(Text(label).foregroundStyle(.secondary))
+            }
+            Text(label).font(.caption).foregroundStyle(.secondary)
+        }
     }
 
     private func salvaFacciata() {
@@ -78,6 +128,22 @@ struct RiepilogoFacciataView: View {
             context.insert(ElementoExtra(
                 tipo: e.tipo, nome: e.nome, areaMq: e.area, facciata: facciata
             ))
+        }
+
+        for v in stato.variantiTinta {
+            let zona = ZonaSimulazione(
+                poligono: PoligonoJSON(punti: []),
+                coloreHex: v.coloreHex,
+                cicloId: nil
+            )
+            let sim = SimulazioneTinta(
+                nome: v.nome,
+                zone: [zona],
+                fotoSimulataData: v.jpegPreview,
+                isSelected: stato.varianteSelezionataId == v.id,
+                facciata: facciata
+            )
+            context.insert(sim)
         }
 
         try? context.save()

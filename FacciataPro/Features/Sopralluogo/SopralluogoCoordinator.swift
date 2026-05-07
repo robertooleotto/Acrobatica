@@ -10,6 +10,20 @@ enum SopralluogoStep: Hashable {
     case riepilogo
 }
 
+struct VarianteTinta: Identifiable, Hashable {
+    let id: UUID
+    var nome: String
+    var coloreHex: String
+    var jpegPreview: Data?
+
+    init(id: UUID = UUID(), nome: String, coloreHex: String, jpegPreview: Data? = nil) {
+        self.id = id
+        self.nome = nome
+        self.coloreHex = coloreHex
+        self.jpegPreview = jpegPreview
+    }
+}
+
 @Observable
 final class SopralluogoState {
     // Foto originale
@@ -41,8 +55,11 @@ final class SopralluogoState {
     var elementiEsclusi: [(area: Double, tipo: TipoElementoEscluso, nome: String)] = []
     var elementiExtra: [(area: Double, tipo: TipoElementoExtra, nome: String)] = []
 
-    // Simulazioni / ciclo
-    var simulazioniSelezionate: [String] = []
+    // Simulazioni colore (max 4 varianti)
+    var variantiTinta: [VarianteTinta] = []
+    var varianteSelezionataId: UUID?
+
+    // Ciclo
     var cicloSelezionatoId: UUID?
 
     var superficieLordaMq: Double { larghezzaM * altezzaM }
