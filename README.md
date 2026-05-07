@@ -6,15 +6,16 @@ App iOS nativa SwiftUI + SwiftData per imbianchini e ditte edili: misura facciat
 
 ## Stato attuale
 
-**Skeleton end-to-end (Fase 1 strutturale).** Tutti i sorgenti per:
-- 13 model SwiftData (sezione 4 del briefing)
-- Schema + dati seed precaricati (10 prodotti, 3 cicli, 4 voci accessorie)
-- `PricingEngine` con firma stabile + 8 unit test sui calcoli critici
-- 32 view SwiftUI per le 7 sezioni dell'app, navigazione end-to-end
+**Fasi 1-5 funzionanti, Fase 6 parziale (firma).** L'app è utilizzabile end-to-end:
 
-Le view sono di due tipi:
-- **Funzionali**: tutto il listino (CRUD prodotti/cicli/voci), clienti CRUD, cantieri CRUD, onboarding setup ditta, profilo, anteprima preventivo, configurazione default. Persistenza reale.
-- **Placeholder con TODO**: schermate Computer Vision (cattura foto, raddrizzamento, calibrazione, infissi, simulazione tinte) e PDF generation. Hanno UI, struttura e elenco di cosa manca, ma niente CV/PDFKit. Sono le fasi 3, 4, 5 della roadmap.
+- 13 model SwiftData con relazioni complete
+- Schema + dati seed precaricati (10 prodotti, 3 cicli, 4 voci accessorie)
+- `PricingEngine` (logica pura) + 8 unit test sui calcoli critici
+- `PreventivoBuilder`: mappatura model → PricingInput, persiste Preventivo/VocePreventivo
+- Pipeline Computer Vision: scatto foto → raddrizzamento prospettico (CIPerspectiveCorrection) → calibrazione segmento → tap-poligoni per infissi
+- Simulazione colore: luminance preservation con CIColorControls + CIMultiplyCompositing, palette 8 tinte + HEX custom, 4 varianti
+- Generazione PDF con PDFKit (header logo, blocco cliente/cantiere, tabella voci con paginazione, totali, firma)
+- Firma cliente: canvas SwiftUI con DragGesture, salvata come PNG
 
 ## Requisiti
 
@@ -96,25 +97,40 @@ FacciataProTests/
 
 Avviando l'app:
 
-1. **Primo avvio**: vedi l'onboarding (3 slide + form setup ditta). Salvando entri nel main tab bar.
-2. **Tab Cantieri**: vuoto. Crei un cantiere (con un cliente nuovo o esistente).
-3. **Tab Listino**: già popolato con i 10 prodotti, 3 cicli, 4 voci accessorie seed. Puoi creare/modificare/eliminare tutto.
-4. **Tab Clienti**: CRUD completo.
-5. **Tab Profilo**: editable, default preventivi salvati in `@AppStorage`.
-6. **Sopralluogo** (da Dettaglio cantiere → "Nuovo sopralluogo"): naviga tutti e 7 gli step in sequenza (placeholder UI, niente CV) e salva la facciata con superficie 0 m² alla fine.
+1. **Primo avvio**: onboarding (3 slide + form setup ditta), poi main tab bar.
+2. **Crea cantiere** con cliente (esistente o nuovo).
+3. **Sopralluogo** (7 step):
+   - Scatta o seleziona foto (UIImagePickerController + PhotosPicker)
+   - Trascina i 4 angoli sul perimetro della facciata, applica raddrizzamento
+   - Trascina i 2 punti gialli su un riferimento noto, inserisci la misura in cm → calcola pixelPerCm e dimensioni in metri
+   - Tap-to-polygon per ogni infisso, assegna tipo + nome → calcola area in m²
+   - Tinte: scegli da palette o HEX, applica a tutta la facciata, fino a 4 varianti
+   - Selezione ciclo + voci accessorie
+   - Riepilogo + salva
+4. **Genera preventivo** dal dettaglio cantiere:
+   - PreventivoBuilder esegue PricingEngine per ogni facciata col suo ciclo
+   - Aggiungi voci accessorie con quantità
+   - Margine, IVA, validità (default da @AppStorage)
+   - Salva → genera PDF A4 con tabella voci, totali, condizioni, spazio firma
+5. **Firma cliente**: canvas SwiftUI, salva PNG in Preventivo.firmaClienteData
+6. **Listino / Clienti**: CRUD completo, prodotti/cicli/voci precaricati al primo avvio
 
 ## Roadmap (dal briefing)
 
 - ✅ **Fase 1 — Foundation**: model, persistence, onboarding, cantieri/clienti/profilo CRUD
 - ✅ **Fase 2 — Listino**: prodotti/cicli/voci CRUD + seed
 - ✅ **PricingEngine**: firma stabile + test
-- 🚧 **Fase 3 — Sopralluogo CV**: cattura foto, omografia, calibrazione, infissi
-- 🚧 **Fase 4 — Simulazione colore**: blending luminance preservation con Core Image
-- 🚧 **Fase 5 — PDF**: generazione con PDFKit
-- 🚧 **Fase 6 — Polish**: firma canvas, multi-facciata, extra
-- 🚧 **Fase 7 — V2**: auto-detect, SAM, sync cloud
+- ✅ **Fase 3 — Sopralluogo CV**: cattura foto, raddrizzamento (CIPerspectiveCorrection), calibrazione, esclusione infissi (poligoni a dito + shoelace)
+- ✅ **Fase 4 — Simulazione colore**: luminance preservation (full-facade, fino a 4 varianti)
+- ✅ **Fase 5 — PDF**: generazione PDFKit con paginazione, header, tabella voci, totali, firma
+- 🟡 **Fase 6 — Polish**: firma canvas ✅, multi-facciata già supportata, restano duplica/elimina cantiere, zone-based simulation
+- 🚧 **Fase 7 — V2**: auto-detect Vision (VNDetectRectanglesRequest), SAM, sync cloud, palette NCS/RAL
 
-Vedi i `// TODO:` e `PlaceholderView` con la lista delle cose da implementare per ogni schermata.
+Cose ancora marcate come `TODO:` nei sorgenti:
+- Auto-detect angoli con Vision in raddrizzamento
+- Griglia overlay con CMMotionManager nella cattura foto
+- Selezione zone con poligoni nella simulazione tinte (CIBlendWithMask)
+- Personalizza PDF (logo upload, colore accent, footer custom)
 
 ## Convenzioni
 
