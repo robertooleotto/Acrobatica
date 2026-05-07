@@ -12,13 +12,36 @@ enum SopralluogoStep: Hashable {
 
 @Observable
 final class SopralluogoState {
+    // Foto originale
     var fotoData: Data?
+
+    // Raddrizzamento: 4 angoli in coordinate normalizzate (0-1) sulla foto originale.
+    // Ordine: TL, TR, BR, BL.
+    var angoloTL: CGPoint = CGPoint(x: 0.05, y: 0.05)
+    var angoloTR: CGPoint = CGPoint(x: 0.95, y: 0.05)
+    var angoloBR: CGPoint = CGPoint(x: 0.95, y: 0.95)
+    var angoloBL: CGPoint = CGPoint(x: 0.05, y: 0.95)
+
+    // Foto raddrizzata + dimensioni in pixel
     var fotoRaddrizzataData: Data?
+    var fotoRaddrizzataWidthPx: Double = 0
+    var fotoRaddrizzataHeightPx: Double = 0
+
+    // Calibrazione: 2 punti in coordinate normalizzate sulla foto raddrizzata
+    var segmentoStart: CGPoint = CGPoint(x: 0.3, y: 0.5)
+    var segmentoEnd: CGPoint = CGPoint(x: 0.7, y: 0.5)
+    var misuraSegmentoCm: Double = 90  // default: porta standard
+
+    // Output calibrazione
     var pixelPerCm: Double = 0
     var larghezzaM: Double = 0
     var altezzaM: Double = 0
+
+    // Esclusioni / extra
     var elementiEsclusi: [(area: Double, tipo: TipoElementoEscluso, nome: String)] = []
     var elementiExtra: [(area: Double, tipo: TipoElementoExtra, nome: String)] = []
+
+    // Simulazioni / ciclo
     var simulazioniSelezionate: [String] = []
     var cicloSelezionatoId: UUID?
 
