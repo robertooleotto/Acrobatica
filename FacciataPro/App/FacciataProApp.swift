@@ -12,6 +12,7 @@ struct FacciataProApp: App {
     var body: some Scene {
         WindowGroup {
             RootView()
+                .tint(Theme.accent)
                 .task { @MainActor in
                     SeedData.seedIfNeeded(container.mainContext)
                 }
