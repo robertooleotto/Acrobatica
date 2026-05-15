@@ -1,0 +1,12 @@
+node_modules/
+dist/
+build/
+.next/
+.expo/
+.turbo/
+coverage/
+*.log
+.DS_Store
+.env
+.env.local
+ios/Pods/

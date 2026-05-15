@@ -1,0 +1,25 @@
+{
+  "expo": {
+    "name": "Acrobatica Facciate",
+    "slug": "acrobatica-facciate",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "splash": { "backgroundColor": "#0a0a0a", "resizeMode": "contain" },
+    "ios": {
+      "bundleIdentifier": "com.acrobatica.facciate",
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSCameraUsageDescription": "Acrobatica usa la fotocamera per rilevare le facciate via AR.",
+        "NSPhotoLibraryUsageDescription": "Acrobatica carica foto della facciata dalla tua libreria per misurarle.",
+        "UIRequiredDeviceCapabilities": ["arkit"]
+      }
+    },
+    "plugins": [
+      "expo-router",
+      ["expo-build-properties", { "ios": { "deploymentTarget": "16.0" } }],
+      ["expo-image-picker", { "photosPermission": "Acrobatica carica foto della facciata dalla tua libreria per misurarle." }]
+    ]
+  }
+}
