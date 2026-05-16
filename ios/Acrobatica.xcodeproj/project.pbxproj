@@ -1,0 +1,373 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		233535E38489D6F2D259C217 /* FacadeCaptureSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AAB2ADE8C35D061B5FD941E /* FacadeCaptureSession.swift */; };
+		569CEF5FFD3ABE86B3B35D3C /* CapturedFacadePhoto.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1445107498B1254682E63404 /* CapturedFacadePhoto.swift */; };
+		61A1C8E5BAC7E4F62ECD9F0F /* ARFacadeCaptureManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9DE0A01CE25933D499B74A0C /* ARFacadeCaptureManager.swift */; };
+		95C290024223B84A86688B8C /* AcrobaticaApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6C202BCFA7055D0E02D5ECD /* AcrobaticaApp.swift */; };
+		A201361AB22694F8A23394FC /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 578FA7BB14F86217CFEBCC1F /* Assets.xcassets */; };
+		AA2EA4B122224BDDFC786543 /* BackendAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49928F98B55B057264EDD010 /* BackendAPIClient.swift */; };
+		C99D21034E573ECFE3BE9F51 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0E24CC5E7CC12685D2E5959 /* ContentView.swift */; };
+		EFD0D633027E9752E22196D9 /* ARPreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59DAFDD7F2EB30EEBEB66FD8 /* ARPreviewView.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		1445107498B1254682E63404 /* CapturedFacadePhoto.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapturedFacadePhoto.swift; sourceTree = "<group>"; };
+		49928F98B55B057264EDD010 /* BackendAPIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackendAPIClient.swift; sourceTree = "<group>"; };
+		4AAB2ADE8C35D061B5FD941E /* FacadeCaptureSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FacadeCaptureSession.swift; sourceTree = "<group>"; };
+		578FA7BB14F86217CFEBCC1F /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		59DAFDD7F2EB30EEBEB66FD8 /* ARPreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ARPreviewView.swift; sourceTree = "<group>"; };
+		8B3ECBCD2B0B463BAE03F0E2 /* Acrobatica.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Acrobatica.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		92D7F6D5CC7B960A9E720E63 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		9DE0A01CE25933D499B74A0C /* ARFacadeCaptureManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ARFacadeCaptureManager.swift; sourceTree = "<group>"; };
+		C0E24CC5E7CC12685D2E5959 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		E6C202BCFA7055D0E02D5ECD /* AcrobaticaApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AcrobaticaApp.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		141AB78919B3B5D20BDB4BB4 /* Acrobatica */ = {
+			isa = PBXGroup;
+			children = (
+				E6C202BCFA7055D0E02D5ECD /* AcrobaticaApp.swift */,
+				578FA7BB14F86217CFEBCC1F /* Assets.xcassets */,
+				92D7F6D5CC7B960A9E720E63 /* Info.plist */,
+				EFF8D7561ED35BAFBBD7AEA2 /* Capture */,
+				F9CCF2D710D2124681B1DC30 /* Models */,
+				C63B8B9189B739A93ABC5E18 /* Networking */,
+				E6DAFEA3838BD181E456E073 /* UI */,
+			);
+			path = Acrobatica;
+			sourceTree = "<group>";
+		};
+		1D6647F5C7A9CD760145C715 = {
+			isa = PBXGroup;
+			children = (
+				141AB78919B3B5D20BDB4BB4 /* Acrobatica */,
+				980B1B9E9F8A69FD4D0325E8 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		980B1B9E9F8A69FD4D0325E8 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				8B3ECBCD2B0B463BAE03F0E2 /* Acrobatica.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		C63B8B9189B739A93ABC5E18 /* Networking */ = {
+			isa = PBXGroup;
+			children = (
+				49928F98B55B057264EDD010 /* BackendAPIClient.swift */,
+			);
+			path = Networking;
+			sourceTree = "<group>";
+		};
+		E6DAFEA3838BD181E456E073 /* UI */ = {
+			isa = PBXGroup;
+			children = (
+				59DAFDD7F2EB30EEBEB66FD8 /* ARPreviewView.swift */,
+				C0E24CC5E7CC12685D2E5959 /* ContentView.swift */,
+			);
+			path = UI;
+			sourceTree = "<group>";
+		};
+		EFF8D7561ED35BAFBBD7AEA2 /* Capture */ = {
+			isa = PBXGroup;
+			children = (
+				9DE0A01CE25933D499B74A0C /* ARFacadeCaptureManager.swift */,
+			);
+			path = Capture;
+			sourceTree = "<group>";
+		};
+		F9CCF2D710D2124681B1DC30 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				1445107498B1254682E63404 /* CapturedFacadePhoto.swift */,
+				4AAB2ADE8C35D061B5FD941E /* FacadeCaptureSession.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		63B79A82EB33BA1FC6B44FDE /* Acrobatica */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 819983CDA7E1933C73F5B6D3 /* Build configuration list for PBXNativeTarget "Acrobatica" */;
+			buildPhases = (
+				6B91C14A724F3606A1653086 /* Sources */,
+				F2F3E9A6DBF53F7414673995 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Acrobatica;
+			packageProductDependencies = (
+			);
+			productName = Acrobatica;
+			productReference = 8B3ECBCD2B0B463BAE03F0E2 /* Acrobatica.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A8B50C577B55AF2C3C9D736A /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					63B79A82EB33BA1FC6B44FDE = {
+						DevelopmentTeam = UKMVCW2U67;
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = C91DBF5E3733BD83AF917731 /* Build configuration list for PBXProject "Acrobatica" */;
+			developmentRegion = it;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				it,
+			);
+			mainGroup = 1D6647F5C7A9CD760145C715;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 980B1B9E9F8A69FD4D0325E8 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				63B79A82EB33BA1FC6B44FDE /* Acrobatica */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		F2F3E9A6DBF53F7414673995 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A201361AB22694F8A23394FC /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		6B91C14A724F3606A1653086 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				61A1C8E5BAC7E4F62ECD9F0F /* ARFacadeCaptureManager.swift in Sources */,
+				EFD0D633027E9752E22196D9 /* ARPreviewView.swift in Sources */,
+				95C290024223B84A86688B8C /* AcrobaticaApp.swift in Sources */,
+				AA2EA4B122224BDDFC786543 /* BackendAPIClient.swift in Sources */,
+				569CEF5FFD3ABE86B3B35D3C /* CapturedFacadePhoto.swift in Sources */,
+				C99D21034E573ECFE3BE9F51 /* ContentView.swift in Sources */,
+				233535E38489D6F2D259C217 /* FacadeCaptureSession.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		25FAFF13B4EEBE154FF7A8AF /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.10;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		4073DB180195688A28032061 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = UKMVCW2U67;
+				ENABLE_DEBUG_DYLIB = NO;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Acrobatica/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.liscio.acrobatica.facciate;
+				SDKROOT = iphoneos;
+				SWIFT_OBJC_BRIDGING_HEADER = "";
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		76DF596F1F3023EA9D5270AD /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.10;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		A7A331D7DE27BF9B1B29D796 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = UKMVCW2U67;
+				ENABLE_DEBUG_DYLIB = NO;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Acrobatica/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.liscio.acrobatica.facciate;
+				SDKROOT = iphoneos;
+				SWIFT_OBJC_BRIDGING_HEADER = "";
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		819983CDA7E1933C73F5B6D3 /* Build configuration list for PBXNativeTarget "Acrobatica" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				4073DB180195688A28032061 /* Debug */,
+				A7A331D7DE27BF9B1B29D796 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		C91DBF5E3733BD83AF917731 /* Build configuration list for PBXProject "Acrobatica" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				25FAFF13B4EEBE154FF7A8AF /* Debug */,
+				76DF596F1F3023EA9D5270AD /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = A8B50C577B55AF2C3C9D736A /* Project object */;
+}

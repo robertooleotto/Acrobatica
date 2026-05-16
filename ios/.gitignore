@@ -1,0 +1,7 @@
+build/
+DerivedData/
+*.xcuserstate
+*.xcuserdatad/
+Acrobatica.xcodeproj/xcuserdata/
+Acrobatica.xcodeproj/project.xcworkspace/xcuserdata/
+.DS_Store
