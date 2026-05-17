@@ -10,9 +10,10 @@ import UIKit
 ///   GET  /facade-sessions/{id}/result
 actor BackendAPIClient {
 
-    /// In dev: IP del Mac sulla LAN (per iPhone reale) o localhost (simulatore).
-    /// In produzione: il VPS pubblico.
-    var baseURL: URL = URL(string: "http://192.168.1.21:8000")!
+    /// In dev: URL del tunnel Cloudflare temporaneo che inoltra al Mac.
+    /// Cambia ad ogni nuovo `cloudflared tunnel --url http://localhost:8000`.
+    /// In produzione: il VPS pubblico (https://api.acrobatica.example).
+    var baseURL: URL = URL(string: "https://existed-meaningful-conclude-possibility.trycloudflare.com")!
 
     static let shared = BackendAPIClient()
 

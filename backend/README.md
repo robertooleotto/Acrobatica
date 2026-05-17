@@ -6,13 +6,35 @@ FastAPI + OpenCV per stitching, rettifica e misurazione di facciate da foto.
 
 ```bash
 cd backend
-python3 -m venv venv
+python3.12 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 Docs interattive: http://localhost:8000/docs
+Test: `python -m pytest tests/`
+
+## Esporre il backend in giro (per iPhone fuori dalla rete del Mac)
+
+Per il demo cliente serve un URL pubblico HTTPS che inoltri al tuo Mac. Uso il
+tunnel temporaneo di Cloudflare:
+
+```bash
+cloudflared tunnel --url http://localhost:8000
+```
+
+In stdout cerca una riga tipo `https://random-words-here.trycloudflare.com` — è
+l'URL pubblico. **Cambia ad ogni nuovo avvio del tunnel**, quindi:
+
+1. Avvia `uvicorn` come sopra.
+2. In un altro terminale: `cloudflared tunnel --url http://localhost:8000`.
+3. Copia l'URL `*.trycloudflare.com` dall'output.
+4. Aggiorna `ios/Acrobatica/Networking/BackendAPIClient.swift` (campo `baseURL`).
+5. In Xcode: Cmd+R per ribuilder l'app.
+
+Limiti: l'URL è effimero (no DNS stabile), bandwidth basso, no SLA — adatto per
+demo on-the-go. Per produzione vera, deploy su VPS.
 
 ## Endpoint principali
 
