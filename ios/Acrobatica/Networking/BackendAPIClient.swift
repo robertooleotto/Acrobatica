@@ -10,10 +10,9 @@ import UIKit
 ///   GET  /facade-sessions/{id}/result
 actor BackendAPIClient {
 
-    /// In dev: URL del tunnel Cloudflare temporaneo che inoltra al Mac.
-    /// Cambia ad ogni nuovo `cloudflared tunnel --url http://localhost:8000`.
-    /// In produzione: il VPS pubblico (https://api.acrobatica.example).
-    var baseURL: URL = URL(string: "https://existed-meaningful-conclude-possibility.trycloudflare.com")!
+    /// Backend deployato su Railway (servizio `Acrobatica`, project Railway omonimo).
+    /// Storage e DB su Supabase. Niente Mac acceso necessario.
+    var baseURL: URL = URL(string: "https://acrobatica-production.up.railway.app")!
 
     static let shared = BackendAPIClient()
 
