@@ -18,6 +18,10 @@ struct CapturedFacadePhoto: Identifiable, Codable {
     let eulerAnglesDeg: [Float]
     /// "normal" | "notAvailable" | "limited.<reason>"
     let trackingState: String
+    /// Normale del piano verticale ARKit sotto il reticle al momento dello scatto,
+    /// in world coords. `nil` se non c'era un piano verticale stabile.
+    /// Quando presente, il backend la usa per raddrizzare anche le orizzontali.
+    let wallNormalWorld: [Float]?
 
     init(
         id: UUID = UUID(),
@@ -30,7 +34,8 @@ struct CapturedFacadePhoto: Identifiable, Codable {
         cameraTransform: simd_float4x4,
         cameraIntrinsics: simd_float3x3,
         eulerAnglesDeg: SIMD3<Float>,
-        trackingState: String
+        trackingState: String,
+        wallNormalWorld: SIMD3<Float>? = nil
     ) {
         self.id = id
         self.localImageURL = localImageURL
@@ -43,6 +48,11 @@ struct CapturedFacadePhoto: Identifiable, Codable {
         self.cameraIntrinsics = CapturedFacadePhoto.flatten3(cameraIntrinsics)
         self.eulerAnglesDeg = [eulerAnglesDeg.x, eulerAnglesDeg.y, eulerAnglesDeg.z]
         self.trackingState = trackingState
+        if let n = wallNormalWorld {
+            self.wallNormalWorld = [n.x, n.y, n.z]
+        } else {
+            self.wallNormalWorld = nil
+        }
     }
 
     private static func flatten4(_ m: simd_float4x4) -> [Float] {

@@ -7,27 +7,55 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		1BF4EA18F92D4771C5B00446 /* AcrobaticaModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3968BB0A647FA6697945A87 /* AcrobaticaModels.swift */; };
 		233535E38489D6F2D259C217 /* FacadeCaptureSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AAB2ADE8C35D061B5FD941E /* FacadeCaptureSession.swift */; };
+		3D39741B48AA0D8F6CAA1284 /* FrameStrip.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CDE35BF5B1B772E7F1572A3 /* FrameStrip.swift */; };
+		4CF65B0E4150636D653D1EA2 /* AnteprimaPreventivoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E64A5DA5F2EC4D5C981EA98 /* AnteprimaPreventivoView.swift */; };
+		51E5B427678DA897233BA9BC /* CantieriListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8E07680504053B52C170437 /* CantieriListView.swift */; };
 		569CEF5FFD3ABE86B3B35D3C /* CapturedFacadePhoto.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1445107498B1254682E63404 /* CapturedFacadePhoto.swift */; };
 		61A1C8E5BAC7E4F62ECD9F0F /* ARFacadeCaptureManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9DE0A01CE25933D499B74A0C /* ARFacadeCaptureManager.swift */; };
+		7173DDC306E4219F39ECB625 /* TapWallPlaneView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4EB3402A0E87FE94AC35FEC /* TapWallPlaneView.swift */; };
+		7935F22E7734E3FA5FEF36B2 /* GlassPill.swift in Sources */ = {isa = PBXBuildFile; fileRef = BCE794A2EB80DAF3460C7557 /* GlassPill.swift */; };
+		822051E32D6830231B04FDE0 /* ListaPreventiviView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BB324F04816C2F0232B916F /* ListaPreventiviView.swift */; };
+		870811DCDE5C135871522F3E /* FirmaClienteView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC222326D094F56C881CB927 /* FirmaClienteView.swift */; };
+		8CCCCE939DF41BBA325A945D /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5539BCECE5689D083EFC227D /* Theme.swift */; };
 		95C290024223B84A86688B8C /* AcrobaticaApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6C202BCFA7055D0E02D5ECD /* AcrobaticaApp.swift */; };
 		A201361AB22694F8A23394FC /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 578FA7BB14F86217CFEBCC1F /* Assets.xcassets */; };
+		A72C629727199E4A5C16790E /* DettaglioCantiereView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3131FAD44663090F22DE9AB /* DettaglioCantiereView.swift */; };
 		AA2EA4B122224BDDFC786543 /* BackendAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49928F98B55B057264EDD010 /* BackendAPIClient.swift */; };
-		C99D21034E573ECFE3BE9F51 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0E24CC5E7CC12685D2E5959 /* ContentView.swift */; };
+		AEDAFCAF02A652D1AF7F05F4 /* CatturaARView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76BB94EDE2BAE0D54BA99139 /* CatturaARView.swift */; };
+		C29C3712937D4BBB18CE1B78 /* BrandButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F6CF9B766C137FCC0821F72 /* BrandButton.swift */; };
+		D0B9B8F66F1C12D909B1CEA9 /* PDFPreventivoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FACDED47CEB242E07978EE6 /* PDFPreventivoView.swift */; };
+		E3E6267F3038DC1DD6429160 /* RisultatoPanoramaView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A8E376261B27EA74B81C490 /* RisultatoPanoramaView.swift */; };
 		EFD0D633027E9752E22196D9 /* ARPreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59DAFDD7F2EB30EEBEB66FD8 /* ARPreviewView.swift */; };
+		FB6B50967C6052A165C60BC1 /* ShutterButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = D80C56BDFB1904F88745BAA2 /* ShutterButton.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		1445107498B1254682E63404 /* CapturedFacadePhoto.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapturedFacadePhoto.swift; sourceTree = "<group>"; };
+		2CDE35BF5B1B772E7F1572A3 /* FrameStrip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameStrip.swift; sourceTree = "<group>"; };
 		49928F98B55B057264EDD010 /* BackendAPIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackendAPIClient.swift; sourceTree = "<group>"; };
 		4AAB2ADE8C35D061B5FD941E /* FacadeCaptureSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FacadeCaptureSession.swift; sourceTree = "<group>"; };
+		5539BCECE5689D083EFC227D /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		578FA7BB14F86217CFEBCC1F /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		59DAFDD7F2EB30EEBEB66FD8 /* ARPreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ARPreviewView.swift; sourceTree = "<group>"; };
+		5FACDED47CEB242E07978EE6 /* PDFPreventivoView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PDFPreventivoView.swift; sourceTree = "<group>"; };
+		6A8E376261B27EA74B81C490 /* RisultatoPanoramaView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RisultatoPanoramaView.swift; sourceTree = "<group>"; };
+		6F6CF9B766C137FCC0821F72 /* BrandButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrandButton.swift; sourceTree = "<group>"; };
+		76BB94EDE2BAE0D54BA99139 /* CatturaARView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatturaARView.swift; sourceTree = "<group>"; };
 		8B3ECBCD2B0B463BAE03F0E2 /* Acrobatica.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Acrobatica.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		8E64A5DA5F2EC4D5C981EA98 /* AnteprimaPreventivoView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnteprimaPreventivoView.swift; sourceTree = "<group>"; };
 		92D7F6D5CC7B960A9E720E63 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		9BB324F04816C2F0232B916F /* ListaPreventiviView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ListaPreventiviView.swift; sourceTree = "<group>"; };
 		9DE0A01CE25933D499B74A0C /* ARFacadeCaptureManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ARFacadeCaptureManager.swift; sourceTree = "<group>"; };
-		C0E24CC5E7CC12685D2E5959 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		BCE794A2EB80DAF3460C7557 /* GlassPill.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassPill.swift; sourceTree = "<group>"; };
+		CC222326D094F56C881CB927 /* FirmaClienteView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FirmaClienteView.swift; sourceTree = "<group>"; };
+		D80C56BDFB1904F88745BAA2 /* ShutterButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShutterButton.swift; sourceTree = "<group>"; };
+		D8E07680504053B52C170437 /* CantieriListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CantieriListView.swift; sourceTree = "<group>"; };
+		E3968BB0A647FA6697945A87 /* AcrobaticaModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AcrobaticaModels.swift; sourceTree = "<group>"; };
 		E6C202BCFA7055D0E02D5ECD /* AcrobaticaApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AcrobaticaApp.swift; sourceTree = "<group>"; };
+		F3131FAD44663090F22DE9AB /* DettaglioCantiereView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DettaglioCantiereView.swift; sourceTree = "<group>"; };
+		F4EB3402A0E87FE94AC35FEC /* TapWallPlaneView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TapWallPlaneView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -38,8 +66,10 @@
 				578FA7BB14F86217CFEBCC1F /* Assets.xcassets */,
 				92D7F6D5CC7B960A9E720E63 /* Info.plist */,
 				EFF8D7561ED35BAFBBD7AEA2 /* Capture */,
+				F2B1724DCE58E84C49EFC3E3 /* DesignSystem */,
 				F9CCF2D710D2124681B1DC30 /* Models */,
 				C63B8B9189B739A93ABC5E18 /* Networking */,
+				F060DBC55CC5F7BDBAF8D834 /* Screens */,
 				E6DAFEA3838BD181E456E073 /* UI */,
 			);
 			path = Acrobatica;
@@ -61,6 +91,17 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
+		AAAADBB877065B9C15186B51 /* Components */ = {
+			isa = PBXGroup;
+			children = (
+				6F6CF9B766C137FCC0821F72 /* BrandButton.swift */,
+				2CDE35BF5B1B772E7F1572A3 /* FrameStrip.swift */,
+				BCE794A2EB80DAF3460C7557 /* GlassPill.swift */,
+				D80C56BDFB1904F88745BAA2 /* ShutterButton.swift */,
+			);
+			path = Components;
+			sourceTree = "<group>";
+		};
 		C63B8B9189B739A93ABC5E18 /* Networking */ = {
 			isa = PBXGroup;
 			children = (
@@ -73,7 +114,6 @@
 			isa = PBXGroup;
 			children = (
 				59DAFDD7F2EB30EEBEB66FD8 /* ARPreviewView.swift */,
-				C0E24CC5E7CC12685D2E5959 /* ContentView.swift */,
 			);
 			path = UI;
 			sourceTree = "<group>";
@@ -86,9 +126,35 @@
 			path = Capture;
 			sourceTree = "<group>";
 		};
+		F060DBC55CC5F7BDBAF8D834 /* Screens */ = {
+			isa = PBXGroup;
+			children = (
+				8E64A5DA5F2EC4D5C981EA98 /* AnteprimaPreventivoView.swift */,
+				D8E07680504053B52C170437 /* CantieriListView.swift */,
+				76BB94EDE2BAE0D54BA99139 /* CatturaARView.swift */,
+				F3131FAD44663090F22DE9AB /* DettaglioCantiereView.swift */,
+				CC222326D094F56C881CB927 /* FirmaClienteView.swift */,
+				9BB324F04816C2F0232B916F /* ListaPreventiviView.swift */,
+				5FACDED47CEB242E07978EE6 /* PDFPreventivoView.swift */,
+				6A8E376261B27EA74B81C490 /* RisultatoPanoramaView.swift */,
+				F4EB3402A0E87FE94AC35FEC /* TapWallPlaneView.swift */,
+			);
+			path = Screens;
+			sourceTree = "<group>";
+		};
+		F2B1724DCE58E84C49EFC3E3 /* DesignSystem */ = {
+			isa = PBXGroup;
+			children = (
+				5539BCECE5689D083EFC227D /* Theme.swift */,
+				AAAADBB877065B9C15186B51 /* Components */,
+			);
+			path = DesignSystem;
+			sourceTree = "<group>";
+		};
 		F9CCF2D710D2124681B1DC30 /* Models */ = {
 			isa = PBXGroup;
 			children = (
+				E3968BB0A647FA6697945A87 /* AcrobaticaModels.swift */,
 				1445107498B1254682E63404 /* CapturedFacadePhoto.swift */,
 				4AAB2ADE8C35D061B5FD941E /* FacadeCaptureSession.swift */,
 			);
@@ -169,10 +235,24 @@
 				61A1C8E5BAC7E4F62ECD9F0F /* ARFacadeCaptureManager.swift in Sources */,
 				EFD0D633027E9752E22196D9 /* ARPreviewView.swift in Sources */,
 				95C290024223B84A86688B8C /* AcrobaticaApp.swift in Sources */,
+				1BF4EA18F92D4771C5B00446 /* AcrobaticaModels.swift in Sources */,
+				4CF65B0E4150636D653D1EA2 /* AnteprimaPreventivoView.swift in Sources */,
 				AA2EA4B122224BDDFC786543 /* BackendAPIClient.swift in Sources */,
+				C29C3712937D4BBB18CE1B78 /* BrandButton.swift in Sources */,
+				51E5B427678DA897233BA9BC /* CantieriListView.swift in Sources */,
 				569CEF5FFD3ABE86B3B35D3C /* CapturedFacadePhoto.swift in Sources */,
-				C99D21034E573ECFE3BE9F51 /* ContentView.swift in Sources */,
+				AEDAFCAF02A652D1AF7F05F4 /* CatturaARView.swift in Sources */,
+				A72C629727199E4A5C16790E /* DettaglioCantiereView.swift in Sources */,
 				233535E38489D6F2D259C217 /* FacadeCaptureSession.swift in Sources */,
+				870811DCDE5C135871522F3E /* FirmaClienteView.swift in Sources */,
+				3D39741B48AA0D8F6CAA1284 /* FrameStrip.swift in Sources */,
+				7935F22E7734E3FA5FEF36B2 /* GlassPill.swift in Sources */,
+				822051E32D6830231B04FDE0 /* ListaPreventiviView.swift in Sources */,
+				D0B9B8F66F1C12D909B1CEA9 /* PDFPreventivoView.swift in Sources */,
+				E3E6267F3038DC1DD6429160 /* RisultatoPanoramaView.swift in Sources */,
+				FB6B50967C6052A165C60BC1 /* ShutterButton.swift in Sources */,
+				7173DDC306E4219F39ECB625 /* TapWallPlaneView.swift in Sources */,
+				8CCCCE939DF41BBA325A945D /* Theme.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
