@@ -83,7 +83,7 @@ def test_stitch_images_via_files(tmp_path: Path):
         cv2.imwrite(str(p), t)
         paths.append(str(p))
     result, info = stitch_images(paths)
-    # cv2.Stitcher PANORAMA potrebbe fallire (texture random, no scene 3D coerente):
-    # accettiamo sia il successo del PANORAMA che il fallback ORB.
-    assert info["method"] in {"panorama", "orb"}
+    # cv2.Stitcher può fallire (texture random, no scene 3D coerente):
+    # accettiamo qualsiasi metodo che produca un output usabile.
+    assert info["method"] in {"scans", "panorama", "orb"}
     assert info["n_photos"] == 2

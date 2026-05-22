@@ -33,14 +33,29 @@ def stitch_images(image_paths: list[str]) -> tuple[np.ndarray, dict]:
     if len(images) == 1:
         return images[0], {"method": "single", "n_photos": 1, "warning": None}
 
-    # 1) Tentativo con cv2.Stitcher PANORAMA.
-    stitcher = cv2.Stitcher_create(cv2.Stitcher_PANORAMA)
-    status, pano = stitcher.stitch(images)
-    if status == cv2.Stitcher_OK and pano is not None:
-        return pano, {"method": "panorama", "n_photos": len(images), "warning": None}
+    # 1) Tentativo con cv2.Stitcher SCANS (modello planare, ideale per facciate).
+    #    Stessa pipeline di PANORAMA ma usa un PlaneWarper invece di cilindrico/sferico,
+    #    quindi le linee dritte di una facciata restano dritte invece di curvarsi.
+    scans = cv2.Stitcher_create(cv2.Stitcher_SCANS)
+    s_status, s_pano = scans.stitch(images)
+    if s_status == cv2.Stitcher_OK and s_pano is not None:
+        return s_pano, {"method": "scans", "n_photos": len(images), "warning": None}
 
-    # 2) Fallback ORB+findHomography.
-    return orb_stitch(images, primary_status=status)
+    # 2) Fallback PANORAMA (utile se l'utente fotografa ruotando, non traslando).
+    pano_s = cv2.Stitcher_create(cv2.Stitcher_PANORAMA)
+    p_status, p_pano = pano_s.stitch(images)
+    if p_status == cv2.Stitcher_OK and p_pano is not None:
+        return p_pano, {
+            "method": "panorama",
+            "n_photos": len(images),
+            "warning": "SCANS fallito (status=%d), fallback PANORAMA" % s_status,
+            "scans_status": int(s_status),
+        }
+
+    # 3) Fallback custom ORB+findHomography.
+    out, info = orb_stitch(images, primary_status=p_status)
+    info["scans_status"] = int(s_status)
+    return out, info
 
 
 def orb_stitch(images: list[np.ndarray], primary_status: Optional[int] = None) -> tuple[np.ndarray, dict]:

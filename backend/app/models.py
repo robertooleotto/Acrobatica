@@ -16,6 +16,11 @@ class ARMetadata(BaseModel):
     tracking_state: Optional[str] = None
     image_width: int
     image_height: int
+    # Normale del piano verticale ARKit sotto il reticle al momento dello scatto,
+    # in world coords (ARKit Y-up). Se presente, abilita keystone full-plane
+    # (orizzontali parallele oltre alle verticali). Assente se nessun ARPlaneAnchor
+    # verticale era stabile sotto il reticle.
+    wall_normal_world: Optional[list[float]] = Field(default=None, min_length=3, max_length=3)
 
 
 # Stati possibili di una sessione
@@ -63,6 +68,75 @@ class SessionState(BaseModel):
     result: Optional[ProcessResult] = None
     created_at: float
     updated_at: float
+
+
+class CornerTap(BaseModel):
+    """Un singolo tap di un angolo facciata su una specifica foto della sessione."""
+    photo_order_index: int
+    pixel: tuple[float, float] = Field(..., description="Coordinate pixel ARKit raw (origine top-left)")
+
+
+class TriangulateRequest(BaseModel):
+    """4 angoli della facciata, ognuno tappato su >= 2 foto per triangolare in 3D."""
+    corners: list[list[CornerTap]] = Field(..., min_length=4, max_length=4,
+                                            description="4 liste di tap (TL, TR, BR, BL), ognuna con >= 2 elementi")
+
+
+class TriangulateResult(BaseModel):
+    corners_3d: list[tuple[float, float, float]] = Field(..., min_length=4, max_length=4)
+    width_m: float
+    height_m: float
+    area_m2: float
+    warnings: list[str] = []
+
+
+class KeystonePhotoResult(BaseModel):
+    """Risultato per UNA foto raddrizzata."""
+    order_index: int
+    original_url: str
+    rectified_url: str
+    pitch_deg: float
+    roll_deg: float
+    yaw_deg: float
+    input_size: tuple[int, int]
+    output_size: tuple[int, int]
+
+
+class KeystoneSessionResult(BaseModel):
+    photos: list[KeystonePhotoResult] = []
+    warnings: list[str] = []
+
+
+class WallPlaneModel(BaseModel):
+    """Piano del muro in world coords + basis 2D per il rendering ortografico."""
+    point:  tuple[float, float, float]
+    normal: tuple[float, float, float]
+    right:  tuple[float, float, float]
+    up:     tuple[float, float, float]
+    u_min: float
+    u_max: float
+    v_min: float
+    v_max: float
+
+    @property
+    def width_m(self) -> float:  return self.u_max - self.u_min
+    @property
+    def height_m(self) -> float: return self.v_max - self.v_min
+
+
+class OrthorectifyPhotoResult(BaseModel):
+    order_index: int
+    ortho_url: str
+    pre_rotated_cw: bool
+    output_size: tuple[int, int]
+    pixels_per_meter: float
+
+
+class OrthorectifySessionResult(BaseModel):
+    wall_plane: WallPlaneModel
+    photos: list[OrthorectifyPhotoResult] = []
+    composite_url: Optional[str] = None
+    warnings: list[str] = []
 
 
 class CreateSessionResponse(BaseModel):

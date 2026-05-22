@@ -10,3 +10,6 @@ coverage/
 .env
 .env.local
 ios/Pods/
+
+# Claude Code worktrees / agent transcripts
+.claude/
