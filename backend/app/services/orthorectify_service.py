@@ -71,6 +71,7 @@ def fit_plane_from_points(
     world_up: tuple[float, float, float] = (0.0, 1.0, 0.0),
     pad_m: float = 0.0,
     assume_vertical: bool = True,
+    face_toward: tuple[float, float, float] | None = None,
 ) -> WallPlane:
     """Best-fit plane via SVD sui punti centrati. Calcola anche right/up assi 2D
     sul piano: `up` ≈ world_up proiettato (per facciate, ≈ verticale), `right` =
@@ -133,6 +134,16 @@ def fit_plane_from_points(
         if n_up < 1e-6:
             raise ValueError("piano degenere")
     up_axis = up_proj / n_up
+
+    # Orienta la normale verso `face_toward` (tipicamente la posizione media
+    # delle camere). Evita l'ambiguità di segno del SVD che, se la normale
+    # uscisse opposta alle camere, romperebbe il filtro `t > 0` delle
+    # ray-plane intersections downstream e la proiezione ortografica.
+    if face_toward is not None:
+        target = np.asarray(face_toward, dtype=np.float64)
+        if float(np.dot(normal, target - centroid)) < 0:
+            normal = -normal
+
     right_axis = np.cross(up_axis, normal)
     right_axis = right_axis / np.linalg.norm(right_axis)
 
@@ -264,11 +275,17 @@ def orthorectify_photo(
     return out, info
 
 
-def composite_orthos(orthos: list[np.ndarray]) -> np.ndarray:
-    """Compone N immagini ortografiche dello STESSO piano (= stesse dimensioni)
-    in un panorama unico, prendendo per ogni pixel il valore massimo non-nero
-    (oppure mediano se sufficienti) tra le foto che lo coprono. Semplice ma
-    robusto contro i bordi neri delle singole foto.
+def composite_orthos(orthos: list[np.ndarray], method: str = "best_source") -> np.ndarray:
+    """Compone N immagini ortografiche dello STESSO piano in un panorama unico.
+
+    Modalità:
+      - "best_source" (default): per ogni pixel del panorama prende SOLO la foto
+        dove quel pixel è più "centrale" nella sua zona di copertura (peso =
+        distance transform della maschera). Niente media → niente ghosting da
+        misalignment ARKit. Bordi tra foto hanno una transizione netta ma
+        senza fantasmi.
+      - "average": media pesata di tutte le foto che coprono un pixel. Più
+        morbido ma soggetto a fantasmi quando le pose ARKit drift-ano.
     """
     if not orthos:
         raise ValueError("no orthos")
@@ -276,10 +293,27 @@ def composite_orthos(orthos: list[np.ndarray]) -> np.ndarray:
     for o in orthos:
         if o.shape[:2] != (H, W):
             raise ValueError("orthos non hanno tutte la stessa dimensione")
-    stack = np.stack(orthos, axis=0)  # (N, H, W, 3)
-    mask = (stack.sum(axis=-1, keepdims=True) > 0)  # (N, H, W, 1)
-    # Media solo dove c'è copertura.
-    sums = (stack * mask).sum(axis=0)
-    counts = mask.sum(axis=0).clip(min=1)
-    avg = (sums / counts).astype(np.uint8)
-    return avg
+    stack = np.stack(orthos, axis=0).astype(np.float32)   # (N, H, W, 3)
+    masks = (stack.sum(axis=-1) > 0).astype(np.uint8)     # (N, H, W)
+
+    if method == "average":
+        msum = masks[..., None]
+        sums = (stack * msum).sum(axis=0)
+        counts = msum.sum(axis=0).clip(min=1)
+        return (sums / counts).astype(np.uint8)
+
+    # best_source: per ogni foto, distance transform della sua maschera =
+    # quanto è "interno" un pixel rispetto al bordo della copertura.
+    # Argmax pixel-wise sui pesi → seleziona la foto migliore.
+    weights = np.zeros((len(orthos), H, W), dtype=np.float32)
+    for i, m in enumerate(masks):
+        dt = cv2.distanceTransform(m, cv2.DIST_L2, 3)
+        weights[i] = dt
+
+    best = weights.argmax(axis=0)   # (H, W) indice della foto migliore per pixel
+    any_cov = masks.any(axis=0)     # (H, W) c'è almeno una foto?
+    out = np.zeros((H, W, 3), dtype=np.uint8)
+    for i in range(len(orthos)):
+        sel = (best == i) & any_cov & (masks[i].astype(bool))
+        out[sel] = orthos[i][sel]
+    return out

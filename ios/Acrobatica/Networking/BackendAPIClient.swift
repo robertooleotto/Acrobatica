@@ -203,6 +203,58 @@ actor BackendAPIClient {
         return try JSONDecoder().decode(OrthoSessionResult.self, from: data)
     }
 
+    // MARK: - Rettifica facciata 2D via 4-tap (NUOVO FLOW)
+
+    struct RectifyPanoramaRequest: Codable {
+        let src_quad: [[Double]]     // 4 punti TL, TR, BR, BL
+        let source: String           // "stitched" | "composite"
+        let output_max_dim: Int
+    }
+
+    struct RectifyPanoramaResult: Codable {
+        let rectified_url: String
+        let output_size: [Int]
+        let homography_3x3: [[Double]]
+    }
+
+    func rectifyPanorama(sessionId: String,
+                         srcQuad: [(Double, Double)],
+                         source: String = "stitched",
+                         outputMaxDim: Int = 2400) async throws -> RectifyPanoramaResult {
+        let url = baseURL.appendingPathComponent("/facade-sessions/\(sessionId)/rectify-panorama")
+        var req = URLRequest(url: url); req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body = RectifyPanoramaRequest(
+            src_quad: srcQuad.map { [$0.0, $0.1] },
+            source: source, output_max_dim: outputMaxDim,
+        )
+        req.httpBody = try JSONEncoder().encode(body)
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        try assertHTTPOK(resp, data: data)
+        return try JSONDecoder().decode(RectifyPanoramaResult.self, from: data)
+    }
+
+    struct SetScaleRequest: Codable {
+        let p1: [Double]; let p2: [Double]; let distance_m: Double
+    }
+    struct SetScaleResult: Codable {
+        let meters_per_pixel: Double
+        let facade_width_m: Double?
+        let facade_height_m: Double?
+    }
+    func setScale(sessionId: String,
+                  p1: (Double, Double), p2: (Double, Double),
+                  distanceM: Double) async throws -> SetScaleResult {
+        let url = baseURL.appendingPathComponent("/facade-sessions/\(sessionId)/scale")
+        var req = URLRequest(url: url); req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body = SetScaleRequest(p1: [p1.0, p1.1], p2: [p2.0, p2.1], distance_m: distanceM)
+        req.httpBody = try JSONEncoder().encode(body)
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        try assertHTTPOK(resp, data: data)
+        return try JSONDecoder().decode(SetScaleResult.self, from: data)
+    }
+
     // MARK: - Keystone (Step 2: foto raddrizzate singolarmente)
 
     struct KeystonePhotoResult: Codable, Identifiable {

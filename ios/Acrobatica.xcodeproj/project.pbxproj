@@ -19,6 +19,7 @@
 		822051E32D6830231B04FDE0 /* ListaPreventiviView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BB324F04816C2F0232B916F /* ListaPreventiviView.swift */; };
 		870811DCDE5C135871522F3E /* FirmaClienteView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC222326D094F56C881CB927 /* FirmaClienteView.swift */; };
 		8CCCCE939DF41BBA325A945D /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5539BCECE5689D083EFC227D /* Theme.swift */; };
+		93C526665DDE161B6F6198B4 /* MeasureScaleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 863870D7CB1F9B497A9F7501 /* MeasureScaleView.swift */; };
 		95C290024223B84A86688B8C /* AcrobaticaApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6C202BCFA7055D0E02D5ECD /* AcrobaticaApp.swift */; };
 		A201361AB22694F8A23394FC /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 578FA7BB14F86217CFEBCC1F /* Assets.xcassets */; };
 		A72C629727199E4A5C16790E /* DettaglioCantiereView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3131FAD44663090F22DE9AB /* DettaglioCantiereView.swift */; };
@@ -29,6 +30,7 @@
 		E3E6267F3038DC1DD6429160 /* RisultatoPanoramaView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A8E376261B27EA74B81C490 /* RisultatoPanoramaView.swift */; };
 		EFD0D633027E9752E22196D9 /* ARPreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59DAFDD7F2EB30EEBEB66FD8 /* ARPreviewView.swift */; };
 		FB6B50967C6052A165C60BC1 /* ShutterButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = D80C56BDFB1904F88745BAA2 /* ShutterButton.swift */; };
+		FF556CD6897B68CD73CCE167 /* RectifyFacadeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57FEA8EBFAA241D57DF68DA8 /* RectifyFacadeView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -38,11 +40,13 @@
 		4AAB2ADE8C35D061B5FD941E /* FacadeCaptureSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FacadeCaptureSession.swift; sourceTree = "<group>"; };
 		5539BCECE5689D083EFC227D /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		578FA7BB14F86217CFEBCC1F /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		57FEA8EBFAA241D57DF68DA8 /* RectifyFacadeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RectifyFacadeView.swift; sourceTree = "<group>"; };
 		59DAFDD7F2EB30EEBEB66FD8 /* ARPreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ARPreviewView.swift; sourceTree = "<group>"; };
 		5FACDED47CEB242E07978EE6 /* PDFPreventivoView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PDFPreventivoView.swift; sourceTree = "<group>"; };
 		6A8E376261B27EA74B81C490 /* RisultatoPanoramaView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RisultatoPanoramaView.swift; sourceTree = "<group>"; };
 		6F6CF9B766C137FCC0821F72 /* BrandButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrandButton.swift; sourceTree = "<group>"; };
 		76BB94EDE2BAE0D54BA99139 /* CatturaARView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatturaARView.swift; sourceTree = "<group>"; };
+		863870D7CB1F9B497A9F7501 /* MeasureScaleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeasureScaleView.swift; sourceTree = "<group>"; };
 		8B3ECBCD2B0B463BAE03F0E2 /* Acrobatica.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Acrobatica.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		8E64A5DA5F2EC4D5C981EA98 /* AnteprimaPreventivoView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnteprimaPreventivoView.swift; sourceTree = "<group>"; };
 		92D7F6D5CC7B960A9E720E63 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -135,7 +139,9 @@
 				F3131FAD44663090F22DE9AB /* DettaglioCantiereView.swift */,
 				CC222326D094F56C881CB927 /* FirmaClienteView.swift */,
 				9BB324F04816C2F0232B916F /* ListaPreventiviView.swift */,
+				863870D7CB1F9B497A9F7501 /* MeasureScaleView.swift */,
 				5FACDED47CEB242E07978EE6 /* PDFPreventivoView.swift */,
+				57FEA8EBFAA241D57DF68DA8 /* RectifyFacadeView.swift */,
 				6A8E376261B27EA74B81C490 /* RisultatoPanoramaView.swift */,
 				F4EB3402A0E87FE94AC35FEC /* TapWallPlaneView.swift */,
 			);
@@ -248,7 +254,9 @@
 				3D39741B48AA0D8F6CAA1284 /* FrameStrip.swift in Sources */,
 				7935F22E7734E3FA5FEF36B2 /* GlassPill.swift in Sources */,
 				822051E32D6830231B04FDE0 /* ListaPreventiviView.swift in Sources */,
+				93C526665DDE161B6F6198B4 /* MeasureScaleView.swift in Sources */,
 				D0B9B8F66F1C12D909B1CEA9 /* PDFPreventivoView.swift in Sources */,
+				FF556CD6897B68CD73CCE167 /* RectifyFacadeView.swift in Sources */,
 				E3E6267F3038DC1DD6429160 /* RisultatoPanoramaView.swift in Sources */,
 				FB6B50967C6052A165C60BC1 /* ShutterButton.swift in Sources */,
 				7173DDC306E4219F39ECB625 /* TapWallPlaneView.swift in Sources */,

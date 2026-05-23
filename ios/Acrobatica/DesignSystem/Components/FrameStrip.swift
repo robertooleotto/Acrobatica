@@ -28,46 +28,30 @@ struct FrameStrip: View {
     }
 }
 
-/// Panorama-style strip: mostra l'ULTIMA foto scattata come fascia verticale a
-/// sinistra, piena opacità sul bordo che sfuma verso destra in trasparenza.
-/// Mima la modalità Panorama di iPhone — l'operatore vede di che pezzo di muro
-/// stava chiudendo lo scatto precedente e mantiene un buon overlap.
-///
-/// Da posizionare nello stesso frame (aspect 3/4) dell'ARPreviewView così
-/// il bordo combacia col viewfinder live.
-struct PanoramaStripOverlay: View {
+/// Picture-in-Picture overlay: mostra l'ULTIMA foto scattata come miniatura in
+/// alto a sinistra del viewfinder, a piena scala (niente cropping). L'operatore
+/// può confrontare cosa c'è in quel quadrato con la vista live per mantenere
+/// continuità mentre pana lateralmente.
+struct PiPLastShotOverlay: View {
     let lastThumbnail: Data?
-    var widthFraction: CGFloat = 0.28          // 28% del viewfinder
-    var fadeStart: CGFloat = 0.55              // dove inizia il fade (0…1 nello strip)
+    var widthFraction: CGFloat = 0.36     // miniatura ~36% larghezza viewfinder
 
     var body: some View {
         GeometryReader { geo in
             if let data = lastThumbnail, let ui = UIImage(data: data) {
-                let stripW = geo.size.width * widthFraction
+                let pipW = geo.size.width * widthFraction
                 Image(uiImage: ui)
                     .resizable()
-                    .scaledToFill()
-                    .frame(width: stripW, height: geo.size.height, alignment: .trailing)
-                    .clipped()
-                    .mask(
-                        LinearGradient(
-                            stops: [
-                                .init(color: .black,                       location: 0.0),
-                                .init(color: .black.opacity(0.85),         location: fadeStart),
-                                .init(color: .clear,                       location: 1.0),
-                            ],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
+                    .scaledToFit()
+                    .frame(width: pipW)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Theme.yellow, lineWidth: 2)
                     )
-                    .overlay(alignment: .trailing) {
-                        // Hairline gialla al bordo destro per "marcare" la fine del frame
-                        // precedente — aiuta l'occhio a posizionare l'overlap.
-                        Rectangle()
-                            .fill(Theme.yellow.opacity(0.85))
-                            .frame(width: 1.5)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                    .shadow(color: .black.opacity(0.45), radius: 6, y: 2)
+                    .padding(.leading, 12)
+                    .padding(.top, 80)
                     .allowsHitTesting(false)
                     .transition(.opacity)
             }

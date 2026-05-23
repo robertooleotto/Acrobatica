@@ -10,7 +10,11 @@ struct RisultatoPanoramaView: View {
     @State private var keystoneUrls: [URL] = []
     @State private var modScala: Bool = false
     @State private var preventivoCreato: Preventivo?
-    @State private var showTapPiano = false
+    @State private var showTapPiano = false       // legacy: 3D-triangulation (sperimentale)
+    @State private var showRectifyFacade = false  // NUOVO: 2D homography 4-tap
+    @State private var showMeasureScale = false
+    @State private var rectifiedFacadeUrl: URL?
+    @State private var metersPerPixel: Double?
     @State private var orthoComposite: URL?
     @State private var errore: String?
 
@@ -38,6 +42,34 @@ struct RisultatoPanoramaView: View {
             }
         }
         .task(id: rilievo.id) { await elabora() }
+        .fullScreenCover(isPresented: $showRectifyFacade) {
+            if let sid = rilievo.sessionId, let pano = stitchedUrl {
+                RectifyFacadeView(
+                    sessionId: sid, panoramaURL: pano,
+                    onCompletato: { url in
+                        showRectifyFacade = false
+                        rectifiedFacadeUrl = url
+                        rilievo.panoramaUrl = url
+                        stitchedUrl = url
+                        // Auto-apertura step scala
+                        showMeasureScale = true
+                    },
+                    onAnnulla: { showRectifyFacade = false }
+                )
+            }
+        }
+        .fullScreenCover(isPresented: $showMeasureScale) {
+            if let sid = rilievo.sessionId, let rect = rectifiedFacadeUrl {
+                MeasureScaleView(
+                    sessionId: sid, rectifiedURL: rect,
+                    onCompletato: { mpp in
+                        showMeasureScale = false
+                        metersPerPixel = mpp
+                    },
+                    onAnnulla: { showMeasureScale = false }
+                )
+            }
+        }
         .fullScreenCover(isPresented: $showTapPiano) {
             if let sid = rilievo.sessionId {
                 TapWallPlaneView(
@@ -169,19 +201,23 @@ struct RisultatoPanoramaView: View {
 
     private var actionButtons: some View {
         VStack(spacing: 10) {
-            BrandButton(title: "Definisci piano muro (4 tap)", systemImage: "viewfinder.rectangular",
+            BrandButton(title: "Definisci facciata (4 tap)", systemImage: "viewfinder.rectangular",
                         kind: .primary) {
-                showTapPiano = true
+                showRectifyFacade = true
             }
-            .disabled(rilievo.sessionId == nil || rilievo.frameCatturati.isEmpty)
+            .disabled(rilievo.sessionId == nil || stitchedUrl == nil)
+
+            if rectifiedFacadeUrl != nil {
+                BrandButton(title: metersPerPixel == nil ? "Imposta scala (2 tap)" :
+                                "Scala impostata ✓ — rivedi",
+                            systemImage: "ruler", kind: .secondary) {
+                    showMeasureScale = true
+                }
+            }
+
             BrandButton(title: "Genera preventivo", systemImage: "doc.text.fill",
-                        kind: .secondary) {
+                        kind: .ghost) {
                 creaPreventivoDaRilievo()
-            }
-            BrandButton(title: modScala ? "Tocca 2 punti sul panorama" : "Definisci scala (2 tap)",
-                        systemImage: "ruler", kind: .ghost) {
-                modScala.toggle()
-                // TODO: enter scala-tap mode su una sub-view dedicata
             }
         }
     }

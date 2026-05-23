@@ -22,27 +22,15 @@ from dotenv import load_dotenv
 
 load_dotenv(ROOT / ".env")
 
-from app.services import session_store, storage_service
 from app.services.keystone_correction import keystone_correct
-from app.supabase_client import get_supabase
+from _session_source import SessionSource
 
 
-def resolve_session_id(prefix: str) -> str:
-    client = get_supabase()
-    res = client.table("facade_sessions").select("id").execute()
-    matches = [r["id"] for r in (res.data or []) if r["id"].startswith(prefix)]
-    if not matches:
-        raise SystemExit(f"Nessuna sessione con prefisso {prefix}")
-    if len(matches) > 1:
-        raise SystemExit(f"Prefisso ambiguo, match: {matches}")
-    return matches[0]
-
-
-def main(prefix: str) -> None:
-    sid = resolve_session_id(prefix)
-    print(f"Sessione: {sid}")
-
-    photos = session_store.list_photos(sid)
+def main(arg: str) -> None:
+    src = SessionSource.open(arg)
+    sid = src.sid
+    print(f"Sessione: {src.source_label}")
+    photos = src.photos
     print(f"Foto trovate: {len(photos)}")
     if not photos:
         raise SystemExit("Nessuna foto.")
@@ -80,8 +68,7 @@ def main(prefix: str) -> None:
             print(f"  [{order}] manca camera_transform, skip")
             continue
 
-        raw = storage_service.download_bytes(p["storage_path"])
-        img = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
+        img = src.load_image(p)
         if img is None:
             print(f"  [{order}] decode fallito, skip")
             continue
@@ -111,5 +98,5 @@ def main(prefix: str) -> None:
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        raise SystemExit("Uso: python scripts/run_keystone_local.py <session_id_prefix>")
+        raise SystemExit("Uso: python scripts/run_keystone_local.py <session_prefix|fixture_dir>")
     main(sys.argv[1])

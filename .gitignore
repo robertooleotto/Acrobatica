@@ -13,3 +13,6 @@ ios/Pods/
 
 # Claude Code worktrees / agent transcripts
 .claude/
+
+# Local Supabase session dumps for offline testing
+backend/data/fixtures/

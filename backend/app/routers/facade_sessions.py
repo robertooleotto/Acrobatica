@@ -26,7 +26,11 @@ from ..models import (
     OrthorectifySessionResult,
     ProcessRequest,
     ProcessResult,
+    RectifyPanoramaRequest,
+    RectifyPanoramaResult,
     SessionState,
+    SetScaleRequest,
+    SetScaleResult,
     TriangulateRequest,
     TriangulateResult,
     UploadPhotoResponse,
@@ -490,3 +494,94 @@ def orthorectify_session(session_id: str, pixels_per_meter: float = 200):
 def _iso_to_epoch(iso: str) -> float:
     from datetime import datetime
     return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+
+
+# ─── Rettifica facciata 2D via 4-tap (NUOVO FLOW PRINCIPALE) ────────────────
+
+@router.post("/{session_id}/rectify-panorama", response_model=RectifyPanoramaResult)
+def rectify_panorama(session_id: str, req: RectifyPanoramaRequest):
+    """Rettifica la facciata via 4-tap homography 2D sul panorama esistente.
+
+    Più robusta del fit 3D triangolato (vedi discussione 2026-05-22): non
+    dipende da ARKit pose, non ha problemi con elementi rientranti come
+    porte/vetrine. L'utente è responsabile di scegliere 4 punti sul muro
+    principale.
+    """
+    from ..services.rectify_facade import rectify_quad_to_rect, validate_quad
+
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        raise HTTPException(404, "Sessione non trovata")
+
+    # Carica il panorama dalla sorgente scelta
+    src_name = "stitched.jpg" if req.source == "stitched" else "composite.jpg"
+    src_path = storage_service.out_path(session_id, src_name)
+    try:
+        raw = storage_service.download_bytes(src_path)
+    except Exception as e:
+        raise HTTPException(409, f"Sorgente '{src_name}' non trovata: chiama prima /process o /orthorectify. ({e})")
+    img = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        raise HTTPException(500, "Decode sorgente fallito")
+
+    H_img, W_img = img.shape[:2]
+    err = validate_quad(req.src_quad, W_img, H_img)
+    if err:
+        raise HTTPException(400, f"Validazione 4-tap fallita: {err}")
+
+    rectified, info = rectify_quad_to_rect(img, req.src_quad,
+                                            output_max_dim=req.output_max_dim)
+    ok, buf = cv2.imencode(".jpg", rectified, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    if not ok:
+        raise HTTPException(500, "Encode rettificato fallito")
+    out_path = storage_service.out_path(session_id, "rectified_facade.jpg")
+    storage_service.upload_bytes(out_path, buf.tobytes(), "image/jpeg")
+    return RectifyPanoramaResult(
+        rectified_url=storage_service.signed_url(out_path, expires_in_sec=3600),
+        output_size=info.output_size,
+        homography_3x3=info.homography_3x3,
+    )
+
+
+# ─── Scala metrica (2 tap + distanza nota sul rectified_facade) ─────────────
+
+@router.post("/{session_id}/scale", response_model=SetScaleResult)
+def set_scale(session_id: str, req: SetScaleRequest):
+    """Calcola e salva meters/pixel dato 2 tap utente + distanza reale.
+
+    Aspettativa: i 2 tap sono in pixel del rectified_facade.jpg (non del
+    panorama originale). L'utente sa esattamente la distanza fisica fra i
+    2 punti (es. larghezza di una finestra nota, altezza di una porta nota).
+    """
+    from ..services.rectify_facade import meters_per_pixel
+
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        raise HTTPException(404, "Sessione non trovata")
+
+    try:
+        mpp = meters_per_pixel(req.p1, req.p2, req.distance_m)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    # Recupera dimensioni del rettificato per calcolare width/height in metri
+    fw_m = fh_m = None
+    try:
+        raw = storage_service.download_bytes(storage_service.out_path(session_id, "rectified_facade.jpg"))
+        img = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if img is not None:
+            fh_m = float(img.shape[0] * mpp)
+            fw_m = float(img.shape[1] * mpp)
+    except Exception:
+        pass  # se rettificato non esiste ancora, ritorniamo solo mpp
+
+    # Persisti in session.result (jsonb) per consultazioni successive
+    existing = sess.get("result") or {}
+    existing["scale_meters_per_pixel"] = mpp
+    if fw_m is not None: existing["facade_width_m"] = fw_m
+    if fh_m is not None: existing["facade_height_m"] = fh_m
+    session_store.update_session(session_id, {"result": existing})
+
+    return SetScaleResult(
+        meters_per_pixel=mpp, facade_width_m=fw_m, facade_height_m=fh_m,
+    )

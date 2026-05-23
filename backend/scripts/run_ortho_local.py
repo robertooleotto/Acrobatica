@@ -27,22 +27,12 @@ from dotenv import load_dotenv
 
 load_dotenv(ROOT / ".env")
 
-from app.services import session_store, storage_service, triangulation_service
+from app.services import triangulation_service
 from app.services.triangulation_service import CameraPose
 from app.services.orthorectify_service import (
     fit_plane_from_points, orthorectify_photo, composite_orthos,
 )
-from app.supabase_client import get_supabase
-
-
-def resolve(prefix: str) -> str:
-    res = get_supabase().table("facade_sessions").select("id").execute()
-    matches = [r["id"] for r in (res.data or []) if r["id"].startswith(prefix)]
-    if not matches:
-        raise SystemExit(f"Nessuna sessione con prefisso {prefix}")
-    if len(matches) > 1:
-        raise SystemExit(f"Prefisso ambiguo: {matches}")
-    return matches[0]
+from _session_source import SessionSource
 
 
 def pose_from(meta: dict) -> CameraPose:
@@ -59,18 +49,18 @@ def landscape_aligned(img: np.ndarray, meta: dict) -> np.ndarray:
     return img
 
 
-def main(prefix: str) -> None:
-    sid = resolve(prefix)
-    photos = session_store.list_photos(sid)
+def main(arg: str) -> None:
+    src = SessionSource.open(arg)
+    sid = src.sid
+    photos = src.photos
     if len(photos) < 2:
         raise SystemExit("Servono almeno 2 foto.")
-    print(f"Sessione: {sid}  ({len(photos)} foto)")
+    print(f"Sessione: {src.source_label}  ({len(photos)} foto)")
 
-    # 1) Scarica + allinea tutte le foto.
+    # 1) Carica + allinea tutte le foto (da Supabase o da fixture).
     images: dict[int, np.ndarray] = {}
     for p in photos:
-        raw = storage_service.download_bytes(p["storage_path"])
-        img = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
+        img = src.load_image(p)
         if img is None:
             print(f"  [{p['order_index']}] decode fallito, skip"); continue
         images[p["order_index"]] = landscape_aligned(img, p["metadata"])
@@ -191,10 +181,10 @@ def main(prefix: str) -> None:
           f"v=[{plane.v_min:.2f},{plane.v_max:.2f}]  "
           f"({plane.width_m():.1f}m × {plane.height_m():.1f}m)")
 
-    # 7) Orthorectify tutte le foto + composite.
+    # 7) Orthorectify tutte le foto.
     out_dir = Path(f"/tmp/ortho_{sid[:8]}")
     out_dir.mkdir(parents=True, exist_ok=True)
-    orthos: list[np.ndarray] = []
+    orthos_by_photo: dict[int, np.ndarray] = {}
     paths: list[Path] = []
     for p in photos_loaded:
         try:
@@ -210,15 +200,68 @@ def main(prefix: str) -> None:
         path = out_dir / f"{p['order_index']:02d}_ortho.jpg"
         cv2.imwrite(str(path), ortho, [cv2.IMWRITE_JPEG_QUALITY, 88])
         print(f"  [{p['order_index']}] out={info.output_size}  ppm={info.pixels_per_meter:.1f}")
-        orthos.append(ortho)
+        orthos_by_photo[p["order_index"]] = ortho
         paths.append(path)
 
-    if len(orthos) >= 2:
-        comp = composite_orthos(orthos)
-        comp_path = out_dir / "00_composite.jpg"
-        cv2.imwrite(str(comp_path), comp, [cv2.IMWRITE_JPEG_QUALITY, 90])
-        print(f"\nComposite: {comp_path}  ({comp.shape[1]}×{comp.shape[0]} px)")
-        paths.insert(0, comp_path)
+    # 8) Cluster delle foto in "fasce" verticali per posizione camera (x, z mondo).
+    # Foto nella stessa colonna (alzando solo il pitch) avranno (x, z) molto vicine.
+    # Soglia 0.5 m: stesso cluster = entro 50 cm di X+Z.
+    def camera_xz(meta: dict) -> tuple[float, float]:
+        T = np.asarray(meta["camera_transform"], dtype=np.float64).reshape(4, 4, order="F")
+        return float(T[0, 3]), float(T[2, 3])
+
+    # Greedy clustering sulla sequenza temporale (order_index): nuovo cluster
+    # se ci si è spostati > 0.5 m rispetto al centroide del cluster corrente.
+    photos_with_ortho = [p for p in photos_loaded if p["order_index"] in orthos_by_photo]
+    clusters: list[list[dict]] = []
+    cur: list[dict] = []
+    cur_centroid: tuple[float, float] | None = None
+    SOGLIA_FASCIA = 0.5
+    for p in sorted(photos_with_ortho, key=lambda x: x["order_index"]):
+        x, z = camera_xz(p["metadata"])
+        if cur_centroid is None:
+            cur.append(p); cur_centroid = (x, z)
+        else:
+            cx, cz = cur_centroid
+            if ((x - cx) ** 2 + (z - cz) ** 2) ** 0.5 <= SOGLIA_FASCIA:
+                cur.append(p)
+                # aggiorna centroide come media
+                n = len(cur)
+                cur_centroid = (cx + (x - cx) / n, cz + (z - cz) / n)
+            else:
+                clusters.append(cur); cur = [p]; cur_centroid = (x, z)
+    if cur: clusters.append(cur)
+    print(f"\nFasce verticali rilevate: {len(clusters)}")
+    for i, c in enumerate(clusters):
+        x0, z0 = camera_xz(c[0]["metadata"])
+        print(f"  fascia {i+1}: {len(c)} foto, "
+              f"order_idx={[p['order_index'] for p in c]}, "
+              f"camera ≈ (x={x0:+.2f}, z={z0:+.2f})")
+
+    # 9) Composite per fascia (vertical strip composite) — drift quasi-zero
+    # perché le foto sono dalla stessa posizione.
+    fascia_composites: list[np.ndarray] = []
+    for i, cluster in enumerate(clusters):
+        cluster_orthos = [orthos_by_photo[p["order_index"]] for p in cluster]
+        if len(cluster_orthos) == 1:
+            fc = cluster_orthos[0]
+        else:
+            fc = composite_orthos(cluster_orthos, method="best_source")
+        fc_path = out_dir / f"fascia_{i+1:02d}.jpg"
+        cv2.imwrite(str(fc_path), fc, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        fascia_composites.append(fc)
+        paths.insert(0, fc_path)
+        print(f"  composite fascia {i+1}: {fc_path.name}")
+
+    # 10) Composite finale: cuci le fasce tra loro.
+    if len(fascia_composites) >= 2:
+        final = composite_orthos(fascia_composites, method="best_source")
+        final_path = out_dir / "00_composite_final.jpg"
+        cv2.imwrite(str(final_path), final, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        print(f"\nComposite FINALE (fasce cucite): {final_path}  ({final.shape[1]}×{final.shape[0]} px)")
+        paths.insert(0, final_path)
+    elif len(fascia_composites) == 1:
+        print(f"\nUna sola fascia rilevata, composite = fascia 1")
 
     print(f"\nApro {len(paths)} immagini in Preview…")
     subprocess.run(["open", "-a", "Preview", *[str(p) for p in paths]], check=False)
@@ -226,5 +269,5 @@ def main(prefix: str) -> None:
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        raise SystemExit("Uso: python scripts/run_ortho_local.py <session_prefix>")
+        raise SystemExit("Uso: python scripts/run_ortho_local.py <session_prefix|fixture_dir>")
     main(sys.argv[1])

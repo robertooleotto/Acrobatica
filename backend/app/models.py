@@ -107,6 +107,38 @@ class KeystoneSessionResult(BaseModel):
     warnings: list[str] = []
 
 
+# ─── Rettifica facciata 2D (4-tap homography sul panorama) ────────────────
+
+class RectifyPanoramaRequest(BaseModel):
+    """4 tap dell'utente sul panorama (ordine TL, TR, BR, BL) in coords pixel
+    del panorama stesso. Il backend rettifica e salva l'output."""
+    src_quad: list[tuple[float, float]] = Field(..., min_length=4, max_length=4,
+        description="4 punti TL/TR/BR/BL del muro principale, in pixel del panorama")
+    source: Literal["stitched", "composite"] = Field(default="stitched",
+        description="Quale immagine usare: 'stitched' (cv2.Stitcher) o 'composite' (ortho fasce)")
+    output_max_dim: int = 2400
+
+
+class RectifyPanoramaResult(BaseModel):
+    rectified_url: str
+    output_size: tuple[int, int]
+    homography_3x3: list[list[float]]
+
+
+# ─── Scala metrica (2 tap + distanza nota sul rettificato) ────────────────
+
+class SetScaleRequest(BaseModel):
+    p1: tuple[float, float]
+    p2: tuple[float, float]
+    distance_m: float = Field(..., gt=0, description="Distanza reale fra i 2 tap, in metri")
+
+
+class SetScaleResult(BaseModel):
+    meters_per_pixel: float
+    facade_width_m: Optional[float] = None      # se conosciamo size del rettificato
+    facade_height_m: Optional[float] = None
+
+
 class WallPlaneModel(BaseModel):
     """Piano del muro in world coords + basis 2D per il rendering ortografico."""
     point:  tuple[float, float, float]

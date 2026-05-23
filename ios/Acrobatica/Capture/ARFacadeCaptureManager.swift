@@ -39,6 +39,14 @@ final class ARFacadeCaptureManager: NSObject, ObservableObject {
     @Published private(set) var planeUnderReticleQuality: PlaneQuality = .hidden
     @Published private(set) var planeHitType: PlaneHitType = .none
     @Published private(set) var distanceFromLastCaptureM: Float? = nil
+    /// Baseline "smussata" (media mobile su ~1s). Più affidabile dell'istantaneo
+    /// per il chip UI: filtra il jitter di ARKit su scene povere di feature, dove
+    /// la stima posizionale può flickerare di metri tra frame consecutivi anche
+    /// se trackingState=normal.
+    @Published private(set) var distanceFromLastCaptureSmoothedM: Float? = nil
+    /// Buffer dei campioni di distanza degli ultimi N tick (250ms × 4 = 1s).
+    private var distanceSamples: [Float] = []
+    private let distanceSampleCount = 4
 
     /// LiDAR mesh: disabilitato di default. Deve restare opzionale.
     var enableSceneReconstructionMesh: Bool = false
@@ -151,7 +159,11 @@ final class ARFacadeCaptureManager: NSObject, ObservableObject {
             throw CaptureError.imageConversionFailed
         }
 
-        let uiImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .right)
+        // Saviamo il buffer in ARKit landscape NATIVO (orientation .up) — i pixel
+        // coincidono con il frame in cui K (camera_intrinsics) è espressa, quindi
+        // niente più mismatch buffer↔K nel backend. iOS Photos.app mostrerà
+        // le foto "di lato" ma per il pipeline di rilievo è il formato corretto.
+        let uiImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .up)
         guard let jpeg = uiImage.jpegData(compressionQuality: 0.88) else {
             throw CaptureError.encodingFailed
         }
@@ -180,6 +192,9 @@ final class ARFacadeCaptureManager: NSObject, ObservableObject {
             distanceFromLastCaptureM = 0
         }
         lastCaptureWorldPos = camPos
+        // Reset dei campioni: parte da zero dopo ogni cattura.
+        distanceSamples.removeAll()
+        distanceFromLastCaptureSmoothedM = 0
 
         // Normale del muro per il keystone full-plane (verticali + orizzontali).
         // Due fonti, in ordine di preferenza:
@@ -384,7 +399,18 @@ final class ARFacadeCaptureManager: NSObject, ObservableObject {
            let frame = arView.session.currentFrame {
             let cam = frame.camera.transform.columns.3
             let now = SIMD3<Float>(cam.x, cam.y, cam.z)
-            distanceFromLastCaptureM = simd_length(now - last)
+            let d = simd_length(now - last)
+            distanceFromLastCaptureM = d
+            // Media mobile su distanceSampleCount campioni (~1s a 250ms/tick).
+            // Filtra il jitter di ARKit su scene povere di feature dove la stima
+            // posizionale flickera anche se trackingState=normal.
+            distanceSamples.append(d)
+            if distanceSamples.count > distanceSampleCount { distanceSamples.removeFirst() }
+            let avg = distanceSamples.reduce(0, +) / Float(distanceSamples.count)
+            // "Conservativo": prendi il MINIMO dei campioni invece della media, così
+            // un singolo picco non rende il chip verde — serve baseline stabile.
+            let conservative = distanceSamples.min() ?? d
+            distanceFromLastCaptureSmoothedM = min(avg, conservative)
         }
     }
 }

@@ -24,10 +24,10 @@ struct CatturaARView: View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            // 1) Live AR + panorama strip nello STESSO frame 3:4 così i bordi combaciano.
+            // 1) Live AR + PiP dell'ultimo scatto nello stesso frame 3:4.
             ZStack {
                 ARPreviewView(manager: capture)
-                PanoramaStripOverlay(lastThumbnail: rilievo.frameCatturati.last?.thumbnailImage)
+                PiPLastShotOverlay(lastThumbnail: rilievo.frameCatturati.last?.thumbnailImage)
                     .animation(.easeOut(duration: 0.35), value: rilievo.frameCatturati.count)
             }
             .aspectRatio(3.0 / 4.0, contentMode: .fit)
@@ -85,7 +85,7 @@ struct CatturaARView: View {
         VStack(spacing: 8) {
             // Baseline / spostamento dall'ultimo scatto.
             // Per un piano del muro triangolabile servono ≥ 60-80 cm tra scatti.
-            if !rilievo.frameCatturati.isEmpty, let d = capture.distanceFromLastCaptureM {
+            if !rilievo.frameCatturati.isEmpty, let d = capture.distanceFromLastCaptureSmoothedM {
                 baselineChip(meters: d)
             }
             if let testo = hintText {

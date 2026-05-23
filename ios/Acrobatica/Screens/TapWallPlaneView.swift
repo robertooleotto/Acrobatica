@@ -55,6 +55,7 @@ struct TapWallPlaneView: View {
 
             VStack(spacing: 12) {
                 header
+                istruzioni
                 cornerPicker
                 photoArea
                 thumbnailStrip
@@ -65,6 +66,31 @@ struct TapWallPlaneView: View {
         .alert("Errore", isPresented: Binding(get: { errore != nil }, set: { if !$0 { errore = nil } })) {
             Button("OK") { errore = nil }
         } message: { Text(errore ?? "") }
+    }
+
+    /// Istruzioni sopra al picker — chiariscono che serve tappare lo STESSO angolo
+    /// su almeno 2 foto diverse (= triangolazione 3D del muro).
+    private var istruzioni: some View {
+        let tapsCount = (taps[corner] ?? []).count
+        let testo: String
+        if tapsCount == 0 {
+            testo = "Tappa l'angolo \(corner.rawValue) del muro su questa foto"
+        } else if tapsCount == 1 {
+            testo = "Ora cambia foto (in basso) e tappa lo STESSO angolo"
+        } else {
+            testo = "\(corner.rawValue) pronto. Scegli un altro angolo in alto."
+        }
+        return HStack(spacing: 8) {
+            Image(systemName: tapsCount >= 2 ? "checkmark.circle.fill" : "info.circle")
+                .foregroundStyle(tapsCount >= 2 ? Theme.success : Theme.navy)
+            Text(testo)
+                .font(Theme.Typo.body(13))
+                .foregroundStyle(Theme.navy)
+            Spacer()
+        }
+        .padding(.horizontal, 14).padding(.vertical, 8)
+        .background(Theme.yellow.opacity(0.20), in: RoundedRectangle(cornerRadius: 10))
+        .padding(.horizontal, 16)
     }
 
     // MARK: - Header
@@ -94,16 +120,22 @@ struct TapWallPlaneView: View {
     private var cornerPicker: some View {
         HStack(spacing: 6) {
             ForEach(Corner.allCases) { c in
+                let n = (taps[c] ?? []).count
+                let ok = n >= 2
                 Button { corner = c } label: {
                     HStack(spacing: 4) {
+                        if ok {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 11))
+                        }
                         Text(c.rawValue).font(.system(size: 12, weight: .bold))
-                        Text("(\((taps[c] ?? []).count))").font(.system(size: 10, weight: .semibold))
+                        Text("\(n)/2").font(.system(size: 10, weight: .semibold))
                     }
-                    .foregroundColor(c == corner ? Theme.yellow : Theme.navy)
+                    .foregroundColor(c == corner ? Theme.yellow : (ok ? Theme.success : Theme.navy))
                     .padding(.horizontal, 12).padding(.vertical, 8)
                     .background(c == corner ? Theme.navy : Theme.white)
                     .clipShape(Capsule())
-                    .overlay(Capsule().stroke(Theme.hair2, lineWidth: 1))
+                    .overlay(Capsule().stroke(ok ? Theme.success : Theme.hair2, lineWidth: 1))
                 }
             }
         }
@@ -211,7 +243,12 @@ struct TapWallPlaneView: View {
     // MARK: - Action buttons
 
     private var actionButtons: some View {
-        VStack(spacing: 8) {
+        let mancano = Corner.allCases.filter {
+            Set((taps[$0] ?? []).map { $0.photoIdx }).count < 2
+        }.map { $0.rawValue }
+        let titleOK = inviando ? "Calcolo…" : "Calcola piano + ortorettifica"
+        let titleKO = "Mancano tap per: \(mancano.joined(separator: ", "))"
+        return VStack(spacing: 8) {
             BrandButton(title: "Rimuovi tap angolo corrente (\(corner.rawValue))",
                         systemImage: "arrow.uturn.backward", kind: .ghost) {
                 if !(taps[corner] ?? []).isEmpty { taps[corner]?.removeLast() }
@@ -219,11 +256,13 @@ struct TapWallPlaneView: View {
             .disabled((taps[corner] ?? []).isEmpty)
             .opacity((taps[corner] ?? []).isEmpty ? 0.4 : 1)
 
-            BrandButton(title: inviando ? "Calcolo…" : "Calcola piano + ortorettifica",
-                        systemImage: "checkmark.circle.fill", kind: .primary) {
+            BrandButton(title: puoiInviare ? titleOK : titleKO,
+                        systemImage: puoiInviare ? "checkmark.circle.fill" : "info.circle",
+                        kind: .primary) {
                 Task { await inviaAlBackend() }
             }
             .disabled(!puoiInviare || inviando)
+            .opacity(puoiInviare ? 1 : 0.6)
         }
         .padding(.horizontal, 16)
     }
