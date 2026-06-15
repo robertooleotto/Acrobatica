@@ -1,0 +1,15 @@
+# Dipendenze pipeline Object Capture (mesh + texture + proiezione foto).
+# Headless, niente Blender. Installabili anche su Linux (backend).
+#
+#   pip install -r requirements.txt
+#
+# NB: pesanti. Sul container backend valutare un'immagine/worker dedicato,
+# non il web dyno principale (vedi PIPELINE.md).
+
+usd-core          # lettura usdz/usdc (pxr) per usdz_to_glb.py e usd_to_obj.py
+pygltflib         # (alternativa di assemblaggio GLB; usdz_to_glb.py non lo richiede)
+numpy
+opencv-python-headless   # proiezione foto (cv2)
+open3d            # raycast occlusione in project_photos_to_mesh.py
+
+# Validazione GLB (opzionale, via Node): npx --yes @gltf-transform/cli validate out.glb

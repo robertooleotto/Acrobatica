@@ -1,0 +1,88 @@
+<!doctype html>
+<meta charset="utf-8">
+<!--
+  Viewer di test per il GLB Object Capture (prodotto da usdz_to_glb.py --flip-v).
+  Serve la cartella con un server statico (es. `python3 -m http.server 8781`) e apri:
+    http://localhost:8781/viewer_glb.html?file=model_raw_webgl_flipv.glb
+  Camera frontale opzionale via model_raw_cam.json (con up.negate()).
+-->
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #202124; }
+  #info { position: absolute; top: 8px; left: 8px; color: #fff; font: 13px sans-serif; }
+</style>
+<div id="info">loading GLB...</div>
+<script type="importmap">
+{"imports":{"three":"https://unpkg.com/three@0.165.0/build/three.module.js","three/addons/":"https://unpkg.com/three@0.165.0/examples/jsm/"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const info = document.getElementById('info');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x202124);
+scene.add(new THREE.AmbientLight(0xffffff, 1));
+
+const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.001, 5000);
+const controls = new OrbitControls(camera, renderer.domElement);
+
+const params = new URLSearchParams(location.search);
+const modelFile = params.get('file') || 'model_raw_webgl_flipv.glb';
+const gltf = await new GLTFLoader().loadAsync(modelFile);
+scene.add(gltf.scene);
+
+let meshes = 0;
+gltf.scene.traverse((obj) => {
+  if (!obj.isMesh) return;
+  meshes++;
+  const materials = Array.isArray(obj.material) ? obj.material : [obj.material];
+  for (const mat of materials) {
+    if (!mat) continue;
+    mat.side = THREE.FrontSide;
+    if (mat.map) {
+      mat.map.colorSpace = THREE.SRGBColorSpace;
+      mat.map.generateMipmaps = false;       // atlante a isole piccole: niente mipmap
+      mat.map.minFilter = THREE.LinearFilter;
+      mat.map.magFilter = THREE.LinearFilter;
+      mat.map.anisotropy = renderer.capabilities.getMaxAnisotropy();
+      mat.map.needsUpdate = true;
+    }
+  }
+});
+
+const box = new THREE.Box3().setFromObject(gltf.scene);
+const center = box.getCenter(new THREE.Vector3());
+const size = box.getSize(new THREE.Vector3());
+const radius = Math.max(size.x, size.y, size.z);
+
+try {
+  const cam = await (await fetch('model_raw_cam.json')).json();
+  const c = new THREE.Vector3(...cam.center);
+  const viewDir = new THREE.Vector3(...cam.view_dir);
+  const up = new THREE.Vector3(...cam.up).negate();   // up del frame OC ≈ -Y
+  camera.position.copy(c.clone().addScaledVector(viewDir, -cam.radius * 0.7));
+  camera.up.copy(up);
+  controls.target.copy(c);
+} catch {
+  camera.position.set(center.x, center.y, center.z + radius * 1.4);
+  controls.target.copy(center);
+}
+controls.update();
+
+info.textContent = `${modelFile} · meshes ${meshes} · aniso ${renderer.capabilities.getMaxAnisotropy()}`;
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+renderer.setAnimationLoop(() => renderer.render(scene, camera));
+</script>
