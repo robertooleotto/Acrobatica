@@ -62,6 +62,14 @@ vertice. ~20s, ~99% copertura. Output morbido (per-vertice) — utile come layer
 le foto sul piano piatto, best-view per pixel, inpaint dei buchi → ortofoto per ogni
 poligono. È la **ri-texturizzazione** delle facce.
 
+### 6. Camera projection in WebGL (riproiezione foto, no UV) ✅
+Riproietta le foto sulla geometria/sul piano **dalla camera che le ha scattate** (stile
+Maya/3ds Max), senza usare le UV → niente deformazione da UV. Viewer in `web/`
+(`camera_projection_multi.html`, `oc_projection_compare.html`) + **auto-align robusto**
+di `shiftX/shiftY/focalScale` per foto. Dettagli, math e procedura:
+**`HANDOFF_camera_projection.md`**. TODO: occlusione (depth dal proiettore) e
+proiezione sul piano liscio.
+
 ---
 
 ## Note per il backend

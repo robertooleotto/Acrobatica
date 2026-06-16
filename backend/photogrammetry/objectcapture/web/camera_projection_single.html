@@ -1,0 +1,88 @@
+<!doctype html><meta charset="utf-8">
+<!-- Camera projection (projection mapping) di UNA foto sulla mesh OC, via shader.
+     Le UV della mesh NON vengono usate: per ogni frammento proietto la posizione
+     mondo attraverso la camera OC della foto. ?idx=120 sceglie la foto. -->
+<style>html,body{margin:0;height:100%;background:#202124;overflow:hidden}#info{position:absolute;top:8px;left:8px;color:#fff;font:13px sans-serif}</style>
+<div id="info">…</div>
+<script type="importmap">{"imports":{"three":"https://unpkg.com/three@0.165.0/build/three.module.js","three/addons/":"https://unpkg.com/three@0.165.0/examples/jsm/"}}</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+
+const params = new URLSearchParams(location.search);
+const IDX = params.get('idx') || '120';
+const info = document.getElementById('info');
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(devicePixelRatio); renderer.setSize(innerWidth,innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene(); scene.background = new THREE.Color(0x202124);
+const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.001, 5000);
+const controls = new OrbitControls(camera, renderer.domElement);
+
+// pose OC (nel frame della mesh) + foto
+const poses = await (await fetch('oc_poses_nobbox.json')).json();
+const pose = poses[IDX];
+const [fx,fy,cx,cy] = pose.intrinsics_fx_fy_cx_cy;
+const C = new THREE.Vector3(...pose.translation);
+const [qw,qx,qy,qz] = pose.rotation_wxyz;
+const R = new THREE.Matrix3().setFromMatrix4(
+  new THREE.Matrix4().makeRotationFromQuaternion(new THREE.Quaternion(qx,qy,qz,qw)));
+const photo = await new THREE.TextureLoader().loadAsync(`photos_web/${String(IDX).padStart(4,'0')}.jpg`);
+photo.colorSpace = THREE.SRGBColorSpace; photo.flipY = false;
+
+const mat = new THREE.ShaderMaterial({
+  side: THREE.DoubleSide,
+  uniforms: {
+    photo:{value:photo}, C:{value:C}, R:{value:R},
+    fx:{value:fx}, fy:{value:fy}, cx:{value:cx}, cy:{value:cy},
+    imgW:{value:1920.0}, imgH:{value:1440.0}, flipV:{value:1.0},
+  },
+  vertexShader:`
+    varying vec3 vWorld;
+    void main(){
+      vWorld = (modelMatrix * vec4(position,1.0)).xyz;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);
+    }`,
+  fragmentShader:`
+    precision highp float;
+    uniform sampler2D photo; uniform vec3 C; uniform mat3 R;
+    uniform float fx,fy,cx,cy,imgW,imgH,flipV;
+    varying vec3 vWorld;
+    void main(){
+      vec3 d = vWorld - C;
+      // Pc = R^T d  (colonne di R = assi camera in world)
+      vec3 Pc = vec3(dot(d,R[0]), dot(d,R[1]), dot(d,R[2]));
+      float z = -Pc.z;                       // forward = -Z (convenzione OC/ARKit)
+      vec3 base = vec3(0.22);                // grigio dove la foto non copre
+      if(z > 0.02){
+        float u = fx*Pc.x/z + cx;
+        float v = fy*Pc.y/z + cy;
+        vec2 t = vec2(u/imgW, v/imgH);
+        if(flipV > 0.5) t.y = 1.0 - t.y;
+        if(t.x>=0.0 && t.x<=1.0 && t.y>=0.0 && t.y<=1.0){
+          gl_FragColor = vec4(texture2D(photo, t).rgb, 1.0); return;
+        }
+      }
+      gl_FragColor = vec4(base, 1.0);
+    }`,
+});
+
+const grp = await new OBJLoader().loadAsync('model_nobbox.obj');
+grp.traverse(o=>{ if(o.isMesh) o.material = mat; });
+scene.add(grp);
+
+// camera di vista frontale
+try{
+  const cam = await (await fetch('model_nobbox_photo_cam.json')).json();
+  const c=new THREE.Vector3(...cam.center), vd=new THREE.Vector3(...cam.view_dir), up=new THREE.Vector3(...cam.up);
+  camera.position.copy(c.clone().addScaledVector(vd,-cam.radius*0.7)); camera.up.copy(up.negate()); controls.target.copy(c);
+}catch{ const b=new THREE.Box3().setFromObject(grp),ct=b.getCenter(new THREE.Vector3()),s=b.getSize(new THREE.Vector3());
+  camera.position.set(ct.x,ct.y,ct.z+Math.max(s.x,s.y,s.z)); controls.target.copy(ct); }
+controls.update();
+info.textContent = `camera projection · foto ${IDX} · fx=${fx.toFixed(0)} · (grigio = fuori dalla foto)`;
+addEventListener('keydown',e=>{ if(e.key==='v'){ mat.uniforms.flipV.value = 1.0 - mat.uniforms.flipV.value; } });
+addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
+renderer.setAnimationLoop(()=>renderer.render(scene,camera));
+</script>

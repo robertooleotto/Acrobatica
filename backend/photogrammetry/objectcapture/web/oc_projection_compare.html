@@ -1,0 +1,365 @@
+<!doctype html><meta charset="utf-8">
+<style>
+ html,body{margin:0;height:100%;background:#202124;overflow:hidden;font-family:sans-serif}
+ #panel{position:absolute;top:10px;left:10px;z-index:10;background:#1b1c1edd;border:1px solid #333;border-radius:8px;padding:10px;width:215px;color:#ddd}
+ h3{margin:0 0 8px;font-size:13px;font-weight:600}
+ button,select{display:block;width:100%;margin:5px 0;background:#2a2c30;color:#ddd;border:1px solid #444;border-radius:6px;padding:7px 10px;font-size:13px}
+ button{cursor:pointer;text-align:left}
+ button.on{background:#2f6fed;color:#fff;border-color:#2f6fed}
+ label{display:block;margin-top:8px;font-size:12px;color:#bbb}
+ input[type=range]{width:100%}
+ #stats{white-space:pre-wrap;font:12px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace;color:#c8c8c8;margin-top:8px}
+</style>
+<div id="panel">
+  <h3>nobbox OC + projection</h3>
+  <select id="photo"></select>
+  <button id="modeTexture" class="on">Texture OC</button>
+  <button id="modeWhite">Bianco / no texture</button>
+  <button id="modeProject">Proiezione foto</button>
+  <button id="modeBlend">Foto sopra OC</button>
+  <button id="poseOC" class="on">Pose OC</button>
+  <button id="poseAR">Pose ARKit→OC</button>
+  <button id="autoShift">Auto shift foto</button>
+  <label>Offset posa <span id="poseOffsetVal">0</span></label>
+  <input id="poseOffset" type="range" min="-10" max="10" step="1" value="0">
+  <button id="candidate">✓ Candidate map</button>
+  <button id="coverage">◩ Coverage</button>
+  <button id="wire">▤ Wireframe</button>
+  <button id="front" class="on">Vista frontale</button>
+  <button id="viewPhoto">▶ Vista camera foto</button>
+  <label>Front min <span id="frontVal">0.35</span></label>
+  <input id="frontMin" type="range" min="0" max="0.95" step="0.05" value="0.35">
+  <label>Border min <span id="borderVal">0.08</span></label>
+  <input id="borderMin" type="range" min="0" max="0.5" step="0.02" value="0.08">
+  <label>Opacita foto <span id="blendVal">0.50</span></label>
+  <input id="blendOpacity" type="range" min="0" max="1" step="0.02" value="0.50">
+  <label>Shift X px <span id="shiftXVal">0</span></label>
+  <input id="shiftX" type="range" min="-250" max="250" step="1" value="0">
+  <label>Shift Y px <span id="shiftYVal">0</span></label>
+  <input id="shiftY" type="range" min="-250" max="250" step="1" value="0">
+  <label>Scala focale <span id="focalVal">1.000</span></label>
+  <input id="focalScale" type="range" min="0.85" max="1.15" step="0.001" value="1">
+  <div id="stats">loading...</div>
+</div>
+<script type="importmap">{"imports":{"three":"https://unpkg.com/three@0.165.0/build/three.module.js","three/addons/":"https://unpkg.com/three@0.165.0/examples/jsm/"}}</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const INDICES = ['0000','0030','0060','0090','0120','0150','0180','0210','0240','0270','0300','0326'];
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(devicePixelRatio); renderer.setSize(innerWidth,innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene(); scene.background = new THREE.Color(0x202124);
+scene.add(new THREE.HemisphereLight(0xffffff,0x303030,1.4));
+const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.001, 5000);
+const controls = new OrbitControls(camera, renderer.domElement);
+
+const photoSel = document.getElementById('photo');
+for(const id of INDICES){
+  const o=document.createElement('option');
+  o.value=id; o.textContent=`Foto ${parseInt(id,10)}`;
+  if(id==='0060') o.selected=true;
+  photoSel.appendChild(o);
+}
+
+const ocPoses = await (await fetch('oc_poses_nobbox.json')).json();
+const arPoses = await (await fetch('arkit_poses_in_oc.json')).json();
+const calibrations = await fetch('projection_calibration.json').then(r=>r.json()).catch(()=>({}));
+let activePoses = ocPoses;
+let poseLabel = 'OC';
+let poseOffset = 0;
+const camcfg = await (await fetch('model_nobbox_photo_cam.json')).json();
+const tl = new THREE.TextureLoader();
+const U = {
+  photo:{value:null}, C:{value:new THREE.Vector3()}, R:{value:new THREE.Matrix3()}, intr:{value:new THREE.Vector4()},
+  imgW:{value:1920.0}, imgH:{value:1440.0}, flipV:{value:1.0},
+  candidate:{value:0.0}, coverage:{value:0.0}, frontMin:{value:0.35}, borderMin:{value:0.08}, blendOpacity:{value:0.50},
+  shift:{value:new THREE.Vector2(0,0)}, focalScale:{value:1.0}
+};
+
+const projectMat = new THREE.ShaderMaterial({
+  side:THREE.DoubleSide, uniforms:U,
+  vertexShader:`varying vec3 vWorld; varying vec3 vNormalW;
+    void main(){ vWorld=(modelMatrix*vec4(position,1.0)).xyz; vNormalW=normalize(mat3(modelMatrix)*normal); gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+  fragmentShader:`precision highp float;
+    uniform sampler2D photo; uniform vec3 C; uniform mat3 R; uniform vec4 intr;
+    uniform float imgW,imgH,flipV,candidate,coverage,frontMin,borderMin,focalScale; uniform vec2 shift;
+    varying vec3 vWorld; varying vec3 vNormalW;
+    void main(){
+      vec3 d=vWorld-C; vec3 Pc=vec3(dot(d,R[0]),dot(d,R[1]),dot(d,R[2])); float z=-Pc.z;
+      if(z<=0.02){ gl_FragColor=vec4(0.04,0.04,0.04,1.0); return; }
+      float u=(intr.x*focalScale)*Pc.x/z+intr.z+shift.x; float v=(intr.y*focalScale)*Pc.y/z+intr.w+shift.y; vec2 t=vec2(u/imgW,v/imgH); if(flipV>0.5) t.y=1.0-t.y;
+      if(t.x<0.0||t.x>1.0||t.y<0.0||t.y>1.0){ gl_FragColor=vec4(candidate>0.5?vec3(0.04):vec3(0.09),1.0); return; }
+      float front=max(0.0,dot(normalize(vNormalW),normalize(C-vWorld)));
+      float margin=min(min(t.x,1.0-t.x),min(t.y,1.0-t.y));
+      vec3 col=texture2D(photo,t).rgb;
+      if(candidate>0.5){
+        if(front<frontMin){ gl_FragColor=vec4(1.0,0.04,0.02,1.0); return; }
+        if(margin<borderMin){ gl_FragColor=vec4(1.0,0.62,0.02,1.0); return; }
+        float q=0.35+0.55*clamp((front-frontMin)/max(0.001,1.0-frontMin),0.0,1.0);
+        gl_FragColor=vec4(mix(col,vec3(0.0,1.0,0.25),q),1.0); return;
+      }
+      if(coverage>0.5){
+        float nx=(u-imgW*0.5)/(imgW*0.5), ny=(v-imgH*0.5)/(imgH*0.5);
+        float edge=1.0-clamp(sqrt(nx*nx+ny*ny),0.0,1.2)/1.2;
+        col=mix(vec3(0.0,0.1,0.8),vec3(1.0,0.9,0.0),edge);
+      }
+      gl_FragColor=vec4(col,1.0);
+    }`
+});
+
+const whiteMat = new THREE.MeshStandardMaterial({color:0xf2f2ee, roughness:0.82, metalness:0.0, side:THREE.DoubleSide});
+function makeBlendMat(ocMap){
+  return new THREE.ShaderMaterial({
+    side: THREE.DoubleSide,
+    uniforms: {
+      ocMap:{value:ocMap}, photo:U.photo, C:U.C, R:U.R, intr:U.intr, imgW:U.imgW, imgH:U.imgH, flipV:U.flipV, blendOpacity:U.blendOpacity,
+      shift:U.shift, focalScale:U.focalScale
+    },
+    vertexShader:`varying vec2 vUv; varying vec3 vWorld;
+      void main(){ vUv=uv; vWorld=(modelMatrix*vec4(position,1.0)).xyz; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+    fragmentShader:`precision highp float;
+      uniform sampler2D ocMap; uniform sampler2D photo; uniform vec3 C; uniform mat3 R; uniform vec4 intr;
+      uniform float imgW,imgH,flipV,blendOpacity,focalScale; uniform vec2 shift;
+      varying vec2 vUv; varying vec3 vWorld;
+      void main(){
+        vec3 base=texture2D(ocMap,vUv).rgb;
+        vec3 d=vWorld-C; vec3 Pc=vec3(dot(d,R[0]),dot(d,R[1]),dot(d,R[2])); float z=-Pc.z;
+        if(z<=0.02){ gl_FragColor=vec4(base,1.0); return; }
+        float u=(intr.x*focalScale)*Pc.x/z+intr.z+shift.x; float v=(intr.y*focalScale)*Pc.y/z+intr.w+shift.y; vec2 t=vec2(u/imgW,v/imgH); if(flipV>0.5) t.y=1.0-t.y;
+        if(t.x<0.0||t.x>1.0||t.y<0.0||t.y>1.0){ gl_FragColor=vec4(base,1.0); return; }
+        vec3 proj=texture2D(photo,t).rgb;
+        gl_FragColor=vec4(mix(base,proj,blendOpacity),1.0);
+      }`
+  });
+}
+
+const gltf = await new GLTFLoader().loadAsync('model_nobbox_webgl_flipv.glb');
+const grp = gltf.scene;
+const meshes = [];
+const ocMaterials = new Map();
+const blendMaterials = new Map();
+let triCount = 0;
+grp.traverse(o=>{
+  if(!o.isMesh) return;
+  o.geometry.computeVertexNormals();
+  meshes.push(o);
+  ocMaterials.set(o, o.material);
+  const mat = Array.isArray(o.material) ? o.material[0] : o.material;
+  const ocMap = mat && mat.map ? mat.map : null;
+  if(ocMap) blendMaterials.set(o, makeBlendMat(ocMap));
+  triCount += o.geometry.index ? o.geometry.index.count / 3 : o.geometry.attributes.position.count / 3;
+});
+scene.add(grp);
+const wire = new THREE.Group();
+for(const m of meshes){
+  const w = new THREE.LineSegments(
+    new THREE.WireframeGeometry(m.geometry),
+    new THREE.LineBasicMaterial({color:0x36ff8a,transparent:true,opacity:0.32})
+  );
+  m.updateWorldMatrix(true,false);
+  w.applyMatrix4(m.matrixWorld);
+  wire.add(w);
+}
+wire.visible=false; scene.add(wire);
+
+async function setPhoto(id){
+  const photoIndex = parseInt(id,10);
+  const cal = calibrations[id] || calibrations[String(photoIndex).padStart(4,'0')] || calibrations[String(photoIndex)];
+  if(cal){
+    activePoses = cal.poseSource === 'arkit' ? arPoses : ocPoses;
+    poseLabel = cal.poseSource === 'arkit' ? 'ARKit->OC' : 'OC';
+    poseOffset = Number(cal.poseOffset || 0);
+    U.shift.value.set(Number(cal.shiftX || 0), Number(cal.shiftY || 0));
+    U.focalScale.value = Number(cal.focalScale || 1);
+    document.getElementById('poseOC').classList.toggle('on', cal.poseSource !== 'arkit');
+    document.getElementById('poseAR').classList.toggle('on', cal.poseSource === 'arkit');
+    document.getElementById('poseOffset').value = poseOffset;
+    document.getElementById('poseOffsetVal').textContent = String(poseOffset);
+    document.getElementById('shiftX').value = U.shift.value.x;
+    document.getElementById('shiftY').value = U.shift.value.y;
+    document.getElementById('shiftXVal').textContent = String(Math.round(U.shift.value.x));
+    document.getElementById('shiftYVal').textContent = String(Math.round(U.shift.value.y));
+    document.getElementById('focalScale').value = U.focalScale.value;
+    document.getElementById('focalVal').textContent = U.focalScale.value.toFixed(3);
+  }
+  const poseIndex = photoIndex + poseOffset;
+  const p=activePoses[String(poseIndex)];
+  if(!p){
+    document.getElementById('stats').textContent=`foto ${photoIndex}\nposa ${poseIndex} non trovata`;
+    return;
+  }
+  const [fx,fy,cx,cy]=p.intrinsics_fx_fy_cx_cy;
+  const [qw,qx,qy,qz]=p.rotation_wxyz;
+  const R=new THREE.Matrix3().setFromMatrix4(new THREE.Matrix4().makeRotationFromQuaternion(new THREE.Quaternion(qx,qy,qz,qw)));
+  const photo=await tl.loadAsync(`photos_web/${id}.jpg`);
+  photo.colorSpace=THREE.SRGBColorSpace; photo.flipY=false;
+  U.photo.value=photo; U.C.value.set(...p.translation); U.R.value.copy(R); U.intr.value.set(fx,fy,cx,cy);
+  if(p.image_width) U.imgW.value=p.image_width;
+  if(p.image_height) U.imgH.value=p.image_height;
+  document.getElementById('stats').textContent=`model_nobbox_webgl_flipv.glb\nfoto ${photoIndex}\nposa ${poseIndex} (${poseLabel})\ntri ${Math.round(triCount).toLocaleString('it-IT')}\nC ${p.translation.map(x=>x.toFixed(2)).join(', ')}`;
+}
+async function setPoseSource(source){
+  activePoses = source === 'arkit' ? arPoses : ocPoses;
+  poseLabel = source === 'arkit' ? 'ARKit->OC' : 'OC';
+  document.getElementById('poseOC').classList.toggle('on', source !== 'arkit');
+  document.getElementById('poseAR').classList.toggle('on', source === 'arkit');
+  await setPhoto(photoSel.value);
+}
+function setMode(mode){
+  document.getElementById('modeTexture').classList.toggle('on', mode==='texture');
+  document.getElementById('modeWhite').classList.toggle('on', mode==='white');
+  document.getElementById('modeProject').classList.toggle('on', mode==='project');
+  document.getElementById('modeBlend').classList.toggle('on', mode==='blend');
+  for(const m of meshes){
+    m.material = mode==='texture' ? ocMaterials.get(m) : mode==='white' ? whiteMat : mode==='blend' ? (blendMaterials.get(m) || ocMaterials.get(m)) : projectMat;
+  }
+}
+function frontView(){
+  const c=new THREE.Vector3(...camcfg.center), vd=new THREE.Vector3(...camcfg.view_dir), up=new THREE.Vector3(...camcfg.up).negate();
+  camera.fov=45; camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix();
+  camera.position.copy(c.clone().addScaledVector(vd,-camcfg.radius*0.7)); camera.up.copy(up); controls.target.copy(c); controls.update();
+}
+function viewPhoto(){
+  const e=U.R.value.elements; const yAxis=new THREE.Vector3(e[3],e[4],e[5]); const zAxis=new THREE.Vector3(e[6],e[7],e[8]); const C=U.C.value;
+  camera.position.copy(C); camera.up.copy(yAxis); controls.target.copy(C.clone().addScaledVector(zAxis,-2.0));
+  camera.fov=2*Math.atan(U.imgH.value/(2*U.intr.value.y))*180/Math.PI; camera.aspect=U.imgW.value/U.imgH.value; camera.updateProjectionMatrix(); controls.update();
+}
+
+photoSel.onchange=e=>setPhoto(e.target.value);
+document.getElementById('modeTexture').onclick=()=>setMode('texture');
+document.getElementById('modeWhite').onclick=()=>setMode('white');
+document.getElementById('modeProject').onclick=()=>setMode('project');
+document.getElementById('modeBlend').onclick=()=>setMode('blend');
+document.getElementById('poseOC').onclick=()=>setPoseSource('oc');
+document.getElementById('poseAR').onclick=()=>setPoseSource('arkit');
+document.getElementById('autoShift').onclick=autoShiftCurrentPhoto;
+document.getElementById('candidate').onclick=e=>{ U.candidate.value=U.candidate.value>0.5?0:1; e.currentTarget.classList.toggle('on',U.candidate.value>0.5); setMode('project'); };
+document.getElementById('coverage').onclick=e=>{ U.coverage.value=U.coverage.value>0.5?0:1; e.currentTarget.classList.toggle('on',U.coverage.value>0.5); setMode('project'); };
+document.getElementById('wire').onclick=e=>{ wire.visible=!wire.visible; e.currentTarget.classList.toggle('on',wire.visible); };
+document.getElementById('front').onclick=frontView;
+document.getElementById('viewPhoto').onclick=viewPhoto;
+document.getElementById('frontMin').oninput=e=>{ U.frontMin.value=Number(e.target.value); document.getElementById('frontVal').textContent=U.frontMin.value.toFixed(2); };
+document.getElementById('borderMin').oninput=e=>{ U.borderMin.value=Number(e.target.value); document.getElementById('borderVal').textContent=U.borderMin.value.toFixed(2); };
+document.getElementById('blendOpacity').oninput=e=>{ U.blendOpacity.value=Number(e.target.value); document.getElementById('blendVal').textContent=U.blendOpacity.value.toFixed(2); };
+document.getElementById('poseOffset').oninput=async e=>{ poseOffset=Number(e.target.value); document.getElementById('poseOffsetVal').textContent=String(poseOffset); await setPhoto(photoSel.value); };
+document.getElementById('shiftX').oninput=e=>{ U.shift.value.x=Number(e.target.value); document.getElementById('shiftXVal').textContent=String(Math.round(U.shift.value.x)); };
+document.getElementById('shiftY').oninput=e=>{ U.shift.value.y=Number(e.target.value); document.getElementById('shiftYVal').textContent=String(Math.round(U.shift.value.y)); };
+document.getElementById('focalScale').oninput=e=>{ U.focalScale.value=Number(e.target.value); document.getElementById('focalVal').textContent=U.focalScale.value.toFixed(3); };
+
+// Estrae grigio + bordi dal canvas WebGL corrente, ridotto di `scale`.
+function captureGE(scale){
+  const src = renderer.domElement;
+  const w = Math.max(8, Math.floor(src.width/scale)), h = Math.max(8, Math.floor(src.height/scale));
+  const tmp = document.createElement('canvas'); tmp.width=w; tmp.height=h;
+  const ctx = tmp.getContext('2d',{willReadFrequently:true});
+  ctx.drawImage(src,0,0,w,h);
+  const data = ctx.getImageData(0,0,w,h).data;
+  const gray = new Float32Array(w*h);
+  for(let i=0,j=0;i<data.length;i+=4,j++) gray[j]=0.299*data[i]+0.587*data[i+1]+0.114*data[i+2];
+  const edge = new Float32Array(w*h);
+  for(let y=1;y<h-1;y++) for(let x=1;x<w-1;x++){
+    const k=y*w+x, gx=gray[k+1]-gray[k-1], gy=gray[k+w]-gray[k-w];
+    edge[k]=Math.sqrt(gx*gx+gy*gy);
+  }
+  return {w,h,gray,edge};
+}
+// Similarita' OC-render vs foto-proiettata (stessa camera, stessa griglia pixel):
+// NCC dei bordi (robusto all'esposizione) + NCC grigio, solo dove entrambe coperte.
+function alignScore(base, cand){
+  const N=base.w*base.h, ET=8.0;
+  let n=0,sa=0,sb=0,saa=0,sbb=0,sab=0;
+  let ng=0,ga=0,gb=0,gaa=0,gbb=0,gab=0;
+  for(let k=0;k<N;k++){
+    if(cand.gray[k]<=4 || base.gray[k]<=4) continue;   // fuori copertura/proiezione
+    const ag=base.gray[k], bg=cand.gray[k];
+    ng++; ga+=ag; gb+=bg; gaa+=ag*ag; gbb+=bg*bg; gab+=ag*bg;
+    if(base.edge[k]>ET || cand.edge[k]>ET){
+      const a=base.edge[k], b=cand.edge[k];
+      n++; sa+=a; sb+=b; saa+=a*a; sbb+=b*b; sab+=a*b;
+    }
+  }
+  if(n<300 || ng<1000) return -1e9;
+  const va=saa-sa*sa/n, vb=sbb-sb*sb/n; if(va<=1e-6||vb<=1e-6) return -1e9;
+  const eN=(sab-sa*sb/n)/Math.sqrt(va*vb);
+  let gN=0; const vga=gaa-ga*ga/ng, vgb=gbb-gb*gb/ng;
+  if(vga>1e-6&&vgb>1e-6) gN=(gab-ga*gb/ng)/Math.sqrt(vga*vgb);
+  return 0.75*eN + 0.25*gN;
+}
+async function autoShiftCurrentPhoto(){
+  const prevMode = document.getElementById('modeBlend').classList.contains('on') ? 'blend'
+    : document.getElementById('modeProject').classList.contains('on') ? 'project'
+    : document.getElementById('modeWhite').classList.contains('on') ? 'white' : 'texture';
+  const ox=U.shift.value.x, oy=U.shift.value.y, of=U.focalScale.value;
+  const prevCand=U.candidate.value, prevCov=U.coverage.value;
+  const saved={position:camera.position.clone(),up:camera.up.clone(),fov:camera.fov,aspect:camera.aspect,near:camera.near,far:camera.far,target:controls.target.clone()};
+  const savedPR=renderer.getPixelRatio(), savedW=renderer.domElement.style.width, savedH=renderer.domElement.style.height;
+
+  viewPhoto();
+  renderer.setPixelRatio(1); renderer.setSize(640,480,false);
+  const SCALE=2;
+  // base = OC renderizzato dalla camera della foto
+  setMode('texture');
+  await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+  renderer.render(scene,camera);
+  const base = captureGE(SCALE);
+  // foto proiettata via lo shader VERO (stesso modello di shift/focalScale)
+  setMode('project'); U.candidate.value=0; U.coverage.value=0;
+  const renderCand=(sx,sy,f)=>{ U.shift.value.set(sx,sy); U.focalScale.value=f; renderer.render(scene,camera); return captureGE(SCALE); };
+
+  let cur={x:ox,y:oy,f:of};
+  let curScore=alignScore(base, renderCand(cur.x,cur.y,cur.f));
+  const initScore=curScore;
+  const LIM=70, FLIM=0.035;                 // vincoli: niente salti di finestra
+  const shiftSteps=[6,3,1], focalSteps=[0.004,0.002,0.001];
+  for(let pass=0; pass<2; pass++){
+    for(const st of shiftSteps){
+      let improved=true;
+      while(improved){ improved=false; let mv=null;
+        for(const [ddx,ddy] of [[st,0],[-st,0],[0,st],[0,-st],[st,st],[st,-st],[-st,st],[-st,-st]]){
+          const nx=cur.x+ddx, ny=cur.y+ddy;
+          if(Math.abs(nx-ox)>LIM||Math.abs(ny-oy)>LIM) continue;
+          const s=alignScore(base, renderCand(nx,ny,cur.f));
+          if(s>curScore+1e-4){ curScore=s; mv={x:nx,y:ny}; improved=true; }
+        }
+        if(mv){ cur.x=mv.x; cur.y=mv.y; }
+      }
+    }
+    for(const fs of focalSteps){
+      let improved=true;
+      while(improved){ improved=false; let bf=null;
+        for(const df of [fs,-fs]){
+          const nf=cur.f+df; if(Math.abs(nf-of)>FLIM) continue;
+          const s=alignScore(base, renderCand(cur.x,cur.y,nf));
+          if(s>curScore+1e-4){ curScore=s; bf=nf; improved=true; }
+        }
+        if(bf!==null) cur.f=bf;
+      }
+    }
+  }
+  // applica solo se migliora davvero, altrimenti tieni la calibrazione manuale
+  if(curScore > initScore + 0.005){ U.shift.value.set(cur.x,cur.y); U.focalScale.value=cur.f; }
+  else { U.shift.value.set(ox,oy); U.focalScale.value=of; }
+
+  // ripristino render/camera/UI
+  renderer.setPixelRatio(savedPR); renderer.setSize(innerWidth,innerHeight);
+  renderer.domElement.style.width=savedW; renderer.domElement.style.height=savedH;
+  camera.position.copy(saved.position); camera.up.copy(saved.up); camera.fov=saved.fov; camera.aspect=saved.aspect;
+  camera.near=saved.near; camera.far=saved.far; camera.updateProjectionMatrix(); controls.target.copy(saved.target); controls.update();
+  U.candidate.value=prevCand; U.coverage.value=prevCov;
+  setMode(prevMode==='white'?'texture':prevMode);
+  document.getElementById('shiftX').value=U.shift.value.x; document.getElementById('shiftXVal').textContent=String(Math.round(U.shift.value.x));
+  document.getElementById('shiftY').value=U.shift.value.y; document.getElementById('shiftYVal').textContent=String(Math.round(U.shift.value.y));
+  document.getElementById('focalScale').value=U.focalScale.value; document.getElementById('focalVal').textContent=U.focalScale.value.toFixed(3);
+  document.getElementById('stats').textContent += `\nauto3 score ${curScore.toFixed(3)} (init ${initScore.toFixed(3)}) -> shift ${Math.round(U.shift.value.x)},${Math.round(U.shift.value.y)} focal ${U.focalScale.value.toFixed(3)}`;
+}
+
+const qp=new URLSearchParams(location.search); const initial=(qp.get('photo')||'0060').padStart(4,'0'); if(INDICES.includes(initial)) photoSel.value=initial;
+await setPhoto(photoSel.value);
+frontView();
+addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
+renderer.setAnimationLoop(()=>renderer.render(scene,camera));
+</script>

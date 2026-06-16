@@ -1,0 +1,142 @@
+<!doctype html><meta charset="utf-8">
+<!-- Camera projection multi-foto. Ogni foto e' un proiettore con un pulsante on/off
+     (tutte spente all'avvio). Pulsante "Vista frontale". Niente UV della mesh. -->
+<style>
+ html,body{margin:0;height:100%;background:#202124;overflow:hidden;font-family:sans-serif}
+ #panel{position:absolute;top:10px;left:10px;z-index:10;background:#1b1c1edd;border:1px solid #333;border-radius:8px;padding:10px;max-height:92vh;overflow:auto}
+ #panel h3{margin:0 0 8px;font-size:13px;color:#ddd;font-weight:500}
+ button{display:block;width:150px;margin:4px 0;background:#2a2c30;color:#ddd;border:1px solid #444;border-radius:6px;padding:7px 10px;font-size:13px;cursor:pointer;text-align:left}
+ button.on{background:#2f6fed;color:#fff;border-color:#2f6fed}
+ button.act{background:#1f7a3f;color:#fff;border-color:#1f7a3f}
+ .row{display:flex;gap:6px}.row button{width:72px;text-align:center}
+ .frow{display:flex;gap:4px;margin:4px 0}.frow button{margin:0}.frow .tog{width:110px}.frow .eye{width:34px;text-align:center}
+</style>
+<div id="panel"><h3>Camera projection</h3>
+  <button id="frontal" class="act">▣ Vista frontale</button>
+  <button id="wire">▤ Wireframe</button>
+  <div class="row"><button id="allon">tutte ON</button><button id="alloff">tutte OFF</button></div>
+  <div id="list"></div>
+</div>
+<script type="importmap">{"imports":{"three":"https://unpkg.com/three@0.165.0/build/three.module.js","three/addons/":"https://unpkg.com/three@0.165.0/examples/jsm/"}}</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+
+const MESH = new URLSearchParams(location.search).get('mesh') || 'model_nobbox.obj';
+const INDICES = ['0000','0030','0060','0090','0120','0150','0180','0210','0240','0270','0300','0326'];
+const N = INDICES.length;
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(devicePixelRatio); renderer.setSize(innerWidth,innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene(); scene.background = new THREE.Color(0x202124);
+const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.001, 5000);
+const controls = new OrbitControls(camera, renderer.domElement);
+
+const poses = await (await fetch('oc_poses_nobbox.json')).json();
+const tl = new THREE.TextureLoader();
+
+// uniforms per proiettore
+const U = { imgW:{value:1920.0}, imgH:{value:1440.0}, flipV:{value:1.0} };
+for (let i=0;i<N;i++){
+  const p = poses[String(parseInt(INDICES[i],10))];
+  const [fx,fy,cx,cy] = p.intrinsics_fx_fy_cx_cy;
+  const [qw,qx,qy,qz] = p.rotation_wxyz;
+  const R = new THREE.Matrix3().setFromMatrix4(new THREE.Matrix4().makeRotationFromQuaternion(new THREE.Quaternion(qx,qy,qz,qw)));
+  const tex = await tl.loadAsync(`photos_web/${INDICES[i]}.jpg`); tex.colorSpace=THREE.SRGBColorSpace; tex.flipY=false;
+  U['photo'+i]={value:tex};
+  U['C'+i]={value:new THREE.Vector3(...p.translation)};
+  U['R'+i]={value:R};
+  U['intr'+i]={value:new THREE.Vector4(fx,fy,cx,cy)};
+  U['en'+i]={value:0.0};
+}
+
+// shader generato (N blocchi srotolati)
+let decls='', body='';
+for (let i=0;i<N;i++){
+  decls += `uniform sampler2D photo${i}; uniform vec3 C${i}; uniform mat3 R${i}; uniform vec4 intr${i}; uniform float en${i};\n`;
+  body += `
+    if(en${i} > 0.5){
+      vec3 d = vWorld - C${i};
+      vec3 Pc = vec3(dot(d,R${i}[0]), dot(d,R${i}[1]), dot(d,R${i}[2]));
+      float z = -Pc.z;
+      if(z > 0.02){
+        float u = intr${i}.x*Pc.x/z + intr${i}.z;
+        float vv = intr${i}.y*Pc.y/z + intr${i}.w;
+        vec2 t = vec2(u/imgW, vv/imgH); if(flipV>0.5) t.y = 1.0 - t.y;
+        if(t.x>=0.0&&t.x<=1.0&&t.y>=0.0&&t.y<=1.0){
+          float nx=(u-imgW*0.5)/(imgW*0.5), ny=(vv-imgH*0.5)/(imgH*0.5);
+          float centr = 1.0 - clamp(sqrt(nx*nx+ny*ny),0.0,1.4)/1.4;
+          float front = max(0.0, dot(normalize(vNormalW), normalize(C${i}-vWorld)));
+          float score = 2.0*centr + 1.2*front;
+          if(score > bestScore){ bestScore = score; best = texture2D(photo${i}, t).rgb; }
+        }
+      }
+    }`;
+}
+const mat = new THREE.ShaderMaterial({
+  side: THREE.DoubleSide, uniforms: U,
+  vertexShader:`varying vec3 vWorld; varying vec3 vNormalW;
+    void main(){ vWorld=(modelMatrix*vec4(position,1.0)).xyz; vNormalW=mat3(modelMatrix)*normal;
+      gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+  fragmentShader:`precision highp float; uniform float imgW,imgH,flipV;
+    varying vec3 vWorld; varying vec3 vNormalW;
+    ${decls}
+    void main(){ vec3 best=vec3(0.22); float bestScore=-1.0; ${body}
+      gl_FragColor=vec4(best,1.0); }`,
+});
+
+const grp = await new OBJLoader().loadAsync(MESH);
+let geo0=null;
+grp.traverse(o=>{ if(o.isMesh){ o.geometry.computeVertexNormals(); o.material=mat; if(!geo0)geo0=o.geometry; } });
+scene.add(grp);
+
+// wireframe overlay (wirecolor)
+const wire = new THREE.LineSegments(
+  new THREE.WireframeGeometry(geo0),
+  new THREE.LineBasicMaterial({ color:0x55ff99, transparent:true, opacity:0.35 }));
+wire.visible = false; scene.add(wire);
+document.getElementById('wire').onclick = (e)=>{ wire.visible=!wire.visible; e.currentTarget.classList.toggle('on', wire.visible); };
+
+// vista frontale
+const camcfg = await (await fetch('model_nobbox_photo_cam.json')).json();
+function frontal(){
+  const c=new THREE.Vector3(...camcfg.center), vd=new THREE.Vector3(...camcfg.view_dir), up=new THREE.Vector3(...camcfg.up).negate();
+  camera.fov=45; camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix();
+  camera.position.copy(c.clone().addScaledVector(vd,-camcfg.radius*0.7)); camera.up.copy(up); controls.target.copy(c); controls.update();
+}
+frontal();
+document.getElementById('frontal').onclick = frontal;
+
+// vista dalla camera della foto i (prova: la proiezione torna piatta)
+function viewFromCam(i){
+  const e = U['R'+i].value.elements;                 // colonne = assi camera in world
+  const yax = new THREE.Vector3(e[3],e[4],e[5]);     // up camera
+  const zax = new THREE.Vector3(e[6],e[7],e[8]);     // forward = -z
+  const C = U['C'+i].value, fy = U['intr'+i].value.y;
+  camera.position.copy(C);
+  camera.up.copy(yax);                               // up = asse Y camera (no negate qui)
+  controls.target.copy(C.clone().addScaledVector(zax, -2.0));
+  camera.fov = 2*Math.atan(U.imgH.value/(2*fy))*180/Math.PI;
+  camera.aspect = U.imgW.value/U.imgH.value;
+  camera.updateProjectionMatrix();
+  controls.update();
+}
+// pulsanti foto: [toggle proiezione] [▶ vista da camera]
+const list = document.getElementById('list');
+const btns = [];
+for(let i=0;i<N;i++){
+  const row=document.createElement('div'); row.className='frow';
+  const b=document.createElement('button'); b.className='tog'; b.textContent='Foto '+parseInt(INDICES[i],10);
+  b.onclick=()=>{ U['en'+i].value = U['en'+i].value>0.5?0.0:1.0; b.classList.toggle('on', U['en'+i].value>0.5); };
+  const eye=document.createElement('button'); eye.className='eye'; eye.textContent='▶'; eye.title='vista da questa camera (+ solo questa foto)';
+  eye.onclick=()=>{ for(let j=0;j<N;j++){U['en'+j].value=(j===i)?1.0:0.0; btns[j].classList.toggle('on', j===i);} viewFromCam(i); };
+  row.appendChild(b); row.appendChild(eye); list.appendChild(row); btns.push(b);
+}
+document.getElementById('allon').onclick=()=>{ for(let i=0;i<N;i++){U['en'+i].value=1.0;btns[i].classList.add('on');} };
+document.getElementById('alloff').onclick=()=>{ for(let i=0;i<N;i++){U['en'+i].value=0.0;btns[i].classList.remove('on');} };
+
+addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
+renderer.setAnimationLoop(()=>renderer.render(scene,camera));
+</script>
