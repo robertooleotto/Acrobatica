@@ -45,16 +45,6 @@ struct EditorMesh3DView: View {
                 .presentationDetents([.medium, .large])
                 .ignoresSafeArea()
         }
-        .task {
-            // Avvio automatico dell'Auto-piani per anteprima al simulatore:
-            //   xcrun simctl launch <udid> <bundle> -autopiani
-            guard ProcessInfo.processInfo.arguments.contains("-autopiani") else { return }
-            for _ in 0..<80 where model.numTriangoli == 0 {
-                try? await Task.sleep(nanoseconds: 200_000_000)
-            }
-            try? await Task.sleep(nanoseconds: 400_000_000)
-            model.autoPiani()
-        }
     }
 
     private var barraSuperiore: some View {
@@ -109,10 +99,11 @@ struct EditorMesh3DView: View {
                     .frame(width: 36, height: 36)
                     .foregroundStyle(EditorTheme.testo)
             }
-            Button { model.autoPiani() } label: {
-                Image(systemName: "sparkles")
+            // PROVVISORIO: ricarica la mesh e riparte da zero.
+            Button { model.ricaricaDaCapo() } label: {
+                Image(systemName: "arrow.clockwise.circle")
                     .frame(width: 36, height: 36)
-                    .foregroundStyle(EditorTheme.testo)
+                    .foregroundStyle(Theme.danger)
             }
             .disabled(model.caricamento || model.numTriangoli == 0)
             Button {
@@ -145,10 +136,6 @@ struct EditorMesh3DView: View {
                         Label("\(model.numTriangoli) triangoli", systemImage: "triangle")
                         if !model.facce.isEmpty {
                             Label("\(model.facce.count) facce", systemImage: "paintbrush")
-                                .foregroundStyle(EditorTheme.accento)
-                        }
-                        if model.haPianoBase {
-                            Label("piano base", systemImage: "square.3.layers.3d.top.filled")
                                 .foregroundStyle(EditorTheme.accento)
                         }
                         if let info = model.cursoreInfo {
@@ -191,49 +178,10 @@ struct EditorMesh3DView: View {
             if model.strumento == .facce {
                 barraFacce
             }
-            // Barra contestuale della faccia in costruzione.
-            if model.strumento == .punti {
-                HStack(spacing: 10) {
-                    Text(suggerimentoPunti)
-                        .font(Theme.Typo.caption(11))
-                        .foregroundStyle(EditorTheme.testoMuto)
-                    Spacer()
-                    if model.haPianoBase {
-                        ChipSelezione("Allinea box", "cube") { model.allineaBoxAlPianoBase() }
-                    }
-                    Button { model.rimuoviUltimoPunto() } label: {
-                        Label("Indietro", systemImage: "arrow.left.to.line")
-                            .font(Theme.Typo.caption(12, .semibold))
-                    }
-                    .foregroundStyle(EditorTheme.testo)
-                    .disabled(model.numPuntiFaccia == 0)
-                    .opacity(model.numPuntiFaccia == 0 ? 0.4 : 1)
-
-                    Button { model.annullaFaccia() } label: {
-                        Label("Annulla", systemImage: "xmark")
-                            .font(Theme.Typo.caption(12, .semibold))
-                    }
-                    .foregroundStyle(Theme.danger)
-                    .disabled(model.numPuntiFaccia == 0)
-                    .opacity(model.numPuntiFaccia == 0 ? 0.4 : 1)
-
-                    Button { model.calcolaPianoBase() } label: {
-                        Label("Calcola piano", systemImage: "checkmark.circle.fill")
-                            .font(Theme.Typo.caption(12, .bold))
-                            .padding(.horizontal, 10).padding(.vertical, 6)
-                            .background(EditorTheme.accento, in: RoundedRectangle(cornerRadius: 8))
-                            .foregroundStyle(.white)
-                    }
-                    .disabled(model.numPuntiFaccia < 3)
-                    .opacity(model.numPuntiFaccia < 3 ? 0.5 : 1)
-                }
-                .padding(.horizontal, 12)
-            }
-
             HStack(spacing: 8) {
-                ForEach(StrumentoMesh3D.allCases) { s in
+                ForEach(StrumentoMesh3D.allCases.filter { $0 != .punti }) { s in
                     PulsanteStrumento3D(strumento: s, attivo: model.strumento == s) {
-                        if s != .punti { model.annullaFaccia() }
+                        model.annullaFaccia()
                         model.strumento = s
                     }
                 }
@@ -307,6 +255,11 @@ struct EditorMesh3DView: View {
                             .font(Theme.Typo.mono(10))
                             .foregroundStyle(e < model.sogliaErrore ? EditorTheme.testoMuto : Theme.danger)
                     }
+                    if let a = model.areaPoligono(fa) {
+                        Text(String(format: "%.2f u²", a))
+                            .font(Theme.Typo.mono(10))
+                            .foregroundStyle(EditorTheme.accento)
+                    }
                     if model.facce.count > 1 {
                         Menu {
                             ForEach(model.facce.filter { $0.id != fa.id }) { altra in
@@ -351,6 +304,7 @@ struct EditorMesh3DView: View {
                             ChipSelezione("Orizzontale", "arrow.left.and.right") { model.pianoOrizzontale(fa.id) }
                             ChipSelezione("Offset −", "minus") { model.offsetPiano(fa.id, verso: -1) }
                             ChipSelezione("Offset +", "plus") { model.offsetPiano(fa.id, verso: 1) }
+                            ChipSelezione("Allinea facciata", "link") { model.allineaAllaFacciata(fa.id) }
                         }
                     }
                 }
@@ -461,6 +415,7 @@ struct EditorMesh3DView: View {
                     ChipSelezione("Frammenti", "sparkles") { model.selezionaFrammenti() }
                     ChipSelezione("Espandi", "plus.magnifyingglass") { model.espandiSelezione() }
                     ChipSelezione("Restringi", "minus.magnifyingglass") { model.restringiSelezione() }
+                    ChipSelezione("Cresci piano", "square.stack.3d.up") { model.cresciDaSelezione() }
                 }
             }
         }
@@ -795,8 +750,40 @@ private struct SceneKitContainer: UIViewRepresentable {
         var lastSnap = 0
         private var lassoPunti: [CGPoint] = []
         private var ultimoQuat = simd_quatf(angle: 0, axis: SIMD3<Float>(0, 1, 0))
+        // Fase C: maniglia del poligono in trascinamento.
+        private struct Trascina {
+            let faccia: Int; let edge: Bool; let k: Int
+            let p: SIMD3<Float>; let n: SIMD3<Float>
+            let start: SIMD3<Float>; let orig: [SIMD3<Float>]
+        }
+        private var trascina: Trascina?
 
         init(_ model: Mesh3DModel) { self.model = model }
+
+        /// Intersezione del raggio dello schermo `sp` col piano (p,n). Per il drag.
+        @MainActor private func puntoSulPiano(_ sp: CGPoint, p: SIMD3<Float>, n: SIMD3<Float>, in v: SCNView) -> SIMD3<Float>? {
+            let a = v.unprojectPoint(SCNVector3(Float(sp.x), Float(sp.y), 0))
+            let b = v.unprojectPoint(SCNVector3(Float(sp.x), Float(sp.y), 1))
+            let o = SIMD3<Float>(a.x, a.y, a.z)
+            let d = SIMD3<Float>(b.x - a.x, b.y - a.y, b.z - a.z)
+            let den = simd_dot(d, n)
+            if abs(den) < 1e-6 { return nil }
+            let t = simd_dot(p - o, n) / den
+            return t >= 0 ? o + d * t : nil
+        }
+
+        /// Maniglia (angolo "maniglia:f:k" o edge "edge:f:k") sotto `sp`, se c'è.
+        @MainActor private func maniglia(sotto sp: CGPoint, in v: SCNView) -> (faccia: Int, edge: Bool, k: Int)? {
+            let hits = v.hitTest(sp, options: [.searchMode: SCNHitTestSearchMode.all.rawValue])
+            for h in hits {
+                guard let nm = h.node.name else { continue }
+                let parti = nm.split(separator: ":")
+                guard parti.count == 3, let fid = Int(parti[1]), let k = Int(parti[2]) else { continue }
+                if parti[0] == "maniglia" { return (fid, false, k) }
+                if parti[0] == "edge" { return (fid, true, k) }
+            }
+            return nil
+        }
 
         // Mirror dell'orientamento camera → ViewCube (throttle se cambia poco).
         nonisolated func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
@@ -829,6 +816,19 @@ private struct SceneKitContainer: UIViewRepresentable {
                 let hits = v.hitTest(pt, options: [.searchMode: SCNHitTestSearchMode.closest.rawValue])
                 if let h = hits.first(where: { $0.node === model.contentNode }) {
                     model.impostaPuntoZero(h.worldCoordinates)
+                }
+                return
+            }
+            // Facce: tocco su maniglia edge → splitta (nuovo vertice). Altrimenti il
+            // tocco semina e fa crescere LÌ un nuovo piano (marca tu i piani).
+            if model.strumento == .facce {
+                if let m = maniglia(sotto: pt, in: v), m.edge {
+                    model.splittaEdge(faccia: m.faccia, edge: m.k)
+                    return
+                }
+                let hits = v.hitTest(pt, options: [.searchMode: SCNHitTestSearchMode.closest.rawValue])
+                if let h = hits.first(where: { $0.node === model.contentNode }) {
+                    model.toccaPerPiano(triangolo: h.faceIndex)
                 }
                 return
             }
@@ -937,11 +937,50 @@ private struct SceneKitContainer: UIViewRepresentable {
         /// Pennello §3: assegna i triangoli sotto il dito alla faccia attiva.
         @MainActor private func handlePanFacce(_ g: UIPanGestureRecognizer, in v: SCNView) {
             let p = g.location(in: v)
+            // Fase C: se un trascinamento di maniglia è in corso, muovi (delta dall'origine).
+            if let tr = trascina {
+                switch g.state {
+                case .changed:
+                    if let cur = puntoSulPiano(p, p: tr.p, n: tr.n, in: v) {
+                        let delta = cur - tr.start
+                        if tr.edge {
+                            let k1 = (tr.k + 1) % tr.orig.count
+                            model.spostaEdgePoligono(faccia: tr.faccia, edge: tr.k,
+                                                     a: tr.orig[tr.k] + delta, tr.orig[k1] + delta)
+                        } else {
+                            model.spostaVerticePoligono(faccia: tr.faccia, indice: tr.k,
+                                                        a: tr.orig[tr.k] + delta)
+                        }
+                    }
+                case .ended, .cancelled:
+                    trascina = nil
+                default: break
+                }
+                return
+            }
+            // All'inizio di un pan: se parte su una maniglia, avvia il trascinamento.
+            if g.state == .began, let m = maniglia(sotto: p, in: v),
+               let pian = model.pianoFaccia(m.faccia), let orig = model.poligonoDi(m.faccia),
+               let start = puntoSulPiano(p, p: pian.p, n: pian.n, in: v) {
+                model.facciaAttivaId = m.faccia
+                model.registraUndo()
+                trascina = Trascina(faccia: m.faccia, edge: m.edge, k: m.k,
+                                    p: pian.p, n: pian.n, start: start, orig: orig)
+                return
+            }
             switch g.state {
             case .began:
                 proiettaCentroidi(in: v)
                 catturaNormaleRif(p, in: v)
-                if model.facciaAttiva == nil { model.nuovaFaccia() }
+                // Ogni tratto su area libera = un NUOVO segno (piano). Un tratto che
+                // parte su un segno esistente lo ESTENDE. Niente più "Nuova" a mano.
+                let hits = v.hitTest(p, options: [.searchMode: SCNHitTestSearchMode.closest.rawValue])
+                if let h = hits.first(where: { $0.node === model.contentNode }),
+                   let esistente = model.facce.first(where: { $0.triangoli.contains(h.faceIndex) }) {
+                    model.facciaAttivaId = esistente.id
+                } else {
+                    model.nuovaFaccia()
+                }
                 pennellaFacce(p); disegnaCerchioPennello(p)
             case .changed:
                 pennellaFacce(p); disegnaCerchioPennello(p)
@@ -1170,6 +1209,8 @@ final class Mesh3DModel: ObservableObject {
 
     // Selezione + taglio (T1)
     private(set) var mesh = EditableMesh(vertices: [], triangles: [])
+    /// Mesh come caricata (prima di crop/pulizia): per "riparti da zero".
+    private var meshOriginale: EditableMesh?
     private(set) var selezione = Set<Int>()
     @Published var numSelezionati = 0
     @Published var modoSelezione: ModoSelezione = .lazo
@@ -1247,6 +1288,9 @@ final class Mesh3DModel: ObservableObject {
     private var estensioneMesh: Float = 1      // lato maggiore della mesh
     /// Soglia di planarità "buona" per le facce (1% del lato mesh).
     var sogliaErrore: Float { estensioneMesh * 0.01 }
+    /// (#15) Verso "su" stimato dalla mesh (media delle facce orizzontali). Default
+    /// world-Y; va sostituibile col vettore gravità reale delle pose ARKit.
+    private(set) var gravitaSu = SIMD3<Float>(0, 1, 0)
 
     // Piano livello-zero (§4)
     @Published var haPianoBase = false
@@ -1266,8 +1310,16 @@ final class Mesh3DModel: ObservableObject {
             caricamento = true
             Task { await caricaFile(file) }
         } else {
-            installaMesh(MeshFactory.demoMesh())
+            let demo = MeshFactory.demoMesh()
+            meshOriginale = demo
+            installaMesh(demo)
         }
+    }
+
+    /// Ricarica la mesh originale e azzera tutto (facce, selezione, crop, undo).
+    func ricaricaDaCapo() {
+        guard let orig = meshOriginale else { return }
+        installaMesh(orig)
     }
 
     private func configuraScena() {
@@ -1376,6 +1428,7 @@ final class Mesh3DModel: ObservableObject {
             contentNode.addChildNode(radice)
             if let em = EditableMesh.from(node: radice) {
                 radice.removeFromParentNode()
+                meshOriginale = em
                 installaMesh(em)
             } else {
                 errore = "Mesh senza triangoli leggibili"
@@ -1624,13 +1677,350 @@ final class Mesh3DModel: ObservableObject {
             facce[i].pianoPunto = r.punto
             facce[i].pianoNormale = r.normale
             facce[i].erroreRms = mesh.rmsDalPiano(r.tri, punto: r.punto, normale: r.normale)
-            facce[i].tipo = abs(r.normale.y) > 0.7 ? .orizzontale : .facciata
+        }
+        mergeComplanariConnessi()      // #14
+        stimaGravita()                 // #15
+        scartaNonPlanari()             // #9
+        scartaSlivers()                // #10
+        scartaPianiPiccoli()           // #8
+        snapManhattan()                // #12 + #13
+        classificaPerGravita()         // #7
+        generaPoligoniTutti()          // Fase B: poligono editabile per ogni piano
+        if facciaAttivaId == nil || !facce.contains(where: { $0.id == facciaAttivaId }) {
+            facciaAttivaId = facce.first?.id
         }
         pianiGenerati = facce.count
         mostraPiani = true
         ridisegnaFacce()
         ridisegnaPiani()
         segmentando = false
+    }
+
+    /// #14 — Unisce facce COMPLANARI e CONNESSE (stesso muro spezzato dalle
+    /// finestre o segnato con più tratti). Due torrette complanari ma staccate
+    /// NON si fondono (test `adiacenti`).
+    private func mergeComplanariConnessi() {
+        let tolOffset = estensioneMesh * 0.01   // ~1% del lato
+        var unito = true
+        while unito {
+            unito = false
+            ricerca: for i in facce.indices {
+                for j in facce.indices where j > i {
+                    guard let ni = facce[i].pianoNormale, let pi = facce[i].pianoPunto,
+                          let nj = facce[j].pianoNormale, let pj = facce[j].pianoPunto,
+                          !facce[i].triangoli.isEmpty, !facce[j].triangoli.isEmpty else { continue }
+                    let paralleli = abs(simd_dot(ni, nj)) > 0.985
+                    let stessoOffset = abs(simd_dot(pj - pi, ni)) < tolOffset
+                    guard paralleli, stessoOffset,
+                          mesh.adiacenti(facce[i].triangoli, facce[j].triangoli) else { continue }
+                    facce[i].triangoli.formUnion(facce[j].triangoli)
+                    if let (p2, n2) = mesh.fitPianoRANSAC(facce[i].triangoli) {
+                        facce[i].pianoPunto = p2; facce[i].pianoNormale = n2
+                        facce[i].erroreRms = mesh.rmsDalPiano(facce[i].triangoli, punto: p2, normale: n2)
+                    }
+                    facce.remove(at: j)
+                    unito = true
+                    break ricerca
+                }
+            }
+        }
+    }
+
+    /// #15 — Stima il verso "su" dalla mesh: media (pesata per area) delle normali
+    /// delle facce ~orizzontali. Più affidabile di world-Y su modelli leggermente
+    /// storti. Sostituibile col vettore gravità reale delle pose ARKit.
+    private func stimaGravita() {
+        let y = SIMD3<Float>(0, 1, 0)
+        var acc = SIMD3<Float>(0, 0, 0); var peso: Float = 0
+        for f in facce {
+            guard let n = f.pianoNormale else { continue }
+            let nn = simd_dot(n, y) < 0 ? -n : n           // orienta verso l'alto mondiale
+            if abs(simd_dot(nn, y)) > 0.85 {               // faccia quasi orizzontale
+                let a = mesh.areaTriangoli(f.triangoli)
+                acc += nn * a; peso += a
+            }
+        }
+        gravitaSu = (peso > 0 && simd_length(acc) > 1e-4) ? simd_normalize(acc) : y
+    }
+
+    /// #7 — Classifica ogni piano per angolo rispetto alla verticale (gravità stimata).
+    private func classificaPerGravita() {
+        for i in facce.indices {
+            guard let n = facce[i].pianoNormale else { continue }
+            let cosUp = abs(simd_dot(simd_normalize(n), gravitaSu))
+            facce[i].tipo = cosUp > 0.7 ? .orizzontale : .facciata   // >70%≈ entro 45° dalla verticale
+        }
+    }
+
+    /// #9 — Scarta i piani troppo poco planari (RMS alto = superficie curva/rumorosa,
+    /// non un vero piano).
+    private func scartaNonPlanari() {
+        let maxRms = estensioneMesh * 0.03   // 3% del lato: ben oltre il rumore OC
+        facce.removeAll { f in
+            guard !f.triangoli.isEmpty, let p = f.pianoPunto, let n = f.pianoNormale else { return false }
+            return mesh.rmsDalPiano(f.triangoli, punto: p, normale: n) > maxRms
+        }
+    }
+
+    /// #10 — Scarta strisce/regioni mal proporzionate: bounding-box nel piano molto
+    /// allungato (aspect estremo) o riempimento basso (frammenti sparsi).
+    private func scartaSlivers() {
+        facce.removeAll { f in
+            guard !f.triangoli.isEmpty, let n = f.pianoNormale else { return false }
+            var right = simd_cross(gravitaSu, n)
+            if simd_length(right) < 1e-5 { right = simd_cross(SIMD3(1, 0, 0), n) }
+            right = simd_normalize(right)
+            let up = simd_normalize(simd_cross(n, right))
+            var minx = Float.greatestFiniteMagnitude, maxx = -minx, miny = minx, maxy = -minx
+            for i in f.triangoli {
+                let c = mesh.centroid(mesh.triangles[i])
+                let x = simd_dot(c, right), y = simd_dot(c, up)
+                minx = min(minx, x); maxx = max(maxx, x); miny = min(miny, y); maxy = max(maxy, y)
+            }
+            let w = max(maxx - minx, 1e-5), h = max(maxy - miny, 1e-5)
+            let fill = mesh.areaTriangoli(f.triangoli) / (w * h)
+            let aspect = max(w, h) / min(w, h)
+            return fill < 0.08 || aspect > 30
+        }
+    }
+
+    /// #8 — Scarta i piani la cui area è sotto soglia (micro-piani / tratti non cresciuti).
+    private func scartaPianiPiccoli() {
+        let totale = mesh.areaTriangoli(Set(mesh.triangles.indices))
+        guard totale > 0 else { return }
+        let minArea = totale * 0.001   // 0,1% dell'area totale della mesh
+        facce.removeAll { !$0.triangoli.isEmpty && mesh.areaTriangoli($0.triangoli) < minArea }
+    }
+
+    // MARK: Editor poligonale (Fase B): poligono editabile + area metrica
+
+    /// Genera il poligono editabile iniziale = rettangolo orientato del piano nel
+    /// suo riferimento (assi `right`/`up` derivati da normale e gravità).
+    func generaPoligono(perFaccia id: Int) {
+        guard let i = facce.firstIndex(where: { $0.id == id }),
+              let p = facce[i].pianoPunto, let n0 = facce[i].pianoNormale,
+              !facce[i].triangoli.isEmpty else { return }
+        let n = simd_normalize(n0)
+        var right = simd_cross(gravitaSu, n)
+        if simd_length(right) < 1e-5 { right = simd_cross(SIMD3(1, 0, 0), n) }
+        right = simd_normalize(right)
+        let up = simd_normalize(simd_cross(n, right))
+        var minx = Float.greatestFiniteMagnitude, maxx = -minx, miny = minx, maxy = -minx
+        for t in facce[i].triangoli {
+            let tri = mesh.triangles[t]
+            for v in [mesh.vertices[Int(tri.x)], mesh.vertices[Int(tri.y)], mesh.vertices[Int(tri.z)]] {
+                let x = simd_dot(v - p, right), y = simd_dot(v - p, up)
+                minx = min(minx, x); maxx = max(maxx, x); miny = min(miny, y); maxy = max(maxy, y)
+            }
+        }
+        func pt(_ x: Float, _ y: Float) -> SIMD3<Float> { p + right * x + up * y }
+        facce[i].poligono = [pt(minx, miny), pt(maxx, miny), pt(maxx, maxy), pt(minx, maxy)]
+    }
+
+    private func generaPoligoniTutti() { for f in facce { generaPoligono(perFaccia: f.id) } }
+
+    /// Piano (punto, normale) della faccia, per il trascinamento delle maniglie.
+    func pianoFaccia(_ id: Int) -> (p: SIMD3<Float>, n: SIMD3<Float>)? {
+        guard let f = facce.first(where: { $0.id == id }),
+              let p = f.pianoPunto, let n = f.pianoNormale else { return nil }
+        return (p, simd_normalize(n))
+    }
+
+    /// Poligono corrente della faccia (per catturare l'origine del trascinamento).
+    func poligonoDi(_ id: Int) -> [SIMD3<Float>]? { facce.first(where: { $0.id == id })?.poligono }
+
+    /// Fase C — Sposta un intero edge `k` (vertici k e k+1) del poligono, sul piano,
+    /// con snap di entrambi gli estremi (Fase D). Per "allungare" il poligono.
+    func spostaEdgePoligono(faccia id: Int, edge k: Int, a p0: SIMD3<Float>, _ p1: SIMD3<Float>, snap: Bool = true) {
+        guard let i = facce.firstIndex(where: { $0.id == id }), var poly = facce[i].poligono,
+              let n = facce[i].pianoNormale, let pp = facce[i].pianoPunto, k >= 0, k < poly.count else { return }
+        let nn = simd_normalize(n)
+        let k1 = (k + 1) % poly.count
+        func proj(_ q: SIMD3<Float>) -> SIMD3<Float> { q - simd_dot(q - pp, nn) * nn }
+        var a = proj(p0), b = proj(p1)
+        if snap {
+            if let ag = agganciaVertice(a, escludi: id, normalePiano: nn) { a = ag }
+            if let bg = agganciaVertice(b, escludi: id, normalePiano: nn) { b = bg }
+        }
+        poly[k] = a; poly[k1] = b
+        facce[i].poligono = poly
+        ridisegnaPiani()
+    }
+
+    /// Splitta l'edge `k`: inserisce un vertice al suo punto medio (da quad a poligono).
+    func splittaEdge(faccia id: Int, edge k: Int) {
+        guard let i = facce.firstIndex(where: { $0.id == id }), var poly = facce[i].poligono,
+              k >= 0, k < poly.count else { return }
+        registraUndo()
+        let k1 = (k + 1) % poly.count
+        poly.insert((poly[k] + poly[k1]) * 0.5, at: k1)
+        facce[i].poligono = poly
+        ridisegnaPiani()
+    }
+
+    /// Aggancia l'edge più vicino del poligono attivo alla retta d'intersezione con
+    /// la facciata di riferimento (la faccia più estesa con normale non parallela):
+    /// spigolo condiviso esatto, senza trascinare a mano (es. spalletta↔facciata).
+    func allineaAllaFacciata(_ id: Int) {
+        guard let i = facce.firstIndex(where: { $0.id == id }), var poly = facce[i].poligono,
+              let nA0 = facce[i].pianoNormale, let pA = facce[i].pianoPunto, poly.count >= 2 else { return }
+        let nA = simd_normalize(nA0)
+        var rifN: SIMD3<Float>? = nil; var rifP = SIMD3<Float>(0, 0, 0); var areaMax: Float = 0
+        for f in facce where f.id != id {
+            guard let nB0 = f.pianoNormale, let pB = f.pianoPunto else { continue }
+            if abs(simd_dot(simd_normalize(nB0), nA)) > 0.9 { continue }   // troppo parallela
+            let a = mesh.areaTriangoli(f.triangoli)
+            if a > areaMax { areaMax = a; rifN = simd_normalize(nB0); rifP = pB }
+        }
+        guard let nB = rifN else { return }
+        let dir = simd_cross(nA, nB)
+        guard simd_length(dir) > 1e-3 else { return }
+        let u = simd_normalize(dir)
+        guard let pL = puntoSuRetta(nA: nA, pA: pA, nB: nB, pB: rifP, dir: u) else { return }
+        func suRetta(_ q: SIMD3<Float>) -> SIMD3<Float> { pL + u * simd_dot(q - pL, u) }
+        var bestK = 0; var bestD = Float.greatestFiniteMagnitude
+        for k in poly.indices {
+            let mid = (poly[k] + poly[(k + 1) % poly.count]) * 0.5
+            let d = simd_length(suRetta(mid) - mid)
+            if d < bestD { bestD = d; bestK = k }
+        }
+        registraUndo()
+        let k1 = (bestK + 1) % poly.count
+        poly[bestK] = suRetta(poly[bestK]); poly[k1] = suRetta(poly[k1])
+        facce[i].poligono = poly
+        ridisegnaPiani()
+    }
+
+    /// Fase C — Sposta il vertice `k` del poligono della faccia `id` mantenendolo
+    /// sul piano. Con `snap` cerca un aggancio (vertice/edge di altri piani, Fase D).
+    func spostaVerticePoligono(faccia id: Int, indice k: Int, a posMondo: SIMD3<Float>, snap: Bool = true) {
+        guard let i = facce.firstIndex(where: { $0.id == id }),
+              var poly = facce[i].poligono, k >= 0, k < poly.count,
+              let n = facce[i].pianoNormale, let p = facce[i].pianoPunto else { return }
+        let nn = simd_normalize(n)
+        var pos = posMondo - simd_dot(posMondo - p, nn) * nn   // resta sul piano
+        if snap, let ag = agganciaVertice(pos, escludi: id, normalePiano: nn) { pos = ag }
+        poly[k] = pos
+        facce[i].poligono = poly
+        ridisegnaPiani()
+    }
+
+    /// Fase D — Aggancio: prima ai vertici degli altri poligoni vicini, poi alla
+    /// retta d'intersezione fra il piano corrente e quello del poligono vicino
+    /// (spigolo condiviso, es. spalletta↔facciata). Ritorna la posizione agganciata.
+    private func agganciaVertice(_ pos: SIMD3<Float>, escludi id: Int, normalePiano nA: SIMD3<Float>) -> SIMD3<Float>? {
+        let soglia = estensioneMesh * 0.02   // ~2% del lato
+        var miglior: SIMD3<Float>? = nil; var minD = soglia
+        // 1) snap vertice→vertice
+        for f in facce where f.id != id {
+            for v in f.poligono ?? [] {
+                let d = simd_length(v - pos)
+                if d < minD { minD = d; miglior = v }
+            }
+        }
+        if let m = miglior { return m }
+        // 2) snap alla retta d'intersezione dei due piani (spigolo condiviso)
+        for f in facce where f.id != id {
+            guard let nB0 = f.pianoNormale, let pB = f.pianoPunto else { continue }
+            let nB = simd_normalize(nB0)
+            let dir = simd_cross(nA, nB)
+            if simd_length(dir) < 1e-3 { continue }       // piani paralleli: nessuna retta
+            let u = simd_normalize(dir)
+            // un punto della retta: risolve il sistema dei due piani (minima norma)
+            guard let pL = puntoSuRetta(nA: nA, pA: pos, nB: nB, pB: pB, dir: u) else { continue }
+            let proj = pL + u * simd_dot(pos - pL, u)       // proiezione di pos sulla retta
+            let d = simd_length(proj - pos)
+            if d < minD { minD = d; miglior = proj }
+        }
+        return miglior
+    }
+
+    /// Un punto della retta d'intersezione dei piani A(nA,pA) e B(nB,pB) con
+    /// direzione `dir`: risolve i due vincoli planari nel piano ⟂ a dir.
+    private func puntoSuRetta(nA: SIMD3<Float>, pA: SIMD3<Float>,
+                              nB: SIMD3<Float>, pB: SIMD3<Float>, dir: SIMD3<Float>) -> SIMD3<Float>? {
+        let dA = simd_dot(nA, pA), dB = simd_dot(nB, pB)
+        // base nel piano ⟂ a dir
+        let e1 = simd_normalize(nA)
+        let e2 = simd_normalize(simd_cross(dir, e1))
+        // x = a*e1 + b*e2 ; nA·x = dA ; nB·x = dB
+        let m00 = simd_dot(nA, e1), m01 = simd_dot(nA, e2)
+        let m10 = simd_dot(nB, e1), m11 = simd_dot(nB, e2)
+        let det = m00 * m11 - m01 * m10
+        if abs(det) < 1e-6 { return nil }
+        let a = (dA * m11 - m01 * dB) / det
+        let b = (m00 * dB - dA * m10) / det
+        return e1 * a + e2 * b
+    }
+
+    /// Area del poligono editabile, in unità mesh (shoelace 3D sul piano). Per i m²
+    /// metrici va moltiplicata per il quadrato della scala mesh→metri.
+    func areaPoligono(_ f: FacciaProxy) -> Float? {
+        guard let poly = f.poligono, poly.count >= 3, let n = f.pianoNormale else { return nil }
+        var s = SIMD3<Float>(0, 0, 0)
+        for k in poly.indices {
+            let a = poly[k], b = poly[(k + 1) % poly.count]
+            s += simd_cross(a, b)
+        }
+        return abs(simd_dot(s, simd_normalize(n))) * 0.5
+    }
+
+    // MARK: Fase A — semina rettangolare
+
+    /// Usa la selezione (rettangolo/lazo/pennello) come seme e fa crescere il piano.
+    func cresciDaSelezione() {
+        guard !selezione.isEmpty else { return }
+        registraUndo()
+        let seme = selezione
+        guard let (p, n) = mesh.fitPianoRANSAC(seme) else { return }
+        let tol = Float(tolleranzaNormaleGradi)
+        let cresciuto = mesh.crescePianare(da: seme, normale: n, punto: p, tolGradi: tol)
+        let (p2, n2) = mesh.fitPianoRANSAC(cresciuto) ?? (p, n)
+        for j in facce.indices { facce[j].triangoli.subtract(cresciuto) }
+        let colore = FacciaProxy.palette[facce.count % FacciaProxy.palette.count]
+        var f = FacciaProxy(id: prossimoIdFaccia, nome: "Piano \(prossimoIdFaccia)", colore: colore)
+        prossimoIdFaccia += 1
+        f.triangoli = cresciuto; f.pianoPunto = p2; f.pianoNormale = n2
+        f.erroreRms = mesh.rmsDalPiano(cresciuto, punto: p2, normale: n2)
+        facce.append(f)
+        facciaAttivaId = f.id
+        facce.removeAll { $0.triangoli.isEmpty }
+        stimaGravita()
+        classificaPerGravita()
+        generaPoligono(perFaccia: f.id)
+        pianiGenerati = facce.count
+        mostraProxy = true; mostraPiani = true
+        deselezionaTutto()
+        strumento = .facce
+        ridisegnaFacce(); ridisegnaPiani()
+    }
+
+    /// #12 + #13 — Snap "Manhattan": costruisce una terna ortogonale dall'edificio
+    /// (su = gravità, asse1 = normale della facciata maggiore, asse2 = su×asse1) e
+    /// aggancia ogni piano all'asse più vicino. CONSERVATIVO: snappa solo se già
+    /// entro 12° (non forza muri genuinamente obliqui). Effetto: i ritorni diventano
+    /// esattamente ⟂ alla facciata (#12) e tutti i muri ⟂/∥ tra loro (#13).
+    private func snapManhattan() {
+        let su = gravitaSu
+        var axis1: SIMD3<Float>? = nil; var areaMax: Float = 0
+        for f in facce {
+            guard let n = f.pianoNormale else { continue }
+            let horiz = n - simd_dot(n, su) * su           // componente orizzontale
+            if simd_length(horiz) < 0.3 { continue }       // orizzontale → salta
+            let a = mesh.areaTriangoli(f.triangoli)
+            if a > areaMax { areaMax = a; axis1 = simd_normalize(horiz) }
+        }
+        guard let a1 = axis1 else { return }
+        let a2 = simd_normalize(simd_cross(su, a1))
+        let cand = [a1, -a1, a2, -a2, su, -su]
+        let cos12 = cos(12 * Float.pi / 180)
+        for i in facce.indices {
+            guard let n = facce[i].pianoNormale else { continue }
+            if let best = cand.max(by: { simd_dot(n, $0) < simd_dot(n, $1) }),
+               simd_dot(n, best) > cos12 {
+                aggiornaNormaleFaccia(facce[i].id, best)
+            }
+        }
     }
 
     /// Crea una nuova faccia (colore successivo della palette) e la rende attiva.
@@ -1664,6 +2054,45 @@ final class Mesh3DModel: ObservableObject {
             facce[i].erroreRms = mesh.rmsDalPiano(cresciuto, punto: p2, normale: n2)
         }
         mostraPiani = true
+        ridisegnaFacce(); ridisegnaPiani()
+    }
+
+    /// Tocco→piano: l'utente tocca una superficie e nasce LÌ un nuovo piano,
+    /// cresciuto per region-growing dal triangolo colpito. Deterministico
+    /// (niente RANSAC casuale) e scelto dall'utente: marca i piani che vuoi.
+    func toccaPerPiano(triangolo i: Int) {
+        guard i >= 0, i < mesh.triangles.count else { return }
+        // Tocchi un piano GIÀ riconosciuto → lo SELEZIONI (non ne crei un altro).
+        if let g = facce.first(where: { $0.triangoli.contains(i) }) {
+            facciaAttivaId = g.id
+            ridisegnaFacce(); ridisegnaPiani()
+            return
+        }
+        registraUndo()
+        let p = mesh.centroid(mesh.triangles[i])
+        let n = mesh.normale(i)
+        let cresciuto = mesh.crescePianare(da: [i], normale: n, punto: p,
+                                           tolGradi: Float(tolleranzaNormaleGradi))
+        // non rubare triangoli a piani già marcati
+        for j in facce.indices { facce[j].triangoli.subtract(cresciuto) }
+        let colore = FacciaProxy.palette[facce.count % FacciaProxy.palette.count]
+        var f = FacciaProxy(id: prossimoIdFaccia,
+                            nome: "Piano \(prossimoIdFaccia)", colore: colore)
+        prossimoIdFaccia += 1
+        f.triangoli = cresciuto
+        if let (p2, n2) = mesh.fitPianoRANSAC(cresciuto) {
+            f.pianoPunto = p2; f.pianoNormale = n2
+            f.erroreRms = mesh.rmsDalPiano(cresciuto, punto: p2, normale: n2)
+            f.tipo = abs(n2.y) > 0.7 ? .orizzontale : .facciata
+        } else {
+            f.pianoPunto = p; f.pianoNormale = n
+        }
+        facce.append(f)
+        facciaAttivaId = f.id
+        facce.removeAll { $0.triangoli.isEmpty }
+        generaPoligono(perFaccia: f.id)
+        pianiGenerati = facce.count
+        mostraProxy = true; mostraPiani = true
         ridisegnaFacce(); ridisegnaPiani()
     }
 
@@ -1740,44 +2169,6 @@ final class Mesh3DModel: ObservableObject {
     }
 
     /// Genera (fit) il piano di ogni faccia dai triangoli pennellati + errore RMS.
-    /// AUTO-PIANI (§3): segmenta TUTTA la mesh in piani (RANSAC sequenziale per
-    /// prossimità + normale) e crea una faccia proxy colorata per ciascuno.
-    /// Pesante: gira off-main con lo spinner. minTriangoliFrazione basso per
-    /// catturare anche piani piccoli (ali/ritorni), non solo il muro dominante.
-    func autoPiani(maxPiani: Int = 20) {
-        guard !mesh.triangles.isEmpty, !caricamento else { return }
-        registraUndo()
-        caricamento = true
-        let snap = mesh   // EditableMesh è uno struct Sendable: copia sicura per il bg
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let piani = snap.segmentaPiani(maxPiani: maxPiani,
-                                           sogliaDistFrazione: 0.012,
-                                           sogliaNormaleGradi: 22,
-                                           minTriangoliFrazione: 0.004,
-                                           campioni: 120)
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                for (tri, p, n) in piani {
-                    let colore = FacciaProxy.palette[self.facce.count % FacciaProxy.palette.count]
-                    var f = FacciaProxy(id: self.prossimoIdFaccia,
-                                        nome: "Piano \(self.prossimoIdFaccia)", colore: colore)
-                    f.triangoli = tri
-                    f.pianoPunto = p
-                    f.pianoNormale = n
-                    f.erroreRms = self.mesh.rmsDalPiano(tri, punto: p, normale: n)
-                    self.facce.append(f)
-                    self.prossimoIdFaccia += 1
-                }
-                self.pianiGenerati = self.facce.count
-                self.mostraProxy = true
-                self.mostraPiani = true
-                self.caricamento = false
-                self.aggiornaVista()
-                self.ridisegnaPiani()
-            }
-        }
-    }
-
     func generaPiani() {
         var n = 0
         for i in facce.indices {
@@ -1874,11 +2265,17 @@ final class Mesh3DModel: ObservableObject {
                 }
             }
             guard uMax > uMin else { continue }
-            let corners = [o + right * uMin + up * wMin, o + right * uMax + up * wMin,
-                           o + right * uMax + up * wMax, o + right * uMin + up * wMax]
-                .map { SCNVector3($0.x, $0.y, $0.z) }
+            // Poligono editabile (Fase B) se presente, altrimenti il bbox del piano.
+            let pts3: [SIMD3<Float>] = (f.poligono?.count ?? 0) >= 3
+                ? f.poligono!
+                : [o + right * uMin + up * wMin, o + right * uMax + up * wMin,
+                   o + right * uMax + up * wMax, o + right * uMin + up * wMax]
+            let corners = pts3.map { SCNVector3($0.x, $0.y, $0.z) }
+            // riempimento a ventaglio (poligoni convessi)
+            var idx: [Int32] = []
+            for k in 1..<(corners.count - 1) { idx += [0, Int32(k), Int32(k + 1)] }
             let src = SCNGeometrySource(vertices: corners)
-            let elem = SCNGeometryElement(indices: [Int32](arrayLiteral: 0, 1, 2, 0, 2, 3), primitiveType: .triangles)
+            let elem = SCNGeometryElement(indices: idx, primitiveType: .triangles)
             let g = SCNGeometry(sources: [src], elements: [elem])
             let m = SCNMaterial()
             m.diffuse.contents = f.colore.withAlphaComponent(0.45)
@@ -1887,6 +2284,34 @@ final class Mesh3DModel: ObservableObject {
             pianiNode.addChildNode(SCNNode(geometry: g))
             if let c = MeshFactory.lineaGeometria(corners, colore: f.colore, chiusa: true) {
                 pianiNode.addChildNode(SCNNode(geometry: c))
+            }
+            // Maniglie (solo sul poligono editabile della faccia attiva):
+            // sfere bianche = angoli (Fase C drag), cubetti arancioni = edge
+            // (trascina lato / tocca per splittare).
+            if f.poligono != nil, f.id == facciaAttivaId {
+                let r = CGFloat(estensioneMesh) * 0.012
+                for (k, c) in corners.enumerated() {
+                    let s = SCNSphere(radius: r); s.segmentCount = 12
+                    let sm = SCNMaterial(); sm.diffuse.contents = UIColor.white
+                    sm.lightingModel = .constant; sm.writesToDepthBuffer = false
+                    s.materials = [sm]
+                    let node = SCNNode(geometry: s)
+                    node.position = c
+                    node.name = "maniglia:\(f.id):\(k)"
+                    pianiNode.addChildNode(node)
+                }
+                for k in corners.indices {
+                    let a = pts3[k], b = pts3[(k + 1) % pts3.count]
+                    let mid = (a + b) * 0.5
+                    let box = SCNBox(width: r * 1.5, height: r * 1.5, length: r * 1.5, chamferRadius: 0)
+                    let bm = SCNMaterial(); bm.diffuse.contents = UIColor.orange
+                    bm.lightingModel = .constant; bm.writesToDepthBuffer = false
+                    box.materials = [bm]
+                    let node = SCNNode(geometry: box)
+                    node.position = SCNVector3(mid.x, mid.y, mid.z)
+                    node.name = "edge:\(f.id):\(k)"
+                    pianiNode.addChildNode(node)
+                }
             }
         }
     }

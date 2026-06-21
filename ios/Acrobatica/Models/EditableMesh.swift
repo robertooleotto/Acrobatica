@@ -55,6 +55,9 @@ struct FacciaProxy: Identifiable {
     var pianoPunto: SIMD3<Float>? = nil
     var pianoNormale: SIMD3<Float>? = nil
     var erroreRms: Float? = nil   // planarità: RMS distanza triangoli↔piano
+    /// Poligono editabile sul piano (vertici 3D in ordine, chiuso): l'area di
+    /// QUESTO poligono = m² del piano (Fase B dell'editor poligonale).
+    var poligono: [SIMD3<Float>]? = nil
 
     /// #RRGGBB del colore (per l'export JSON).
     var coloreHex: String {
@@ -472,6 +475,42 @@ struct EditableMesh: @unchecked Sendable {
         return (SIMD3(Float(mean.x), Float(mean.y), Float(mean.z)), nrm)
     }
 
+    /// Area totale (somma dei triangoli) di `sel`, nelle unità della mesh.
+    /// Per i m² metrici va moltiplicata per il quadrato della scala mesh→metri.
+    func areaTriangoli(_ sel: Set<Int>) -> Float {
+        var s: Float = 0
+        for i in sel {
+            let t = triangles[i]
+            let cr = simd_cross(vertices[Int(t.y)] - vertices[Int(t.x)],
+                                 vertices[Int(t.z)] - vertices[Int(t.x)])
+            s += simd_length(cr) * 0.5
+        }
+        return s
+    }
+
+    /// True se i due insiemi di triangoli sono spazialmente attaccati (condividono
+    /// un vertice saldato per posizione). Serve al merge complanare "solo se connessi"
+    /// (#14): riunisce un muro spezzato dalle finestre, ma NON fonde due torrette.
+    func adiacenti(_ a: Set<Int>, _ b: Set<Int>) -> Bool {
+        guard !a.isEmpty, !b.isEmpty else { return false }
+        let (alo, ahi) = aabb
+        let ext = max(ahi.x - alo.x, max(ahi.y - alo.y, ahi.z - alo.z))
+        let inv: Float = 1.0 / max(ext * 1e-3, 1e-6)
+        func chiave(_ vi: Int) -> SIMD3<Int32> {
+            let v = vertices[vi]
+            return SIMD3<Int32>(Int32((v.x * inv).rounded()),
+                                Int32((v.y * inv).rounded()),
+                                Int32((v.z * inv).rounded()))
+        }
+        var keysA = Set<SIMD3<Int32>>()
+        for i in a { let t = triangles[i]; keysA.insert(chiave(Int(t.x))); keysA.insert(chiave(Int(t.y))); keysA.insert(chiave(Int(t.z))) }
+        for i in b {
+            let t = triangles[i]
+            if keysA.contains(chiave(Int(t.x))) || keysA.contains(chiave(Int(t.y))) || keysA.contains(chiave(Int(t.z))) { return true }
+        }
+        return false
+    }
+
     /// RMS della distanza dei vertici dei triangoli `sel` dal piano (punto,normale).
     func rmsDalPiano(_ sel: Set<Int>, punto: SIMD3<Float>, normale: SIMD3<Float>) -> Float {
         var s = 0.0; var n = 0
@@ -519,23 +558,80 @@ struct EditableMesh: @unchecked Sendable {
 
     // MARK: Crescita planare dal pennello (§3)
 
-    /// Cresce la regione planare dal segno `seed` per APPARTENENZA AL PIANO
-    /// (non per topologia: la mesh OC ha vertici splittati e il flood-fill non
-    /// si propaga). Dal piano (punto+normale) del seme prende tutti i triangoli
-    /// coplanari (entro `tolDistFraz` del lato) e allineati (entro `tolGradi`).
-    /// Finestre rientranti e balconi sporgenti hanno offset diverso → esclusi.
-    func crescePianare(da seed: Set<Int>, normale pianoN: SIMD3<Float>, punto: SIMD3<Float>,
-                       tolGradi: Float = 18, tolDistFraz: Float = 0.008) -> Set<Int> {
+    /// Cresce la regione planare dal segno `seed` per ADIACENZA CONNESSA: salda i
+    /// vertici per posizione (la mesh OC li splitta agli spigoli, ma le posizioni
+    /// coincidono) per ricostruire l'adiacenza fra triangoli, poi fa un flood-fill
+    /// (BFS) che si propaga SOLO ai triangoli attaccati e che restano sul piano del
+    /// seme (entro `tolDistFraz` del lato) e allineati (entro `tolGradi`).
+    /// Differenza chiave dalla vecchia versione "globale": due superfici complanari
+    /// ma SEPARATE nello spazio (es. due torrette) NON si fondono — la crescita si
+    /// ferma al vuoto fra di esse. Finestre rientranti/balconi sporgenti (offset
+    /// diverso) restano comunque esclusi dal vincolo di distanza.
+    func crescePianare(da seed: Set<Int>, normale pianoNIniz: SIMD3<Float>, punto puntoIniz: SIMD3<Float>,
+                       tolGradi: Float = 18, tolDistFraz: Float = 0.008,
+                       tolCrestaGradi: Float = 45) -> Set<Int> {
         guard !seed.isEmpty else { return seed }
+        var pianoN = pianoNIniz   // (#5) mutabili: il piano si ri-fitta mentre cresce
+        var punto = puntoIniz
         let (alo, ahi) = aabb
         let ext = max(ahi.x - alo.x, max(ahi.y - alo.y, ahi.z - alo.z))
         let tolDist = max(ext * tolDistFraz, 1e-4)
         let cosT = cos(tolGradi * .pi / 180)
+        let cosCresta = cos(tolCrestaGradi * .pi / 180)   // (#4) barriera sullo spigolo vivo
+
+        // 1) salda i vertici su una griglia (~1‰ del lato) → id di vertice "fisico"
+        let inv: Float = 1.0 / max(ext * 1e-3, 1e-6)
+        var weld = [Int32](repeating: -1, count: vertices.count)
+        var dict = [SIMD3<Int32>: Int32](); dict.reserveCapacity(vertices.count)
+        for vi in vertices.indices {
+            let v = vertices[vi]
+            let k = SIMD3<Int32>(Int32((v.x * inv).rounded()),
+                                 Int32((v.y * inv).rounded()),
+                                 Int32((v.z * inv).rounded()))
+            if let id = dict[k] { weld[vi] = id }
+            else { let id = Int32(dict.count); dict[k] = id; weld[vi] = id }
+        }
+        // 2) mappa spigolo(saldato) → triangoli che lo condividono
+        func ekey(_ a: Int32, _ b: Int32) -> Int64 {
+            (Int64(min(a, b)) << 32) | Int64(UInt32(max(a, b)))
+        }
+        var edgeMap = [Int64: [Int]](); edgeMap.reserveCapacity(triangles.count * 2)
+        for ti in triangles.indices {
+            let t = triangles[ti]
+            let a = weld[Int(t.x)], b = weld[Int(t.y)], c = weld[Int(t.z)]
+            edgeMap[ekey(a, b), default: []].append(ti)
+            edgeMap[ekey(b, c), default: []].append(ti)
+            edgeMap[ekey(c, a), default: []].append(ti)
+        }
+        // 3) flood-fill connesso vincolato al piano (con #4 cresta + #5 ri-fit)
         var result = seed
-        for i in triangles.indices where !result.contains(i) {
-            if abs(simd_dot(centroid(triangles[i]) - punto, pianoN)) < tolDist,
-               abs(simd_dot(normale(i), pianoN)) > cosT {
-                result.insert(i)
+        var coda = Array(seed); var qi = 0
+        var prossimoRefit = max(seed.count * 2, 250)   // ri-fitta il piano a soglie crescenti
+        while qi < coda.count {
+            let f = coda[qi]; qi += 1
+            let nf = normale(f)
+            let t = triangles[f]
+            let a = weld[Int(t.x)], b = weld[Int(t.y)], c = weld[Int(t.z)]
+            for ek in [ekey(a, b), ekey(b, c), ekey(c, a)] {
+                guard let vicini = edgeMap[ek] else { continue }
+                for g in vicini where !result.contains(g) {
+                    let ng = normale(g)
+                    // #4 spigolo vivo: non attraversare una cresta netta fra triangoli adiacenti
+                    if abs(simd_dot(nf, ng)) <= cosCresta { continue }
+                    if abs(simd_dot(centroid(triangles[g]) - punto, pianoN)) < tolDist,
+                       abs(simd_dot(ng, pianoN)) > cosT {
+                        result.insert(g); coda.append(g)
+                    }
+                }
+            }
+            // #5 RMS adattivo: ri-fitta il piano sui triangoli accumulati così non
+            // "scivola" su una superficie leggermente curva (mantiene il verso).
+            if result.count >= prossimoRefit {
+                if let (p2, n2) = fitPiano(result) {
+                    punto = p2
+                    pianoN = simd_dot(n2, pianoN) < 0 ? -n2 : n2
+                }
+                prossimoRefit = result.count * 2
             }
         }
         return result
