@@ -336,6 +336,16 @@ struct EditorMesh3DView: View {
                                         in: RoundedRectangle(cornerRadius: 8))
                     }
                 }
+                if model.modoSelezione == .seleziona {
+                    Button { model.multiSelezione.toggle() } label: {
+                        Label("Multi", systemImage: model.multiSelezione ? "square.stack.3d.up.fill" : "square.stack.3d.up")
+                            .font(Theme.Typo.caption(11, .semibold))
+                            .foregroundStyle(model.multiSelezione ? .white : EditorTheme.testo)
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(model.multiSelezione ? EditorTheme.accento : EditorTheme.panelAlt,
+                                        in: RoundedRectangle(cornerRadius: 8))
+                    }
+                }
                 Button { model.avviaPerimetro() } label: {
                     Label("Perimetro", systemImage: "scissors")
                         .font(Theme.Typo.caption(11, .semibold)).foregroundStyle(EditorTheme.testo)
@@ -476,12 +486,12 @@ struct EditorMesh3DView: View {
                             ChipSelezione("Offset −", "minus") { model.offsetPiano(fa.id, verso: -1) }
                             ChipSelezione("Offset +", "plus") { model.offsetPiano(fa.id, verso: 1) }
                             ChipSelezione("Allinea facciata", "link") { model.allineaAllaFacciata(fa.id) }
-                            ChipSelezione("Fitta mesh", "scope") { model.fittaPianoAllaMesh(fa.id) }
+                            ChipSelezione("Fitta mesh", "scope") { model.fittaSelezionateAllaMesh() }
                             Divider().frame(height: 16)
-                            ChipSelezione("Cima +", "arrow.up.to.line") { model.regolaAltezzaFaccia(fa.id, cima: true, verso: 1) }
-                            ChipSelezione("Cima −", "arrow.down.to.line") { model.regolaAltezzaFaccia(fa.id, cima: true, verso: -1) }
-                            ChipSelezione("Base +", "arrow.up") { model.regolaAltezzaFaccia(fa.id, cima: false, verso: 1) }
-                            ChipSelezione("Base −", "arrow.down") { model.regolaAltezzaFaccia(fa.id, cima: false, verso: -1) }
+                            ChipSelezione("Cima +", "arrow.up.to.line") { model.regolaAltezzaSelezionate(cima: true, verso: 1) }
+                            ChipSelezione("Cima −", "arrow.down.to.line") { model.regolaAltezzaSelezionate(cima: true, verso: -1) }
+                            ChipSelezione("Base +", "arrow.up") { model.regolaAltezzaSelezionate(cima: false, verso: 1) }
+                            ChipSelezione("Base −", "arrow.down") { model.regolaAltezzaSelezionate(cima: false, verso: -1) }
                         }
                     }
                 }
@@ -500,8 +510,11 @@ struct EditorMesh3DView: View {
                                             .foregroundStyle(EditorTheme.testo)
                                     }
                                     .padding(.horizontal, 8).padding(.vertical, 6)
-                                    .background(f.id == model.facciaAttivaId ? EditorTheme.accento.opacity(0.25) : EditorTheme.panelAlt,
+                                    .background(model.facceSelezionate.contains(f.id) ? EditorTheme.accento.opacity(0.35)
+                                                : (f.id == model.facciaAttivaId ? EditorTheme.accento.opacity(0.25) : EditorTheme.panelAlt),
                                                 in: RoundedRectangle(cornerRadius: 8))
+                                    .overlay(RoundedRectangle(cornerRadius: 8)
+                                        .stroke(model.facceSelezionate.contains(f.id) ? EditorTheme.accento : .clear, lineWidth: 1.5))
                                 }
                             }
                         }
@@ -1310,6 +1323,7 @@ struct PerimetroDisegno {
 /// (la sezione di una facciata è una curva piana: niente "sparizione" di geometria).
 private struct PannelloPerimetro: View {
     @ObservedObject var model: Mesh3DModel
+    @State private var dito: CGPoint? = nil   // posizione corrente del dito (per la lente)
 
     var body: some View {
         GeometryReader { geo in
@@ -1327,32 +1341,55 @@ private struct PannelloPerimetro: View {
             let toUV = { (p: CGPoint) -> CGPoint in
                 CGPoint(x: b.minX + (p.x - offX) / scala, y: b.maxY - (p.y - offY) / scala)
             }
+            let scena = { (ctx: GraphicsContext) in
+                var sp = Path()
+                for s in d.segmenti { sp.move(to: toView(s.0)); sp.addLine(to: toView(s.1)) }
+                ctx.stroke(sp, with: .color(.teal), lineWidth: 1.5)
+                for s in d.segmenti {
+                    let m = CGPoint(x: (s.0.x + s.1.x) / 2, y: (s.0.y + s.1.y) / 2)
+                    let v = toView(m)
+                    ctx.fill(Path(ellipseIn: CGRect(x: v.x - 1.5, y: v.y - 1.5, width: 3, height: 3)), with: .color(.teal))
+                }
+                if d.spline.count >= 2 {
+                    var yp = Path(); yp.move(to: toView(d.spline[0]))
+                    for q in d.spline.dropFirst() { yp.addLine(to: toView(q)) }
+                    ctx.stroke(yp, with: .color(.yellow), lineWidth: 2.5)
+                }
+                for q in d.punti {
+                    let v = toView(q)
+                    ctx.fill(Path(ellipseIn: CGRect(x: v.x - 5, y: v.y - 5, width: 10, height: 10)), with: .color(.yellow))
+                }
+            }
             ZStack {
                 Color.black.opacity(0.9)
-                Canvas { ctx, _ in
-                    var sp = Path()
-                    for s in d.segmenti { sp.move(to: toView(s.0)); sp.addLine(to: toView(s.1)) }
-                    ctx.stroke(sp, with: .color(.teal), lineWidth: 1.5)
-                    for s in d.segmenti {
-                        let m = CGPoint(x: (s.0.x + s.1.x) / 2, y: (s.0.y + s.1.y) / 2)
-                        let v = toView(m)
-                        ctx.fill(Path(ellipseIn: CGRect(x: v.x - 1.5, y: v.y - 1.5, width: 3, height: 3)), with: .color(.teal))
-                    }
-                    if d.spline.count >= 2 {
-                        var yp = Path(); yp.move(to: toView(d.spline[0]))
-                        for q in d.spline.dropFirst() { yp.addLine(to: toView(q)) }
-                        ctx.stroke(yp, with: .color(.yellow), lineWidth: 2.5)
-                    }
-                    for q in d.punti {
-                        let v = toView(q)
-                        ctx.fill(Path(ellipseIn: CGRect(x: v.x - 5, y: v.y - 5, width: 10, height: 10)), with: .color(.yellow))
-                    }
-                }
+                Canvas { ctx, _ in scena(ctx) }
                 .contentShape(Rectangle())
-                .gesture(DragGesture(minimumDistance: 0).onEnded { val in
-                    guard b.width > 0 else { return }
-                    model.toccaUV(toUV(val.location))
-                })
+                .gesture(DragGesture(minimumDistance: 0)
+                    .onChanged { val in dito = val.location }
+                    .onEnded { val in
+                        dito = nil
+                        guard b.width > 0 else { return }
+                        model.toccaUV(toUV(val.location))
+                    })
+                // Lente d'ingrandimento sotto il dito
+                if let p = dito {
+                    let zoom: CGFloat = 2.6
+                    let lato: CGFloat = 132
+                    let cx = min(max(p.x, lato / 2), geo.size.width - lato / 2)
+                    let cy = max(p.y - 110, lato / 2)   // sopra il dito
+                    Canvas { ctx, _ in
+                        ctx.translateBy(x: lato / 2 - p.x * zoom, y: lato / 2 - p.y * zoom)
+                        ctx.scaleBy(x: zoom, y: zoom)
+                        scena(ctx)
+                    }
+                    .frame(width: lato, height: lato)
+                    .background(Color.black.opacity(0.92))
+                    .clipShape(Circle())
+                    .overlay(Circle().stroke(.white.opacity(0.6), lineWidth: 1.5))
+                    .overlay(Image(systemName: "plus").font(.system(size: 14)).foregroundStyle(.yellow))
+                    .position(x: cx, y: cy)
+                    .allowsHitTesting(false)
+                }
                 if b.width == 0 {
                     Text("Nessuna sezione a questa quota — sposta lo slider")
                         .font(.caption).foregroundStyle(.white.opacity(0.7))
@@ -1508,6 +1545,9 @@ final class Mesh3DModel: ObservableObject {
     // Facce proxy (§3): pennelli colorati = facce/piani
     @Published var facce: [FacciaProxy] = []
     @Published var facciaAttivaId: Int?
+    /// Multi-selezione: insieme dei piani selezionati (oltre a quello attivo).
+    @Published var facceSelezionate: Set<Int> = []
+    @Published var multiSelezione = false
     @Published var pianiGenerati = 0
     private var prossimoIdFaccia = 1
 
@@ -2563,8 +2603,8 @@ final class Mesh3DModel: ObservableObject {
               var poly = facce[i].poligono, let n0 = facce[i].pianoNormale,
               let p0 = facce[i].pianoPunto else { return }
         let n = simd_normalize(n0)
-        let banda = estensioneMesh * 0.06
-        let cosN = cos(35 * Float.pi / 180)
+        let banda = estensioneMesh * 0.12
+        let cosN = cos(50 * Float.pi / 180)
         // estensione orizzontale del poligono (per non prendere muri lontani)
         let su = simd_normalize(gravitaSu)
         var asseOr = simd_cross(su, n)
@@ -2579,7 +2619,7 @@ final class Mesh3DModel: ObservableObject {
             let o = simd_dot(c - p0, asseOr)
             if o >= oMin, o <= oMax { vicini.insert(t) }
         }
-        guard vicini.count >= 20, let (p2, n2v) = mesh.fitPianoRANSAC(vicini) else { return }
+        guard vicini.count >= 10, let (p2, n2v) = mesh.fitPianoRANSAC(vicini) else { return }
         var n2 = simd_normalize(n2v)
         if simd_dot(n2, n) < 0 { n2 = -n2 }
         for k in poly.indices { poly[k] = poly[k] - simd_dot(poly[k] - p2, n2) * n2 }   // sul piano fittato
@@ -2730,11 +2770,29 @@ final class Mesh3DModel: ObservableObject {
     /// Azzera la marcatura corrente (semi + selezione) senza generare.
     func annullaMarcatura() { annullaSemi(); deselezionaTutto() }
 
-    /// Rende attivo un piano e ridisegna (per mostrarne le maniglie).
+    /// Rende attivo un piano e ridisegna. In multi-selezione il tocco AGGIUNGE/
+    /// TOGLIE dal set; altrimenti seleziona solo quello.
     func selezionaFacciaAttiva(_ id: Int) {
+        if multiSelezione {
+            if facceSelezionate.contains(id) { facceSelezionate.remove(id) } else { facceSelezionate.insert(id) }
+        } else {
+            facceSelezionate = [id]
+        }
         facciaAttivaId = id
         ridisegnaFacce(); ridisegnaPiani()
     }
+
+    /// Piani su cui agire: i selezionati, o l'attivo se il set è vuoto.
+    private var bersagli: [Int] {
+        facceSelezionate.isEmpty ? (facciaAttivaId.map { [$0] } ?? []) : Array(facceSelezionate)
+    }
+
+    /// Regola l'altezza di TUTTI i piani selezionati (cima/base).
+    func regolaAltezzaSelezionate(cima: Bool, verso: Float) {
+        for id in bersagli { regolaAltezzaFaccia(id, cima: cima, verso: verso) }
+    }
+    /// Fitta alla mesh TUTTI i piani selezionati.
+    func fittaSelezionateAllaMesh() { for id in bersagli { fittaPianoAllaMesh(id) } }
 
     /// Usa la selezione come seme. `split=false` → un solo piano da tutta la
     /// selezione (più zone unite in un piano). `split=true` → un piano per ogni
@@ -3091,11 +3149,12 @@ final class Mesh3DModel: ObservableObject {
             // sfere bianche = angoli (Fase C drag), cubetti arancioni = edge
             // (trascina lato / tocca per splittare).
             if f.poligono != nil, f.id == facciaAttivaId {
-                let r = CGFloat(estensioneMesh) * 0.012
+                let r = CGFloat(estensioneMesh) * 0.02   // più grandi e sempre sopra (no depth)
                 for (k, c) in corners.enumerated() {
-                    let s = SCNSphere(radius: r); s.segmentCount = 12
+                    let s = SCNSphere(radius: r); s.segmentCount = 14
                     let sm = SCNMaterial(); sm.diffuse.contents = UIColor.white
-                    sm.lightingModel = .constant; sm.writesToDepthBuffer = false
+                    sm.lightingModel = .constant
+                    sm.readsFromDepthBuffer = false; sm.writesToDepthBuffer = false
                     s.materials = [sm]
                     let node = SCNNode(geometry: s)
                     node.position = c
@@ -3105,9 +3164,10 @@ final class Mesh3DModel: ObservableObject {
                 for k in corners.indices {
                     let a = pts3[k], b = pts3[(k + 1) % pts3.count]
                     let mid = (a + b) * 0.5
-                    let box = SCNBox(width: r * 1.5, height: r * 1.5, length: r * 1.5, chamferRadius: 0)
+                    let box = SCNBox(width: r * 1.7, height: r * 1.7, length: r * 1.7, chamferRadius: 0)
                     let bm = SCNMaterial(); bm.diffuse.contents = UIColor.orange
-                    bm.lightingModel = .constant; bm.writesToDepthBuffer = false
+                    bm.lightingModel = .constant
+                    bm.readsFromDepthBuffer = false; bm.writesToDepthBuffer = false
                     box.materials = [bm]
                     let node = SCNNode(geometry: box)
                     node.position = SCNVector3(mid.x, mid.y, mid.z)
