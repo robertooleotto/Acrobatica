@@ -1362,6 +1362,7 @@ final class Mesh3DModel: ObservableObject {
     @Published private(set) var numPuntiPerimetro = 0
     private var puntiPerimetro: [SIMD3<Float>] = []
     private var sliceS0: Float = 0   // quota assoluta del piano di slice (lungo su)
+    private var prevMostraMesh = true   // ripristino visibilità mesh uscendo dal perimetro
     // Pennello: dimensione + vincolo alle normali della geometria
     @Published var raggioPennello: CGFloat = 42
     @Published var vincolaNormali = false
@@ -2227,8 +2228,11 @@ final class Mesh3DModel: ObservableObject {
         modoPerimetro = true
         strumento = .orbita        // il pan ruota la vista; il tap posa i punti
         puntiPerimetro = []; numPuntiPerimetro = 0
+        prevMostraMesh = mostraMesh
+        mostraMesh = false         // dall'alto la mesh sarebbe di taglio: mostra solo il profilo
         aggiornaSlice()
-        snapAlto()
+        snapAlto()                 // vista dall'alto: si vede il footprint
+        inquadra()
     }
 
     /// Esce dalla modalità perimetro e pulisce slice/traccia.
@@ -2237,6 +2241,7 @@ final class Mesh3DModel: ObservableObject {
         strumento = .facce         // torna all'editor dei piani
         puntiPerimetro = []; numPuntiPerimetro = 0
         perimetroNode.childNodes.forEach { $0.removeFromParentNode() }
+        mostraMesh = prevMostraMesh
     }
 
     /// Piano di slice corrente (punto, normale) — per il raycast dei tap.
@@ -2274,11 +2279,10 @@ final class Mesh3DModel: ObservableObject {
         registraUndo()
         let su = simd_normalize(gravitaSu)
         let (sMin, sMax) = mesh.rangeLungo(su)
-        var lati: [(SIMD3<Float>, SIMD3<Float>)] = []
-        for i in 0..<(puntiPerimetro.count - 1) { lati.append((puntiPerimetro[i], puntiPerimetro[i + 1])) }
-        if puntiPerimetro.count >= 3, let a = puntiPerimetro.first, let b = puntiPerimetro.last {
-            lati.append((b, a))   // chiudi il perimetro
-        }
+        // segui la spline e spezzala in lati rettilinei (1 piano per muro)
+        let lati: [(SIMD3<Float>, SIMD3<Float>)] = puntiPerimetro.count >= 3
+            ? semplificaSegmenti(splinePunti())
+            : [(puntiPerimetro[0], puntiPerimetro[puntiPerimetro.count - 1])]
         for (a, b) in lati {
             let aH = a - simd_dot(a, su) * su, bH = b - simd_dot(b, su) * su   // parte orizzontale
             var nrm = simd_cross(b - a, su)
@@ -2302,6 +2306,51 @@ final class Mesh3DModel: ObservableObject {
         ridisegnaFacce(); ridisegnaPiani()
     }
 
+    /// Spline Catmull-Rom passante per i punti di controllo (chiusa se ≥3 punti):
+    /// "ricalca" il profilo con una curva morbida.
+    private func splinePunti(perSeg: Int = 12) -> [SIMD3<Float>] {
+        let p = puntiPerimetro
+        guard p.count >= 3 else { return p }
+        let n = p.count
+        func cr(_ p0: SIMD3<Float>, _ p1: SIMD3<Float>, _ p2: SIMD3<Float>, _ p3: SIMD3<Float>, _ t: Float) -> SIMD3<Float> {
+            let t2 = t * t, t3 = t2 * t
+            let a: SIMD3<Float> = 2 * p1
+            let b: SIMD3<Float> = (p2 - p0) * t
+            let c0: SIMD3<Float> = 2 * p0 - 5 * p1 + 4 * p2 - p3
+            let c: SIMD3<Float> = c0 * t2
+            let d0: SIMD3<Float> = 3 * p1 - 3 * p2 + p3 - p0
+            let d: SIMD3<Float> = d0 * t3
+            return (a + b + c + d) * 0.5
+        }
+        var out: [SIMD3<Float>] = []
+        for i in 0..<n {   // chiusa
+            let p0 = p[(i - 1 + n) % n], p1 = p[i], p2 = p[(i + 1) % n], p3 = p[(i + 2) % n]
+            for s in 0..<perSeg { out.append(cr(p0, p1, p2, p3, Float(s) / Float(perSeg))) }
+        }
+        out.append(p[0])
+        return out
+    }
+
+    /// Semplifica una polilinea in segmenti rettilinei: spezza dove la direzione
+    /// cambia oltre `tolGradi` (muri dritti → 1 segmento, curve → più segmenti).
+    private func semplificaSegmenti(_ pts: [SIMD3<Float>], tolGradi: Float = 12) -> [(SIMD3<Float>, SIMD3<Float>)] {
+        guard pts.count >= 2 else { return [] }
+        let cosT = cos(tolGradi * .pi / 180)
+        var segs: [(SIMD3<Float>, SIMD3<Float>)] = []
+        var inizio = pts[0]
+        var dirRif: SIMD3<Float>? = nil
+        for i in 1..<pts.count {
+            let d = pts[i] - pts[i - 1]
+            if simd_length(d) < 1e-6 { continue }
+            let dir = simd_normalize(d)
+            if let r = dirRif, simd_dot(r, dir) < cosT {
+                segs.append((inizio, pts[i - 1])); inizio = pts[i - 1]; dirRif = dir
+            } else if dirRif == nil { dirRif = dir }
+        }
+        segs.append((inizio, pts.last!))
+        return segs
+    }
+
     private func geometriaSegmenti(_ segs: [(SIMD3<Float>, SIMD3<Float>)], colore: UIColor) -> SCNGeometry? {
         guard !segs.isEmpty else { return nil }
         var verts: [SCNVector3] = []; var idx: [Int32] = []
@@ -2321,14 +2370,15 @@ final class Mesh3DModel: ObservableObject {
 
     private func ridisegnaPerimetro(_ segs: [(SIMD3<Float>, SIMD3<Float>)]) {
         perimetroNode.childNodes.forEach { $0.removeFromParentNode() }
-        // contorno della sezione (grigio chiaro) = guida da ricalcare
-        if let g = geometriaSegmenti(segs, colore: UIColor(white: 0.55, alpha: 1)) {
+        // contorno della sezione (ciano acceso) = guida da ricalcare
+        if let g = geometriaSegmenti(segs, colore: UIColor.systemTeal) {
             perimetroNode.addChildNode(SCNNode(geometry: g))
         }
-        // traccia dell'utente (giallo) + punti
-        if puntiPerimetro.count >= 2 {
+        // traccia dell'utente come SPLINE morbida (giallo) + punti di controllo
+        let curva = puntiPerimetro.count >= 3 ? splinePunti() : puntiPerimetro
+        if curva.count >= 2 {
             var ts: [(SIMD3<Float>, SIMD3<Float>)] = []
-            for i in 0..<(puntiPerimetro.count - 1) { ts.append((puntiPerimetro[i], puntiPerimetro[i + 1])) }
+            for i in 0..<(curva.count - 1) { ts.append((curva[i], curva[i + 1])) }
             if let g = geometriaSegmenti(ts, colore: .systemYellow) {
                 perimetroNode.addChildNode(SCNNode(geometry: g))
             }
