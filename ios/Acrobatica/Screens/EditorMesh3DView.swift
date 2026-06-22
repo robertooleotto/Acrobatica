@@ -274,6 +274,14 @@ struct EditorMesh3DView: View {
                             .padding(.horizontal, 10).padding(.vertical, 6)
                             .background(EditorTheme.panelAlt, in: RoundedRectangle(cornerRadius: 8))
                     }
+                    Button { model.chiudiPerimetro.toggle() } label: {
+                        Label("Chiudi", systemImage: model.chiudiPerimetro ? "checkmark.circle.fill" : "circle")
+                            .font(Theme.Typo.caption(11, .semibold))
+                            .foregroundStyle(model.chiudiPerimetro ? .white : EditorTheme.testo)
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(model.chiudiPerimetro ? EditorTheme.accento : EditorTheme.panelAlt,
+                                        in: RoundedRectangle(cornerRadius: 8))
+                    }
                     Spacer()
                     Button { model.annullaUltimoPuntoPerimetro() } label: {
                         Label("Indietro", systemImage: "arrow.uturn.backward")
@@ -462,6 +470,7 @@ struct EditorMesh3DView: View {
                             ChipSelezione("Offset −", "minus") { model.offsetPiano(fa.id, verso: -1) }
                             ChipSelezione("Offset +", "plus") { model.offsetPiano(fa.id, verso: 1) }
                             ChipSelezione("Allinea facciata", "link") { model.allineaAllaFacciata(fa.id) }
+                            ChipSelezione("Fitta mesh", "scope") { model.fittaPianoAllaMesh(fa.id) }
                             Divider().frame(height: 16)
                             ChipSelezione("Cima +", "arrow.up.to.line") { model.regolaAltezzaFaccia(fa.id, cima: true, verso: 1) }
                             ChipSelezione("Cima −", "arrow.down.to.line") { model.regolaAltezzaFaccia(fa.id, cima: true, verso: -1) }
@@ -1474,6 +1483,7 @@ final class Mesh3DModel: ObservableObject {
     // Rileva perimetro: slice orizzontale + tracciamento del perimetro a punti.
     @Published var modoPerimetro = false
     @Published var perimetroTraccia = false   // false = posiziona sezione su 3D; true = traccia 2D
+    @Published var chiudiPerimetro = false { didSet { aggiornaSlice() } }   // chiusura opzionale (default aperto)
     @Published var quotaSlice: Float = 0.5 { didSet { aggiornaSlice() } }
     @Published private(set) var numPuntiPerimetro = 0
     private var puntiPerimetro: [SIMD3<Float>] = []
@@ -2410,7 +2420,7 @@ final class Mesh3DModel: ObservableObject {
         d.segmenti = segs.map { (uv($0.0), uv($0.1)) }
         d.punti = puntiPerimetro.map { uv($0) }
         var traccia = puntiPerimetro
-        if puntiPerimetro.count >= 3, let f = puntiPerimetro.first { traccia.append(f) }  // chiudi
+        if chiudiPerimetro, puntiPerimetro.count >= 3, let f = puntiPerimetro.first { traccia.append(f) }
         d.spline = traccia.map { uv($0) }   // linee rette tra i punti (campo riusato)
         // bounds (unione di tutti i punti)
         var minX = CGFloat.greatestFiniteMagnitude, minY = minX
@@ -2443,10 +2453,10 @@ final class Mesh3DModel: ObservableObject {
         registraUndo()
         let su = simd_normalize(gravitaSu)
         let (sMin, sMax) = mesh.rangeLungo(su)
-        // un lato rettilineo per ogni coppia di punti consecutivi (+ chiusura se ≥3)
+        // un lato rettilineo per ogni coppia di punti consecutivi (+ chiusura opzionale)
         var lati: [(SIMD3<Float>, SIMD3<Float>)] = []
         for i in 0..<(puntiPerimetro.count - 1) { lati.append((puntiPerimetro[i], puntiPerimetro[i + 1])) }
-        if puntiPerimetro.count >= 3, let a = puntiPerimetro.first, let b = puntiPerimetro.last {
+        if chiudiPerimetro, puntiPerimetro.count >= 3, let a = puntiPerimetro.first, let b = puntiPerimetro.last {
             lati.append((b, a))
         }
         for (a, b) in lati {
@@ -2464,12 +2474,49 @@ final class Mesh3DModel: ObservableObject {
             f.pianoPunto = (la + lb + hb + ha) * 0.25
             f.tipo = .facciata
             facce.append(f)
+            fittaPianoAllaMesh(f.id)   // segui il muro reale (anche inclinato)
         }
         esciPerimetro()
         pianiGenerati = facce.count
         mostraPiani = true
         facciaAttivaId = facce.last?.id
         ridisegnaFacce(); ridisegnaPiani()
+    }
+
+    /// Fitta il piano (poligono) alla MESH reale: raccoglie i triangoli vicini al
+    /// piano e allineati, ne fa il fit RANSAC e ri-proietta il poligono sul piano
+    /// fittato. Così, se il muro è inclinato, il piano lo segue.
+    func fittaPianoAllaMesh(_ id: Int) {
+        guard let i = facce.firstIndex(where: { $0.id == id }),
+              var poly = facce[i].poligono, let n0 = facce[i].pianoNormale,
+              let p0 = facce[i].pianoPunto else { return }
+        let n = simd_normalize(n0)
+        let banda = estensioneMesh * 0.06
+        let cosN = cos(35 * Float.pi / 180)
+        // estensione orizzontale del poligono (per non prendere muri lontani)
+        let su = simd_normalize(gravitaSu)
+        var asseOr = simd_cross(su, n)
+        if simd_length(asseOr) < 1e-5 { asseOr = simd_cross(SIMD3(1, 0, 0), n) }
+        asseOr = simd_normalize(asseOr)
+        let proj = poly.map { simd_dot($0 - p0, asseOr) }
+        let oMin = (proj.min() ?? 0) - banda, oMax = (proj.max() ?? 0) + banda
+        var vicini = Set<Int>()
+        for t in mesh.triangles.indices {
+            let c = mesh.centroid(mesh.triangles[t])
+            guard abs(simd_dot(c - p0, n)) < banda, abs(simd_dot(mesh.normale(t), n)) > cosN else { continue }
+            let o = simd_dot(c - p0, asseOr)
+            if o >= oMin, o <= oMax { vicini.insert(t) }
+        }
+        guard vicini.count >= 20, let (p2, n2v) = mesh.fitPianoRANSAC(vicini) else { return }
+        var n2 = simd_normalize(n2v)
+        if simd_dot(n2, n) < 0 { n2 = -n2 }
+        for k in poly.indices { poly[k] = poly[k] - simd_dot(poly[k] - p2, n2) * n2 }   // sul piano fittato
+        facce[i].poligono = poly
+        facce[i].pianoNormale = n2
+        facce[i].pianoPunto = poly.reduce(SIMD3<Float>(0, 0, 0), +) / Float(poly.count)
+        facce[i].triangoli = vicini
+        facce[i].erroreRms = mesh.rmsDalPiano(vicini, punto: p2, normale: n2)
+        ridisegnaPiani()
     }
 
     /// Spline Catmull-Rom passante per i punti di controllo (chiusa se ≥3 punti):
@@ -2580,7 +2627,7 @@ final class Mesh3DModel: ObservableObject {
         }
         // traccia dell'utente a linee RETTE (giallo) + punti di controllo
         var traccia = puntiPerimetro
-        if puntiPerimetro.count >= 3, let f = puntiPerimetro.first { traccia.append(f) }  // chiudi
+        if chiudiPerimetro, puntiPerimetro.count >= 3, let f = puntiPerimetro.first { traccia.append(f) }
         if traccia.count >= 2 {
             var ts: [(SIMD3<Float>, SIMD3<Float>)] = []
             for i in 0..<(traccia.count - 1) { ts.append((traccia[i], traccia[i + 1])) }
