@@ -312,7 +312,7 @@ struct EditorMesh3DView: View {
                     }
                 }
                 Spacer()
-                if model.modoSelezione != .tocco {
+                if model.modoSelezione.disegnaSelezione {
                     Button { model.selezioneAdditiva.toggle() } label: {
                         Label("Aggiungi", systemImage: model.selezioneAdditiva ? "plus.square.fill.on.square.fill" : "plus.square.on.square")
                             .font(Theme.Typo.caption(11, .semibold))
@@ -357,7 +357,7 @@ struct EditorMesh3DView: View {
                             .foregroundStyle(EditorTheme.testoMuto)
                     }
                 }
-                if model.modoSelezione != .tocco {
+                if model.modoSelezione.disegnaSelezione {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 6) {
                             ChipSelezione("Tutto", "checklist") { model.selezionaTutto() }
@@ -510,6 +510,7 @@ struct EditorMesh3DView: View {
 
     private var suggerimentoPiani: String {
         switch model.modoSelezione {
+        case .seleziona:  return "tocca un piano per selezionarlo e modificarlo"
         case .tocco:      return "tocca ogni superficie per un seme, poi Genera piani"
         case .pennello:   return "pennella le superfici, poi Genera piani"
         case .rettangolo: return "trascina un rettangolo sulle superfici, poi Genera piani"
@@ -1011,7 +1012,7 @@ private struct SceneKitContainer: UIViewRepresentable {
                     aggiornaRettangolo(da: rettInizio ?? p, a: p)
                 case .pennello:
                     pennella(p); disegnaCerchioPennello(p)
-                case .tocco:
+                case .tocco, .seleziona:
                     break
                 }
             case .ended, .cancelled:
@@ -1021,7 +1022,7 @@ private struct SceneKitContainer: UIViewRepresentable {
                     if lassoPunti.count >= 3 { selezionaDaPoligono(lassoPunti) }
                 case .rettangolo:
                     if let a = rettInizio { selezionaDaRettangolo(a, p) }
-                case .pennello, .tocco:
+                case .pennello, .tocco, .seleziona:
                     break   // selezione già applicata in continuo / nessun pan
                 }
                 lassoPunti = []; rettInizio = nil; cacheSchermo = []
@@ -1134,7 +1135,7 @@ private struct SceneKitContainer: UIViewRepresentable {
                 case .lazo:       lassoPunti.append(p); aggiornaTracciato(chiusa: true)
                 case .rettangolo: aggiornaRettangolo(da: rettInizio ?? p, a: p)
                 case .pennello:   pennella(p); disegnaCerchioPennello(p)
-                case .tocco:      break
+                case .tocco, .seleziona: break
                 }
             case .ended, .cancelled:
                 switch model.modoSelezione {
@@ -1143,7 +1144,7 @@ private struct SceneKitContainer: UIViewRepresentable {
                     if lassoPunti.count >= 3 { selezionaDaPoligono(lassoPunti) }
                 case .rettangolo:
                     if let a = rettInizio { selezionaDaRettangolo(a, p) }
-                case .pennello, .tocco:
+                case .pennello, .tocco, .seleziona:
                     break
                 }
                 lassoPunti = []; rettInizio = nil; cacheSchermo = []; lassoLayer?.path = nil
@@ -1386,10 +1387,11 @@ enum StrumentoMesh3D: String, CaseIterable, Identifiable {
 
 /// Modo di selezione (§2): lazo libero, rettangolo, pennello.
 enum ModoSelezione: String, CaseIterable, Identifiable {
-    case tocco, pennello, rettangolo, lazo
+    case seleziona, tocco, pennello, rettangolo, lazo
     var id: String { rawValue }
     var etichetta: String {
         switch self {
+        case .seleziona:  return "Seleziona"
         case .tocco:      return "Tocco"
         case .pennello:   return "Pennello"
         case .rettangolo: return "Rettangolo"
@@ -1398,12 +1400,15 @@ enum ModoSelezione: String, CaseIterable, Identifiable {
     }
     var icona: String {
         switch self {
+        case .seleziona:  return "hand.point.up.left"
         case .tocco:      return "hand.tap"
         case .pennello:   return "paintbrush.pointed"
         case .rettangolo: return "rectangle.dashed"
         case .lazo:       return "lasso"
         }
     }
+    /// Modi che producono una selezione di triangoli col pan (vs tocco/seleziona).
+    var disegnaSelezione: Bool { self == .pennello || self == .rettangolo || self == .lazo }
 }
 
 /// Faccia del box di lavoro trascinabile (una maniglia per lato).
@@ -1459,7 +1464,7 @@ final class Mesh3DModel: ObservableObject {
     }
     private(set) var selezione = Set<Int>()
     @Published var numSelezionati = 0
-    @Published var modoSelezione: ModoSelezione = .tocco
+    @Published var modoSelezione: ModoSelezione = .seleziona
     /// Le nuove selezioni si sommano invece di sostituire (più zone insieme).
     @Published var selezioneAdditiva = false
     /// Flusso rapido: ogni tocco lascia un seme; "Cresci tutti" li fa crescere insieme.
