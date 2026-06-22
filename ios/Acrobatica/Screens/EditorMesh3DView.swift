@@ -251,13 +251,7 @@ struct EditorMesh3DView: View {
             if !model.perimetroTraccia {
                 // FASE 1: posiziona la sezione sul 3D, poi passa a tracciare
                 HStack(spacing: 8) {
-                    Button { model.vistaDallAlto() } label: {
-                        Label("Dall'alto", systemImage: "arrow.down.to.line")
-                            .font(Theme.Typo.caption(11, .semibold)).foregroundStyle(EditorTheme.testo)
-                            .padding(.horizontal, 10).padding(.vertical, 6)
-                            .background(EditorTheme.panelAlt, in: RoundedRectangle(cornerRadius: 8))
-                    }
-                    Text("ruota/sposta per trovare il punto adatto")
+                    Text("sposta lo slice; ruota la vista se vuoi")
                         .font(Theme.Typo.caption(10)).foregroundStyle(EditorTheme.testoMuto)
                     Spacer()
                     Button { model.iniziaTraccia() } label: {
@@ -468,6 +462,11 @@ struct EditorMesh3DView: View {
                             ChipSelezione("Offset −", "minus") { model.offsetPiano(fa.id, verso: -1) }
                             ChipSelezione("Offset +", "plus") { model.offsetPiano(fa.id, verso: 1) }
                             ChipSelezione("Allinea facciata", "link") { model.allineaAllaFacciata(fa.id) }
+                            Divider().frame(height: 16)
+                            ChipSelezione("Cima +", "arrow.up.to.line") { model.regolaAltezzaFaccia(fa.id, cima: true, verso: 1) }
+                            ChipSelezione("Cima −", "arrow.down.to.line") { model.regolaAltezzaFaccia(fa.id, cima: true, verso: -1) }
+                            ChipSelezione("Base +", "arrow.up") { model.regolaAltezzaFaccia(fa.id, cima: false, verso: 1) }
+                            ChipSelezione("Base −", "arrow.down") { model.regolaAltezzaFaccia(fa.id, cima: false, verso: -1) }
                         }
                     }
                 }
@@ -937,6 +936,15 @@ private struct SceneKitContainer: UIViewRepresentable {
                 if let m = maniglia(sotto: pt, in: v), m.edge {
                     model.splittaEdge(faccia: m.faccia, edge: m.k)
                     return
+                }
+                // Piano solo-poligono (es. facciata estrusa): selezionabile dal suo
+                // riempimento "piano:<id>".
+                let tutti = v.hitTest(pt, options: [.searchMode: SCNHitTestSearchMode.all.rawValue])
+                for hh in tutti {
+                    if let nm = hh.node.name, nm.hasPrefix("piano:"),
+                       let id = Int(nm.dropFirst("piano:".count)) {
+                        model.selezionaFacciaAttiva(id); return
+                    }
                 }
                 let hits = v.hitTest(pt, options: [.searchMode: SCNHitTestSearchMode.closest.rawValue])
                 guard let h = hits.first(where: { $0.node === model.contentNode }) else { return }
@@ -2350,12 +2358,11 @@ final class Mesh3DModel: ObservableObject {
     func esciPerimetro() {
         modoPerimetro = false
         perimetroTraccia = false
-        strumento = .facce
+        strumento = .orbita
         puntiPerimetro = []; numPuntiPerimetro = 0
         perimetroNode.childNodes.forEach { $0.removeFromParentNode() }
         mostraMesh = true
-        snapIso()      // vista 3/4: la mesh non è mai "di taglio" → sempre visibile
-        inquadra()
+        // NESSUN cambio camera: resta dove l'hai lasciata → la mesh non sparisce.
     }
 
     /// Vista dall'alto on-demand per posizionare/vedere la sezione.
@@ -2874,6 +2881,23 @@ final class Mesh3DModel: ObservableObject {
         ridisegnaPiani()
     }
 
+    /// Regola l'altezza del poligono: sposta la CIMA (cima=true) o la BASE
+    /// (cima=false) lungo la gravità → alza/abbassa il bordo alto/basso delle facciate.
+    func regolaAltezzaFaccia(_ id: Int, cima: Bool, verso: Float) {
+        guard let i = facce.firstIndex(where: { $0.id == id }),
+              var poly = facce[i].poligono, poly.count >= 3 else { return }
+        let su = simd_normalize(gravitaSu)
+        let proj = poly.map { simd_dot($0, su) }
+        guard let lo = proj.min(), let hi = proj.max(), hi > lo else { return }
+        let mid = (lo + hi) * 0.5
+        let step = su * (estensioneMesh * 0.02 * verso)
+        registraUndo()
+        for k in poly.indices where (proj[k] >= mid) == cima { poly[k] += step }
+        facce[i].poligono = poly
+        facce[i].pianoPunto = poly.reduce(SIMD3<Float>(0, 0, 0), +) / Float(poly.count)
+        ridisegnaPiani()
+    }
+
     /// Quad colorato per ogni piano fittato (anteprima multipiano proxy).
     private func ridisegnaPiani() {
         pianiNode.childNodes.forEach { $0.removeFromParentNode() }
@@ -2923,7 +2947,9 @@ final class Mesh3DModel: ObservableObject {
             m.isDoubleSided = true; m.lightingModel = .constant
             m.writesToDepthBuffer = soloPiani
             g.materials = [m]
-            pianiNode.addChildNode(SCNNode(geometry: g))
+            let fill = SCNNode(geometry: g)
+            fill.name = "piano:\(f.id)"   // selezionabile col tap (anche piani solo-poligono)
+            pianiNode.addChildNode(fill)
             if let c = MeshFactory.lineaGeometria(corners, colore: f.colore, chiusa: true) {
                 pianiNode.addChildNode(SCNNode(geometry: c))
             }
