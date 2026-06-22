@@ -282,6 +282,12 @@ struct EditorMesh3DView: View {
                             .background(model.chiudiPerimetro ? EditorTheme.accento : EditorTheme.panelAlt,
                                         in: RoundedRectangle(cornerRadius: 8))
                     }
+                    Button { model.autoPerimetro() } label: {
+                        Label("Auto angoli", systemImage: "wand.and.stars")
+                            .font(Theme.Typo.caption(11, .semibold)).foregroundStyle(EditorTheme.testo)
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(EditorTheme.panelAlt, in: RoundedRectangle(cornerRadius: 8))
+                    }
                     Spacer()
                     Button { model.annullaUltimoPuntoPerimetro() } label: {
                         Label("Indietro", systemImage: "arrow.uturn.backward")
@@ -1487,6 +1493,7 @@ final class Mesh3DModel: ObservableObject {
     @Published var quotaSlice: Float = 0.5 { didSet { aggiornaSlice() } }
     @Published private(set) var numPuntiPerimetro = 0
     private var puntiPerimetro: [SIMD3<Float>] = []
+    private var ultimaSezione: [(SIMD3<Float>, SIMD3<Float>)] = []   // segmenti per l'auto-angoli
     private var sliceS0: Float = 0   // quota assoluta del piano di slice (lungo su)
     private var prevMostraMesh = true   // ripristino visibilità mesh uscendo dal perimetro
     private var perimE1 = SIMD3<Float>(1, 0, 0)   // base orizzontale 2D del piano di slice
@@ -2400,8 +2407,73 @@ final class Mesh3DModel: ObservableObject {
         let (sMin, sMax) = mesh.rangeLungo(su)
         sliceS0 = sMin + max(0, min(1, quotaSlice)) * (sMax - sMin)
         let segs = mesh.sezione(quota: sliceS0, normale: su)
+        ultimaSezione = segs
         ridisegnaPerimetro(segs)         // overlay 3D
         aggiornaDisegno2D(segs)          // pannello 2D
+    }
+
+    /// #2 — Trova automaticamente gli ANGOLI del profilo: concatena i segmenti
+    /// della sezione in una polilinea ordinata, poi semplifica (Douglas-Peucker)
+    /// → pochi punti sugli spigoli, già pronti per l'estrusione.
+    func autoPerimetro() {
+        let segs = ultimaSezione
+        guard !segs.isEmpty else { return }
+        let eps = max(estensioneMesh * 1e-3, 1e-6)
+        let inv = 1.0 / eps
+        func chiave(_ p: SIMD3<Float>) -> SIMD3<Int32> {
+            SIMD3<Int32>(Int32((p.x * inv).rounded()), Int32((p.y * inv).rounded()), Int32((p.z * inv).rounded()))
+        }
+        var nodeOf = [SIMD3<Int32>: Int](); var pos: [SIMD3<Float>] = []
+        func nodeId(_ p: SIMD3<Float>) -> Int {
+            let k = chiave(p)
+            if let id = nodeOf[k] { return id }
+            let id = pos.count; nodeOf[k] = id; pos.append(p); return id
+        }
+        var edges: [(Int, Int)] = []
+        for (a, b) in segs { let ia = nodeId(a), ib = nodeId(b); if ia != ib { edges.append((ia, ib)) } }
+        var incident = [[Int]](repeating: [], count: pos.count)
+        for (ei, e) in edges.enumerated() { incident[e.0].append(ei); incident[e.1].append(ei) }
+        // parti da un capo aperto (grado 1) se c'è, altrimenti dal nodo 0
+        var start = 0
+        for n in 0..<pos.count where incident[n].count == 1 { start = n; break }
+        var usate = Set<Int>(); var path = [start]; var cur = start
+        var prevDir: SIMD3<Float>? = nil
+        while true {
+            var best = -1; var bestScore: Float = -2
+            for ei in incident[cur] where !usate.contains(ei) {
+                let e = edges[ei]; let nxt = e.0 == cur ? e.1 : e.0
+                let dir = simd_normalize(pos[nxt] - pos[cur])
+                let score = prevDir == nil ? 1 : simd_dot(prevDir!, dir)
+                if score > bestScore { bestScore = score; best = ei }
+            }
+            if best < 0 { break }
+            usate.insert(best)
+            let e = edges[best]; let nxt = e.0 == cur ? e.1 : e.0
+            if nxt == start { break }
+            prevDir = simd_normalize(pos[nxt] - pos[cur])
+            path.append(nxt); cur = nxt
+        }
+        let pts3 = path.map { pos[$0] }
+        let semplici = douglasPeucker(pts3, eps: estensioneMesh * 0.012)
+        guard semplici.count >= 2 else { return }
+        puntiPerimetro = semplici; numPuntiPerimetro = semplici.count
+        aggiornaSlice()
+    }
+
+    private func douglasPeucker(_ pts: [SIMD3<Float>], eps: Float) -> [SIMD3<Float>] {
+        guard pts.count > 2, let a = pts.first, let b = pts.last else { return pts }
+        let ab = b - a; let len = simd_length(ab)
+        var maxD: Float = 0; var idx = 0
+        for i in 1..<(pts.count - 1) {
+            let d = len < 1e-6 ? simd_length(pts[i] - a) : simd_length(simd_cross(pts[i] - a, ab)) / len
+            if d > maxD { maxD = d; idx = i }
+        }
+        if maxD > eps {
+            let left = douglasPeucker(Array(pts[0...idx]), eps: eps)
+            let right = douglasPeucker(Array(pts[idx...]), eps: eps)
+            return Array(left.dropLast()) + right
+        }
+        return [a, b]
     }
 
     /// (u,v) nel piano di slice da un punto 3D, e viceversa.
@@ -2800,12 +2872,22 @@ final class Mesh3DModel: ObservableObject {
         registraUndo()
         let p = SIMD3<Float>(world.x, world.y, world.z)
         // Normale: quella già fittata, o ricavata dai triangoli, o dal piano base.
-        let n = facce[i].pianoNormale
+        let n = simd_normalize(facce[i].pianoNormale
             ?? mesh.fitPiano(facce[i].triangoli)?.normale
-            ?? (haPianoBase ? pianoBaseNormale : SIMD3<Float>(0, 0, 1))
-        facce[i].pianoPunto = p
+            ?? (haPianoBase ? pianoBaseNormale : SIMD3<Float>(0, 0, 1)))
         facce[i].pianoNormale = n
-        facce[i].erroreRms = mesh.rmsDalPiano(facce[i].triangoli, punto: p, normale: n)
+        // Ancora il piano al punto toccato lungo la normale (mantiene orientamento e
+        // forma): per i piani solo-poligono trasla il poligono, altrimenti sposta il punto.
+        if var poly = facce[i].poligono, !poly.isEmpty {
+            let c = poly.reduce(SIMD3<Float>(0, 0, 0), +) / Float(poly.count)
+            let off = simd_dot(p - c, n)
+            for k in poly.indices { poly[k] += n * off }
+            facce[i].poligono = poly
+            facce[i].pianoPunto = poly.reduce(SIMD3<Float>(0, 0, 0), +) / Float(poly.count)
+        } else {
+            facce[i].pianoPunto = p
+        }
+        facce[i].erroreRms = mesh.rmsDalPiano(facce[i].triangoli, punto: facce[i].pianoPunto ?? p, normale: n)
         mostraPiani = true
         ridisegnaPiani()
     }
