@@ -133,7 +133,7 @@ struct EditorMesh3DView: View {
             VStack(spacing: 0) {
                 Spacer()
                 VStack(spacing: 6) {
-                    ForEach(StrumentoMesh3D.allCases.filter { $0 != .punti }) { s in
+                    ForEach(StrumentoMesh3D.allCases.filter { $0 != .punti && $0 != .seleziona }) { s in
                         Button {
                             model.annullaFaccia(); model.strumento = s
                         } label: {
@@ -223,8 +223,7 @@ struct EditorMesh3DView: View {
         if model.strumento != .orbita {
             VStack(spacing: 8) {
                 if model.strumento == .box { barraBox }
-                if model.strumento == .seleziona { barraSelezione }
-                if model.strumento == .facce { barraFacce }
+                if model.strumento == .facce { barraPiani }
             }
             .padding(.vertical, 8)
             .background(EditorTheme.panel)
@@ -232,56 +231,79 @@ struct EditorMesh3DView: View {
         }
     }
 
-    private var barraFacce: some View {
-        VStack(spacing: 6) {
-            HStack(spacing: 8) {
-                Button { Task { await model.riconosciFacce() } } label: {
-                    HStack(spacing: 6) {
-                        if model.segmentando {
-                            ProgressView().tint(.white).scaleEffect(0.7)
-                            Text("Riconoscimento…")
-                        } else {
-                            Image(systemName: "wand.and.stars")
-                            Text("Riconosci facce")
-                        }
-                    }
-                    .font(Theme.Typo.caption(12, .bold))
-                    .padding(.horizontal, 12).padding(.vertical, 7)
-                    .background(EditorTheme.accento, in: RoundedRectangle(cornerRadius: 8))
-                    .foregroundStyle(.white)
-                }
-                .disabled(model.segmentando)
-                Text("pennella un segno per ogni facciata, poi riconosci")
-                    .font(Theme.Typo.caption(10))
-                    .foregroundStyle(EditorTheme.testoMuto)
-                Spacer()
-            }
-            // Flusso rapido: tocca una volta ogni superficie, poi cresci tutti.
-            HStack(spacing: 8) {
-                Button { model.modoSemi.toggle() } label: {
-                    Label(model.modoSemi ? "Semi: ON" : "Tocca semi", systemImage: "hand.tap")
-                        .font(Theme.Typo.caption(11, .semibold))
-                        .foregroundStyle(model.modoSemi ? .white : EditorTheme.testo)
-                        .padding(.horizontal, 10).padding(.vertical, 6)
-                        .background(model.modoSemi ? EditorTheme.accento : EditorTheme.panelAlt,
-                                    in: RoundedRectangle(cornerRadius: 8))
-                }
-                if model.numSemi > 0 {
-                    Button { model.cresciTuttiSemi() } label: {
-                        Label("Cresci tutti (\(model.numSemi))", systemImage: "square.stack.3d.up.fill")
-                            .font(Theme.Typo.caption(11, .bold))
+    private var barraPiani: some View {
+        VStack(spacing: 8) {
+            // 1 · MODO — come marchi le superfici (pulsanti con etichetta) + Aggiungi
+            HStack(spacing: 6) {
+                ForEach(ModoSelezione.allCases) { m in
+                    Button { model.modoSelezione = m } label: {
+                        Label(m.etichetta, systemImage: m.icona)
+                            .font(Theme.Typo.caption(11, .semibold))
+                            .foregroundStyle(model.modoSelezione == m ? .white : EditorTheme.testo)
                             .padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(model.modoSelezione == m ? EditorTheme.accento : EditorTheme.panelAlt,
+                                        in: RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+                Spacer()
+                if model.modoSelezione != .tocco {
+                    Button { model.selezioneAdditiva.toggle() } label: {
+                        Label("Aggiungi", systemImage: model.selezioneAdditiva ? "plus.square.fill.on.square.fill" : "plus.square.on.square")
+                            .font(Theme.Typo.caption(11, .semibold))
+                            .foregroundStyle(model.selezioneAdditiva ? .white : EditorTheme.testo)
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(model.selezioneAdditiva ? EditorTheme.accento : EditorTheme.panelAlt,
+                                        in: RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+            }
+            if model.modoSelezione == .pennello { controlliPennello }
+
+            // 2 · GENERA — appare solo quando hai marcato qualcosa (semi o selezione)
+            if model.numSemi > 0 || model.numSelezionati > 0 {
+                HStack(spacing: 8) {
+                    Button { model.generaDaMarcatura() } label: {
+                        Label(model.numSemi > 0 ? "Genera piani (\(model.numSemi))" : "Genera piani",
+                              systemImage: "square.stack.3d.up.fill")
+                            .font(Theme.Typo.caption(12, .bold))
+                            .padding(.horizontal, 12).padding(.vertical, 7)
                             .background(Color(red: 0.18, green: 0.70, blue: 0.44), in: RoundedRectangle(cornerRadius: 8))
                             .foregroundStyle(.white)
                     }
-                    Button { model.annullaSemi() } label: {
+                    if model.facciaAttivaId != nil && model.numSelezionati > 0 {
+                        ChipSelezione("Aggiungi a piano", "plus.rectangle.on.rectangle") {
+                            model.aggiungiSelezioneAlPianoAttivo()
+                        }
+                    }
+                    Button { model.annullaMarcatura() } label: {
                         Image(systemName: "xmark.circle").foregroundStyle(EditorTheme.testoMuto)
                     }
+                    Spacer()
+                    if model.numSelezionati > 0 {
+                        Text("\(model.numSelezionati) tri").font(Theme.Typo.mono(10))
+                            .foregroundStyle(EditorTheme.testoMuto)
+                    }
                 }
-                Spacer()
+                if model.modoSelezione != .tocco {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ChipSelezione("Tutto", "checklist") { model.selezionaTutto() }
+                            ChipSelezione("Niente", "xmark.circle") { model.deselezionaTutto() }
+                            ChipSelezione("Inverti", "arrow.2.squarepath") { model.invertiSelezione() }
+                            ChipSelezione("Frammenti", "sparkles") { model.selezionaFrammenti() }
+                            ChipSelezione("Espandi", "plus.magnifyingglass") { model.espandiSelezione() }
+                            ChipSelezione("Restringi", "minus.magnifyingglass") { model.restringiSelezione() }
+                            ChipSelezione("Elimina mesh", "trash") { model.eliminaSelezione() }
+                        }
+                    }
+                }
+            } else {
+                Text(suggerimentoPiani)
+                    .font(Theme.Typo.caption(10)).foregroundStyle(EditorTheme.testoMuto)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            controlliPennello
-            // Riga di modifica della faccia attiva.
+
+            // 3 · PIANO ATTIVO — modifica del piano selezionato
             if let fa = model.facciaAttiva {
                 HStack(spacing: 8) {
                     Circle().fill(Color(uiColor: fa.colore)).frame(width: 12, height: 12)
@@ -371,49 +393,50 @@ struct EditorMesh3DView: View {
                     }
                 }
             }
-            // Palette delle facce + nuova + genera piani.
-            HStack(spacing: 6) {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(model.facce) { f in
-                            Button { model.facciaAttivaId = f.id } label: {
-                                HStack(spacing: 5) {
-                                    Circle().fill(Color(uiColor: f.colore)).frame(width: 9, height: 9)
-                                    Text("\(f.nome) · \(f.triangoli.count)")
-                                        .font(Theme.Typo.caption(10, .semibold))
-                                        .foregroundStyle(EditorTheme.testo)
+            // 4 · PASTIGLIE dei piani — tocca per renderne uno attivo
+            if !model.facce.isEmpty {
+                HStack(spacing: 6) {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(model.facce) { f in
+                                Button { model.selezionaFacciaAttiva(f.id) } label: {
+                                    HStack(spacing: 5) {
+                                        Circle().fill(Color(uiColor: f.colore)).frame(width: 9, height: 9)
+                                        Text("\(f.nome) · \(f.triangoli.count)")
+                                            .font(Theme.Typo.caption(10, .semibold))
+                                            .foregroundStyle(EditorTheme.testo)
+                                    }
+                                    .padding(.horizontal, 8).padding(.vertical, 6)
+                                    .background(f.id == model.facciaAttivaId ? EditorTheme.accento.opacity(0.25) : EditorTheme.panelAlt,
+                                                in: RoundedRectangle(cornerRadius: 8))
                                 }
-                                .padding(.horizontal, 8).padding(.vertical, 6)
-                                .background(f.id == model.facciaAttivaId ? EditorTheme.accento.opacity(0.25) : EditorTheme.panelAlt,
-                                            in: RoundedRectangle(cornerRadius: 8))
                             }
                         }
-                        ChipSelezione("Nuova", "plus") { model.nuovaFaccia() }
+                    }
+                    Menu {
+                        ForEach(StatoProxy.allCases) { s in
+                            Button(s.etichetta) { model.statoProxy = s }
+                        }
+                    } label: {
+                        Text(model.statoProxy.etichetta)
+                            .font(Theme.Typo.caption(10, .semibold))
+                            .foregroundStyle(EditorTheme.testoMuto)
+                            .padding(.horizontal, 8).padding(.vertical, 6)
+                            .background(EditorTheme.panelAlt, in: RoundedRectangle(cornerRadius: 8))
                     }
                 }
-                Menu {
-                    ForEach(StatoProxy.allCases) { s in
-                        Button(s.etichetta) { model.statoProxy = s }
-                    }
-                } label: {
-                    Text(model.statoProxy.etichetta)
-                        .font(Theme.Typo.caption(10, .semibold))
-                        .foregroundStyle(EditorTheme.testoMuto)
-                        .padding(.horizontal, 8).padding(.vertical, 6)
-                        .background(EditorTheme.panelAlt, in: RoundedRectangle(cornerRadius: 8))
-                }
-                Button { model.generaPiani() } label: {
-                    Label(model.pianiGenerati > 0 ? "\(model.pianiGenerati) piani" : "Genera piani",
-                          systemImage: "square.stack.3d.up")
-                        .font(Theme.Typo.caption(12, .bold))
-                        .padding(.horizontal, 10).padding(.vertical, 6)
-                        .background(EditorTheme.accento, in: RoundedRectangle(cornerRadius: 8))
-                        .foregroundStyle(.white)
-                }
-                .disabled(model.facce.isEmpty)
             }
         }
         .padding(.horizontal, 12)
+    }
+
+    private var suggerimentoPiani: String {
+        switch model.modoSelezione {
+        case .tocco:      return "tocca ogni superficie per un seme, poi Genera piani"
+        case .pennello:   return "pennella le superfici, poi Genera piani"
+        case .rettangolo: return "trascina un rettangolo sulle superfici, poi Genera piani"
+        case .lazo:       return "circonda le superfici col lazo, poi Genera piani"
+        }
     }
 
     private var barraBox: some View {
@@ -436,65 +459,6 @@ struct EditorMesh3DView: View {
         .padding(.horizontal, 12)
     }
 
-    private var barraSelezione: some View {
-        VStack(spacing: 6) {
-            HStack(spacing: 6) {
-                ForEach(ModoSelezione.allCases) { m in
-                    Button { model.modoSelezione = m } label: {
-                        Label(m.etichetta, systemImage: m.icona)
-                            .font(Theme.Typo.caption(11, .semibold))
-                            .foregroundStyle(model.modoSelezione == m ? .white : EditorTheme.testo)
-                            .padding(.horizontal, 10).padding(.vertical, 6)
-                            .background(model.modoSelezione == m ? EditorTheme.accento : EditorTheme.panelAlt,
-                                        in: RoundedRectangle(cornerRadius: 8))
-                    }
-                }
-                Spacer()
-            }
-            if model.modoSelezione == .pennello { controlliPennello }
-            HStack {
-                Text(model.numSelezionati > 0
-                     ? "\(model.numSelezionati) triangoli selezionati"
-                     : suggerimentoSelezione)
-                    .font(Theme.Typo.caption(11))
-                    .foregroundStyle(model.numSelezionati > 0 ? EditorTheme.accento : EditorTheme.testoMuto)
-                Spacer()
-                Button { model.eliminaSelezione() } label: {
-                    Label("Elimina", systemImage: "trash")
-                        .font(Theme.Typo.caption(12, .bold))
-                        .padding(.horizontal, 10).padding(.vertical, 6)
-                        .background(model.numSelezionati > 0 ? Theme.danger : EditorTheme.panelAlt,
-                                    in: RoundedRectangle(cornerRadius: 8))
-                        .foregroundStyle(.white)
-                }
-                .disabled(model.numSelezionati == 0)
-            }
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
-                    ChipSelezione("Tutto", "checklist") { model.selezionaTutto() }
-                    ChipSelezione("Niente", "xmark.circle") { model.deselezionaTutto() }
-                    ChipSelezione("Inverti", "arrow.2.squarepath") { model.invertiSelezione() }
-                    ChipSelezione("Frammenti", "sparkles") { model.selezionaFrammenti() }
-                    ChipSelezione("Espandi", "plus.magnifyingglass") { model.espandiSelezione() }
-                    ChipSelezione("Restringi", "minus.magnifyingglass") { model.restringiSelezione() }
-                    Button { model.selezioneAdditiva.toggle() } label: {
-                        Label("Aggiungi", systemImage: model.selezioneAdditiva ? "plus.square.fill.on.square.fill" : "plus.square.on.square")
-                            .font(Theme.Typo.caption(11, .semibold))
-                            .foregroundStyle(model.selezioneAdditiva ? .white : EditorTheme.testo)
-                            .padding(.horizontal, 10).padding(.vertical, 6)
-                            .background(model.selezioneAdditiva ? EditorTheme.accento : EditorTheme.panelAlt,
-                                        in: RoundedRectangle(cornerRadius: 8))
-                    }
-                    ChipSelezione("Cresci piano", "square.stack.3d.up") { model.cresciDaSelezione(split: false) }
-                    ChipSelezione("Cresci piani", "square.stack.3d.up.fill") { model.cresciDaSelezione(split: true) }
-                    if model.facciaAttivaId != nil {
-                        ChipSelezione("Aggiungi a piano", "plus.rectangle.on.rectangle") { model.aggiungiSelezioneAlPianoAttivo() }
-                    }
-                }
-            }
-        }
-        .padding(.horizontal, 12)
-    }
 
     /// Controlli del pennello: dimensione + vincolo alle normali con tolleranza.
     private var controlliPennello: some View {
@@ -522,14 +486,6 @@ struct EditorMesh3DView: View {
                     Spacer()
                 }
             }
-        }
-    }
-
-    private var suggerimentoSelezione: String {
-        switch model.modoSelezione {
-        case .lazo:       return "Disegna un lazo attorno alle facce"
-        case .rettangolo: return "Trascina un rettangolo sulle facce"
-        case .pennello:   return "Passa il dito sulle facce da selezionare"
         }
     }
 
@@ -893,8 +849,8 @@ private struct SceneKitContainer: UIViewRepresentable {
                 }
                 return
             }
-            // Facce: tocco su maniglia edge → splitta (nuovo vertice). Altrimenti il
-            // tocco semina e fa crescere LÌ un nuovo piano (marca tu i piani).
+            // Piani: maniglia edge → splitta; piano esistente → selezionalo;
+            // altrimenti, in modo "tocco", lascia un seme (cresce dopo con Genera).
             if model.strumento == .facce {
                 if let m = maniglia(sotto: pt, in: v), m.edge {
                     model.splittaEdge(faccia: m.faccia, edge: m.k)
@@ -902,13 +858,11 @@ private struct SceneKitContainer: UIViewRepresentable {
                 }
                 let hits = v.hitTest(pt, options: [.searchMode: SCNHitTestSearchMode.closest.rawValue])
                 guard let h = hits.first(where: { $0.node === model.contentNode }) else { return }
-                // Modo semi: il tocco lascia un seme (cresce dopo, in batch); altrimenti
-                // semina e cresce subito.
-                if model.modoSemi {
+                if let g = model.facce.first(where: { $0.triangoli.contains(h.faceIndex) }) {
+                    model.selezionaFacciaAttiva(g.id)
+                } else if model.modoSelezione == .tocco {
                     let w = h.worldCoordinates
                     model.aggiungiSeme(triangolo: h.faceIndex, punto: SIMD3<Float>(w.x, w.y, w.z))
-                } else {
-                    model.toccaPerPiano(triangolo: h.faceIndex)
                 }
                 return
             }
@@ -967,6 +921,8 @@ private struct SceneKitContainer: UIViewRepresentable {
                     aggiornaRettangolo(da: rettInizio ?? p, a: p)
                 case .pennello:
                     pennella(p); disegnaCerchioPennello(p)
+                case .tocco:
+                    break
                 }
             case .ended, .cancelled:
                 switch model.modoSelezione {
@@ -975,8 +931,8 @@ private struct SceneKitContainer: UIViewRepresentable {
                     if lassoPunti.count >= 3 { selezionaDaPoligono(lassoPunti) }
                 case .rettangolo:
                     if let a = rettInizio { selezionaDaRettangolo(a, p) }
-                case .pennello:
-                    break   // selezione già applicata in continuo
+                case .pennello, .tocco:
+                    break   // selezione già applicata in continuo / nessun pan
                 }
                 lassoPunti = []; rettInizio = nil; cacheSchermo = []
                 lassoLayer?.path = nil
@@ -1072,24 +1028,35 @@ private struct SceneKitContainer: UIViewRepresentable {
                                     p: pian.p, n: pian.n, start: start, orig: orig)
                 return
             }
+            // Il pan marca una SELEZIONE secondo il modo (pennello/rettangolo/lazo).
+            // In modo "tocco" il pan non fa nulla (si marca con i tap → semi).
             switch g.state {
             case .began:
                 proiettaCentroidi(in: v)
                 catturaNormaleRif(p, in: v)
-                // Ogni tratto su area libera = un NUOVO segno (piano). Un tratto che
-                // parte su un segno esistente lo ESTENDE. Niente più "Nuova" a mano.
-                let hits = v.hitTest(p, options: [.searchMode: SCNHitTestSearchMode.closest.rawValue])
-                if let h = hits.first(where: { $0.node === model.contentNode }),
-                   let esistente = model.facce.first(where: { $0.triangoli.contains(h.faceIndex) }) {
-                    model.facciaAttivaId = esistente.id
-                } else {
-                    model.nuovaFaccia()
+                rettInizio = p
+                lassoPunti = [p]
+                if model.modoSelezione == .pennello {
+                    model.applicaLazo([], aggiungi: model.selezioneAdditiva); pennella(p)
                 }
-                pennellaFacce(p); disegnaCerchioPennello(p)
             case .changed:
-                pennellaFacce(p); disegnaCerchioPennello(p)
+                switch model.modoSelezione {
+                case .lazo:       lassoPunti.append(p); aggiornaTracciato(chiusa: true)
+                case .rettangolo: aggiornaRettangolo(da: rettInizio ?? p, a: p)
+                case .pennello:   pennella(p); disegnaCerchioPennello(p)
+                case .tocco:      break
+                }
             case .ended, .cancelled:
-                cacheSchermo = []; lassoLayer?.path = nil
+                switch model.modoSelezione {
+                case .lazo:
+                    aggiornaTracciato(chiusa: true)
+                    if lassoPunti.count >= 3 { selezionaDaPoligono(lassoPunti) }
+                case .rettangolo:
+                    if let a = rettInizio { selezionaDaRettangolo(a, p) }
+                case .pennello, .tocco:
+                    break
+                }
+                lassoPunti = []; rettInizio = nil; cacheSchermo = []; lassoLayer?.path = nil
             default:
                 break
             }
@@ -1237,7 +1204,7 @@ enum StrumentoMesh3D: String, CaseIterable, Identifiable {
         case .orbita:    return "hand.draw"
         case .box:       return "cube"
         case .seleziona: return "lasso"
-        case .facce:     return "paintbrush"
+        case .facce:     return "square.stack.3d.up"
         case .punti:     return "square.3.layers.3d.top.filled"
         }
     }
@@ -1246,7 +1213,7 @@ enum StrumentoMesh3D: String, CaseIterable, Identifiable {
         case .orbita:    return "Naviga"
         case .box:       return "Box"
         case .seleziona: return "Seleziona"
-        case .facce:     return "Facce"
+        case .facce:     return "Piani"
         case .punti:     return "Piano base"
         }
     }
@@ -1254,20 +1221,22 @@ enum StrumentoMesh3D: String, CaseIterable, Identifiable {
 
 /// Modo di selezione (§2): lazo libero, rettangolo, pennello.
 enum ModoSelezione: String, CaseIterable, Identifiable {
-    case lazo, rettangolo, pennello
+    case tocco, pennello, rettangolo, lazo
     var id: String { rawValue }
     var etichetta: String {
         switch self {
-        case .lazo:       return "Lazo"
-        case .rettangolo: return "Rettangolo"
+        case .tocco:      return "Tocco"
         case .pennello:   return "Pennello"
+        case .rettangolo: return "Rettangolo"
+        case .lazo:       return "Lazo"
         }
     }
     var icona: String {
         switch self {
-        case .lazo:       return "lasso"
-        case .rettangolo: return "rectangle.dashed"
+        case .tocco:      return "hand.tap"
         case .pennello:   return "paintbrush.pointed"
+        case .rettangolo: return "rectangle.dashed"
+        case .lazo:       return "lasso"
         }
     }
 }
@@ -1324,7 +1293,7 @@ final class Mesh3DModel: ObservableObject {
     }
     private(set) var selezione = Set<Int>()
     @Published var numSelezionati = 0
-    @Published var modoSelezione: ModoSelezione = .lazo
+    @Published var modoSelezione: ModoSelezione = .tocco
     /// Le nuove selezioni si sommano invece di sostituire (più zone insieme).
     @Published var selezioneAdditiva = false
     /// Flusso rapido: ogni tocco lascia un seme; "Cresci tutti" li fa crescere insieme.
@@ -2186,6 +2155,22 @@ final class Mesh3DModel: ObservableObject {
             node.position = SCNVector3(s.punto.x, s.punto.y, s.punto.z)
             semiNode.addChildNode(node)
         }
+    }
+
+    /// Genera i piani da ciò che hai marcato: i semi (tocco) se presenti, altrimenti
+    /// la selezione (pennello/rettangolo/lazo), spezzata per zone connesse.
+    func generaDaMarcatura() {
+        if numSemi > 0 { cresciTuttiSemi() }
+        else if !selezione.isEmpty { cresciDaSelezione(split: true) }
+    }
+
+    /// Azzera la marcatura corrente (semi + selezione) senza generare.
+    func annullaMarcatura() { annullaSemi(); deselezionaTutto() }
+
+    /// Rende attivo un piano e ridisegna (per mostrarne le maniglie).
+    func selezionaFacciaAttiva(_ id: Int) {
+        facciaAttivaId = id
+        ridisegnaFacce(); ridisegnaPiani()
     }
 
     /// Usa la selezione come seme. `split=false` → un solo piano da tutta la
