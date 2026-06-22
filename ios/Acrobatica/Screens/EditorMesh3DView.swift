@@ -30,7 +30,7 @@ struct EditorMesh3DView: View {
             barraSuperiore
             ZStack(alignment: .topTrailing) {
                 SceneKitContainer(model: model)
-                if model.modoPerimetro { PannelloPerimetro(model: model) }
+                if model.modoPerimetro && model.perimetroTraccia { PannelloPerimetro(model: model) }
                 hud
                 NavGizmo(model: model).padding(.top, 8).padding(.trailing, 10)
                 railDestro
@@ -242,34 +242,61 @@ struct EditorMesh3DView: View {
             HStack(spacing: 8) {
                 Image(systemName: "scissors").font(.system(size: 13))
                     .foregroundStyle(EditorTheme.accento)
-                Text("Quota slice").font(Theme.Typo.caption(11)).foregroundStyle(EditorTheme.testoMuto)
+                Text(model.perimetroTraccia ? "Quota" : "Posiziona la sezione")
+                    .font(Theme.Typo.caption(11)).foregroundStyle(EditorTheme.testoMuto)
                 Slider(value: $model.quotaSlice, in: 0...1).tint(EditorTheme.accento)
                 Text("\(Int(model.quotaSlice * 100))%").font(Theme.Typo.mono(10))
                     .foregroundStyle(EditorTheme.testoMuto).frame(width: 36, alignment: .trailing)
             }
-            HStack(spacing: 8) {
-                Button { model.vistaDallAlto() } label: {
-                    Label("Dall'alto", systemImage: "arrow.down.to.line")
-                        .font(Theme.Typo.caption(11, .semibold)).foregroundStyle(EditorTheme.testo)
-                        .padding(.horizontal, 10).padding(.vertical, 6)
-                        .background(EditorTheme.panelAlt, in: RoundedRectangle(cornerRadius: 8))
+            if !model.perimetroTraccia {
+                // FASE 1: posiziona la sezione sul 3D, poi passa a tracciare
+                HStack(spacing: 8) {
+                    Button { model.vistaDallAlto() } label: {
+                        Label("Dall'alto", systemImage: "arrow.down.to.line")
+                            .font(Theme.Typo.caption(11, .semibold)).foregroundStyle(EditorTheme.testo)
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(EditorTheme.panelAlt, in: RoundedRectangle(cornerRadius: 8))
+                    }
+                    Text("ruota/sposta per trovare il punto adatto")
+                        .font(Theme.Typo.caption(10)).foregroundStyle(EditorTheme.testoMuto)
+                    Spacer()
+                    Button { model.iniziaTraccia() } label: {
+                        Label("Traccia il bordo", systemImage: "scribble.variable")
+                            .font(Theme.Typo.caption(12, .bold))
+                            .padding(.horizontal, 12).padding(.vertical, 7)
+                            .background(EditorTheme.accento, in: RoundedRectangle(cornerRadius: 8))
+                            .foregroundStyle(.white)
+                    }
+                    Button { model.esciPerimetro() } label: {
+                        Image(systemName: "xmark.circle").foregroundStyle(EditorTheme.testoMuto)
+                    }
                 }
-                Spacer()
-                Button { model.annullaUltimoPuntoPerimetro() } label: {
-                    Label("Indietro", systemImage: "arrow.uturn.backward")
-                        .font(Theme.Typo.caption(11, .semibold)).foregroundStyle(EditorTheme.testo)
-                }
-                .disabled(model.numPuntiPerimetro == 0).opacity(model.numPuntiPerimetro == 0 ? 0.4 : 1)
-                Button { model.estrudiPerimetro() } label: {
-                    Label("Estrudi (\(model.numPuntiPerimetro))", systemImage: "square.stack.3d.up.fill")
-                        .font(Theme.Typo.caption(12, .bold))
-                        .padding(.horizontal, 10).padding(.vertical, 6)
-                        .background(Color(red: 0.18, green: 0.70, blue: 0.44), in: RoundedRectangle(cornerRadius: 8))
-                        .foregroundStyle(.white)
-                }
-                .disabled(model.numPuntiPerimetro < 2).opacity(model.numPuntiPerimetro < 2 ? 0.5 : 1)
-                Button { model.esciPerimetro() } label: {
-                    Image(systemName: "xmark.circle").foregroundStyle(EditorTheme.testoMuto)
+            } else {
+                // FASE 2: tracciamento nel pannello 2D
+                HStack(spacing: 8) {
+                    Button { model.perimetroTraccia = false } label: {
+                        Label("Sposta sezione", systemImage: "arrow.up.and.down")
+                            .font(Theme.Typo.caption(11, .semibold)).foregroundStyle(EditorTheme.testo)
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(EditorTheme.panelAlt, in: RoundedRectangle(cornerRadius: 8))
+                    }
+                    Spacer()
+                    Button { model.annullaUltimoPuntoPerimetro() } label: {
+                        Label("Indietro", systemImage: "arrow.uturn.backward")
+                            .font(Theme.Typo.caption(11, .semibold)).foregroundStyle(EditorTheme.testo)
+                    }
+                    .disabled(model.numPuntiPerimetro == 0).opacity(model.numPuntiPerimetro == 0 ? 0.4 : 1)
+                    Button { model.estrudiPerimetro() } label: {
+                        Label("Estrudi (\(model.numPuntiPerimetro))", systemImage: "square.stack.3d.up.fill")
+                            .font(Theme.Typo.caption(12, .bold))
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(Color(red: 0.18, green: 0.70, blue: 0.44), in: RoundedRectangle(cornerRadius: 8))
+                            .foregroundStyle(.white)
+                    }
+                    .disabled(model.numPuntiPerimetro < 2).opacity(model.numPuntiPerimetro < 2 ? 0.5 : 1)
+                    Button { model.esciPerimetro() } label: {
+                        Image(systemName: "xmark.circle").foregroundStyle(EditorTheme.testoMuto)
+                    }
                 }
             }
         }
@@ -885,14 +912,9 @@ private struct SceneKitContainer: UIViewRepresentable {
         @MainActor @objc func handleTap(_ g: UITapGestureRecognizer) {
             guard let v = view else { return }
             let pt = g.location(in: v)
-            // Rileva perimetro: il tap posa un punto sul piano di slice.
-            if model.modoPerimetro {
-                let pl = model.pianoSlice()
-                if let w = puntoSulPiano(pt, p: pl.p, n: pl.n, in: v) {
-                    model.aggiungiPuntoPerimetro(w)
-                }
-                return
-            }
+            // Rileva perimetro: il tracciamento avviene nel pannello 2D; sul 3D il
+            // tap non fa nulla (si posiziona la sezione con lo slider, si ruota col pan).
+            if model.modoPerimetro { return }
             // Naviga: il tap posa il mirino d'ispezione sulla mesh.
             if model.strumento == .orbita {
                 let hits = v.hitTest(pt, options: [.searchMode: SCNHitTestSearchMode.closest.rawValue])
@@ -1438,6 +1460,7 @@ final class Mesh3DModel: ObservableObject {
     private var semiTocco: [(tri: Int, punto: SIMD3<Float>)] = []
     // Rileva perimetro: slice orizzontale + tracciamento del perimetro a punti.
     @Published var modoPerimetro = false
+    @Published var perimetroTraccia = false   // false = posiziona sezione su 3D; true = traccia 2D
     @Published var quotaSlice: Float = 0.5 { didSet { aggiornaSlice() } }
     @Published private(set) var numPuntiPerimetro = 0
     private var puntiPerimetro: [SIMD3<Float>] = []
@@ -2308,24 +2331,34 @@ final class Mesh3DModel: ObservableObject {
     // MARK: Rileva perimetro — slice orizzontale → traccia → estrudi in facciate
 
     /// Entra in modalità perimetro: calcola lo slice e mette la vista dall'alto.
+    /// Fase 1: posiziona la sezione sul 3D (slider quota). Fase 2: traccia il
+    /// bordo nel pannello 2D.
     func avviaPerimetro() {
         modoPerimetro = true
-        strumento = .orbita
+        perimetroTraccia = false   // si parte posizionando la sezione sul 3D
+        strumento = .orbita        // pan = orbita; la mesh resta visibile
         puntiPerimetro = []; numPuntiPerimetro = 0
-        // La SEZIONE si vede e si ricalca nel PANNELLO 2D (la sezione di una facciata
-        // è una curva piana). La geometria 3D resta intatta dietro: non sparisce.
+        mostraMesh = true          // assicura la geometria visibile
         aggiornaSlice()
     }
 
-    /// Esce dalla modalità perimetro e pulisce slice/traccia.
+    /// Passa alla fase di tracciamento (apre il pannello 2D).
+    func iniziaTraccia() { perimetroTraccia = true; aggiornaSlice() }
+
+    /// Esce dalla modalità perimetro: pulisce e riporta la vista in fronte (così la
+    /// geometria è sempre visibile, mai "di taglio").
     func esciPerimetro() {
         modoPerimetro = false
-        strumento = .facce         // torna all'editor dei piani
+        perimetroTraccia = false
+        strumento = .facce
         puntiPerimetro = []; numPuntiPerimetro = 0
         perimetroNode.childNodes.forEach { $0.removeFromParentNode() }
+        mostraMesh = true
+        snapIso()      // vista 3/4: la mesh non è mai "di taglio" → sempre visibile
+        inquadra()
     }
 
-    /// Vista dall'alto on-demand per tracciare il perimetro (la mesh resta visibile).
+    /// Vista dall'alto on-demand per posizionare/vedere la sezione.
     func vistaDallAlto() { snapAlto() }
 
     /// Piano di slice corrente (punto, normale) — per il raycast dei tap.
@@ -2364,7 +2397,9 @@ final class Mesh3DModel: ObservableObject {
         var d = PerimetroDisegno()
         d.segmenti = segs.map { (uv($0.0), uv($0.1)) }
         d.punti = puntiPerimetro.map { uv($0) }
-        d.spline = (puntiPerimetro.count >= 3 ? splinePunti() : puntiPerimetro).map { uv($0) }
+        var traccia = puntiPerimetro
+        if puntiPerimetro.count >= 3, let f = puntiPerimetro.first { traccia.append(f) }  // chiudi
+        d.spline = traccia.map { uv($0) }   // linee rette tra i punti (campo riusato)
         // bounds (unione di tutti i punti)
         var minX = CGFloat.greatestFiniteMagnitude, minY = minX
         var maxX = -CGFloat.greatestFiniteMagnitude, maxY = maxX
@@ -2396,10 +2431,12 @@ final class Mesh3DModel: ObservableObject {
         registraUndo()
         let su = simd_normalize(gravitaSu)
         let (sMin, sMax) = mesh.rangeLungo(su)
-        // segui la spline e spezzala in lati rettilinei (1 piano per muro)
-        let lati: [(SIMD3<Float>, SIMD3<Float>)] = puntiPerimetro.count >= 3
-            ? semplificaSegmenti(splinePunti())
-            : [(puntiPerimetro[0], puntiPerimetro[puntiPerimetro.count - 1])]
+        // un lato rettilineo per ogni coppia di punti consecutivi (+ chiusura se ≥3)
+        var lati: [(SIMD3<Float>, SIMD3<Float>)] = []
+        for i in 0..<(puntiPerimetro.count - 1) { lati.append((puntiPerimetro[i], puntiPerimetro[i + 1])) }
+        if puntiPerimetro.count >= 3, let a = puntiPerimetro.first, let b = puntiPerimetro.last {
+            lati.append((b, a))
+        }
         for (a, b) in lati {
             let aH = a - simd_dot(a, su) * su, bH = b - simd_dot(b, su) * su   // parte orizzontale
             var nrm = simd_cross(b - a, su)
@@ -2487,6 +2524,29 @@ final class Mesh3DModel: ObservableObject {
 
     private func ridisegnaPerimetro(_ segs: [(SIMD3<Float>, SIMD3<Float>)]) {
         perimetroNode.childNodes.forEach { $0.removeFromParentNode() }
+        // Piano di sezione TRASLUCIDO sul 3D (fase 1: posizionamento): un quad
+        // orizzontale alla quota corrente, esteso sul footprint della mesh.
+        let su = simd_normalize(gravitaSu)
+        let (lo, hi) = mesh.aabb
+        var uMin = Float.greatestFiniteMagnitude, uMax = -uMin, vMin = uMin, vMax = -uMin
+        for cx in [lo.x, hi.x] { for cy in [lo.y, hi.y] { for cz in [lo.z, hi.z] {
+            let p = SIMD3<Float>(cx, cy, cz)
+            let u = simd_dot(p, perimE1), w = simd_dot(p, perimE2)
+            uMin = min(uMin, u); uMax = max(uMax, u); vMin = min(vMin, w); vMax = max(vMax, w)
+        }}}
+        if uMax > uMin {
+            let base = su * sliceS0
+            let q = [base + perimE1 * uMin + perimE2 * vMin, base + perimE1 * uMax + perimE2 * vMin,
+                     base + perimE1 * uMax + perimE2 * vMax, base + perimE1 * uMin + perimE2 * vMax]
+                .map { SCNVector3($0.x, $0.y, $0.z) }
+            let src = SCNGeometrySource(vertices: q)
+            let el = SCNGeometryElement(indices: [Int32](arrayLiteral: 0, 1, 2, 0, 2, 3), primitiveType: .triangles)
+            let g = SCNGeometry(sources: [src], elements: [el])
+            let m = SCNMaterial(); m.diffuse.contents = UIColor.systemTeal.withAlphaComponent(0.18)
+            m.isDoubleSided = true; m.lightingModel = .constant; m.writesToDepthBuffer = false
+            g.materials = [m]
+            perimetroNode.addChildNode(SCNNode(geometry: g))
+        }
         // contorno della sezione (ciano acceso) = guida da ricalcare: linee + pallini
         if let g = geometriaSegmenti(segs, colore: UIColor.systemTeal) {
             perimetroNode.addChildNode(SCNNode(geometry: g))
@@ -2506,11 +2566,12 @@ final class Mesh3DModel: ObservableObject {
                 k += passo
             }
         }
-        // traccia dell'utente come SPLINE morbida (giallo) + punti di controllo
-        let curva = puntiPerimetro.count >= 3 ? splinePunti() : puntiPerimetro
-        if curva.count >= 2 {
+        // traccia dell'utente a linee RETTE (giallo) + punti di controllo
+        var traccia = puntiPerimetro
+        if puntiPerimetro.count >= 3, let f = puntiPerimetro.first { traccia.append(f) }  // chiudi
+        if traccia.count >= 2 {
             var ts: [(SIMD3<Float>, SIMD3<Float>)] = []
-            for i in 0..<(curva.count - 1) { ts.append((curva[i], curva[i + 1])) }
+            for i in 0..<(traccia.count - 1) { ts.append((traccia[i], traccia[i + 1])) }
             if let g = geometriaSegmenti(ts, colore: .systemYellow) {
                 perimetroNode.addChildNode(SCNNode(geometry: g))
             }
