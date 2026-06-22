@@ -220,7 +220,12 @@ struct EditorMesh3DView: View {
     /// Barra inferiore = SOLO contesto dello strumento attivo (gli strumenti sono
     /// nel rail a destra). In Naviga non c'è barra: massimo spazio al modello.
     @ViewBuilder private var barraStrumenti: some View {
-        if model.strumento != .orbita {
+        if model.modoPerimetro {
+            barraPerimetro
+                .padding(.vertical, 8)
+                .background(EditorTheme.panel)
+                .overlay(Rectangle().fill(EditorTheme.hair).frame(height: 1), alignment: .top)
+        } else if model.strumento != .orbita {
             VStack(spacing: 8) {
                 if model.strumento == .box { barraBox }
                 if model.strumento == .facce { barraPiani }
@@ -229,6 +234,41 @@ struct EditorMesh3DView: View {
             .background(EditorTheme.panel)
             .overlay(Rectangle().fill(EditorTheme.hair).frame(height: 1), alignment: .top)
         }
+    }
+
+    private var barraPerimetro: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "scissors").font(.system(size: 13))
+                    .foregroundStyle(EditorTheme.accento)
+                Text("Quota slice").font(Theme.Typo.caption(11)).foregroundStyle(EditorTheme.testoMuto)
+                Slider(value: $model.quotaSlice, in: 0...1).tint(EditorTheme.accento)
+                Text("\(Int(model.quotaSlice * 100))%").font(Theme.Typo.mono(10))
+                    .foregroundStyle(EditorTheme.testoMuto).frame(width: 36, alignment: .trailing)
+            }
+            HStack(spacing: 8) {
+                Text("Tocca i punti del perimetro sul contorno")
+                    .font(Theme.Typo.caption(10)).foregroundStyle(EditorTheme.testoMuto)
+                Spacer()
+                Button { model.annullaUltimoPuntoPerimetro() } label: {
+                    Label("Indietro", systemImage: "arrow.uturn.backward")
+                        .font(Theme.Typo.caption(11, .semibold)).foregroundStyle(EditorTheme.testo)
+                }
+                .disabled(model.numPuntiPerimetro == 0).opacity(model.numPuntiPerimetro == 0 ? 0.4 : 1)
+                Button { model.estrudiPerimetro() } label: {
+                    Label("Estrudi (\(model.numPuntiPerimetro))", systemImage: "square.stack.3d.up.fill")
+                        .font(Theme.Typo.caption(12, .bold))
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .background(Color(red: 0.18, green: 0.70, blue: 0.44), in: RoundedRectangle(cornerRadius: 8))
+                        .foregroundStyle(.white)
+                }
+                .disabled(model.numPuntiPerimetro < 2).opacity(model.numPuntiPerimetro < 2 ? 0.5 : 1)
+                Button { model.esciPerimetro() } label: {
+                    Image(systemName: "xmark.circle").foregroundStyle(EditorTheme.testoMuto)
+                }
+            }
+        }
+        .padding(.horizontal, 12)
     }
 
     private var barraPiani: some View {
@@ -256,6 +296,13 @@ struct EditorMesh3DView: View {
                                         in: RoundedRectangle(cornerRadius: 8))
                     }
                 }
+                Button { model.avviaPerimetro() } label: {
+                    Label("Perimetro", systemImage: "scissors")
+                        .font(Theme.Typo.caption(11, .semibold)).foregroundStyle(EditorTheme.testo)
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .background(EditorTheme.panelAlt, in: RoundedRectangle(cornerRadius: 8))
+                }
+                .disabled(model.numTriangoli == 0)
             }
             if model.modoSelezione == .pennello { controlliPennello }
 
@@ -833,6 +880,14 @@ private struct SceneKitContainer: UIViewRepresentable {
         @MainActor @objc func handleTap(_ g: UITapGestureRecognizer) {
             guard let v = view else { return }
             let pt = g.location(in: v)
+            // Rileva perimetro: il tap posa un punto sul piano di slice.
+            if model.modoPerimetro {
+                let pl = model.pianoSlice()
+                if let w = puntoSulPiano(pt, p: pl.p, n: pl.n, in: v) {
+                    model.aggiungiPuntoPerimetro(w)
+                }
+                return
+            }
             // Naviga: il tap posa il mirino d'ispezione sulla mesh.
             if model.strumento == .orbita {
                 let hits = v.hitTest(pt, options: [.searchMode: SCNHitTestSearchMode.closest.rawValue])
@@ -1260,6 +1315,7 @@ final class Mesh3DModel: ObservableObject {
     private let pianoBaseNode = SCNNode() // quad del piano livello-zero (§4)
     private let pianiNode = SCNNode()     // quad dei piani proxy fittati (§6)
     private let semiNode = SCNNode()      // puntini-seme del flusso rapido "Tocca semi"
+    private let perimetroNode = SCNNode() // slice orizzontale + traccia del perimetro
     private let cursoreNode = SCNNode()   // mirino 3D d'ispezione
 
     @Published var numVertici = 0
@@ -1300,6 +1356,12 @@ final class Mesh3DModel: ObservableObject {
     @Published var modoSemi = false
     @Published private(set) var numSemi = 0
     private var semiTocco: [(tri: Int, punto: SIMD3<Float>)] = []
+    // Rileva perimetro: slice orizzontale + tracciamento del perimetro a punti.
+    @Published var modoPerimetro = false
+    @Published var quotaSlice: Float = 0.5 { didSet { aggiornaSlice() } }
+    @Published private(set) var numPuntiPerimetro = 0
+    private var puntiPerimetro: [SIMD3<Float>] = []
+    private var sliceS0: Float = 0   // quota assoluta del piano di slice (lungo su)
     // Pennello: dimensione + vincolo alle normali della geometria
     @Published var raggioPennello: CGFloat = 42
     @Published var vincolaNormali = false
@@ -1427,6 +1489,7 @@ final class Mesh3DModel: ObservableObject {
         scene.rootNode.addChildNode(pianoBaseNode)
         contentNode.addChildNode(pianiNode)
         contentNode.addChildNode(semiNode)
+        contentNode.addChildNode(perimetroNode)
         cursoreNode.isHidden = true
         contentNode.addChildNode(cursoreNode)
         markersNode.addChildNode(lineNode)
@@ -2157,11 +2220,137 @@ final class Mesh3DModel: ObservableObject {
         }
     }
 
-    /// Genera i piani da ciò che hai marcato: i semi (tocco) se presenti, altrimenti
-    /// la selezione (pennello/rettangolo/lazo), spezzata per zone connesse.
+    // MARK: Rileva perimetro — slice orizzontale → traccia → estrudi in facciate
+
+    /// Entra in modalità perimetro: calcola lo slice e mette la vista dall'alto.
+    func avviaPerimetro() {
+        modoPerimetro = true
+        strumento = .orbita        // il pan ruota la vista; il tap posa i punti
+        puntiPerimetro = []; numPuntiPerimetro = 0
+        aggiornaSlice()
+        snapAlto()
+    }
+
+    /// Esce dalla modalità perimetro e pulisce slice/traccia.
+    func esciPerimetro() {
+        modoPerimetro = false
+        strumento = .facce         // torna all'editor dei piani
+        puntiPerimetro = []; numPuntiPerimetro = 0
+        perimetroNode.childNodes.forEach { $0.removeFromParentNode() }
+    }
+
+    /// Piano di slice corrente (punto, normale) — per il raycast dei tap.
+    func pianoSlice() -> (p: SIMD3<Float>, n: SIMD3<Float>) {
+        let su = simd_normalize(gravitaSu)
+        return (su * sliceS0, su)
+    }
+
+    /// Ricalcola lo slice alla quota corrente e ridisegna.
+    func aggiornaSlice() {
+        guard modoPerimetro else { return }
+        let su = simd_normalize(gravitaSu)
+        let (sMin, sMax) = mesh.rangeLungo(su)
+        sliceS0 = sMin + max(0, min(1, quotaSlice)) * (sMax - sMin)
+        let segs = mesh.sezione(quota: sliceS0, normale: su)
+        ridisegnaPerimetro(segs)
+    }
+
+    /// Aggiunge un punto del perimetro (sul piano di slice).
+    func aggiungiPuntoPerimetro(_ punto: SIMD3<Float>) {
+        puntiPerimetro.append(punto); numPuntiPerimetro = puntiPerimetro.count
+        aggiornaSlice()
+    }
+
+    func annullaUltimoPuntoPerimetro() {
+        guard !puntiPerimetro.isEmpty else { return }
+        puntiPerimetro.removeLast(); numPuntiPerimetro = puntiPerimetro.count
+        aggiornaSlice()
+    }
+
+    /// Estrude il perimetro tracciato: ogni lato → un piano verticale di facciata
+    /// (poligono che va dal fondo alla cima dell'edificio lungo la gravità).
+    func estrudiPerimetro() {
+        guard puntiPerimetro.count >= 2 else { return }
+        registraUndo()
+        let su = simd_normalize(gravitaSu)
+        let (sMin, sMax) = mesh.rangeLungo(su)
+        var lati: [(SIMD3<Float>, SIMD3<Float>)] = []
+        for i in 0..<(puntiPerimetro.count - 1) { lati.append((puntiPerimetro[i], puntiPerimetro[i + 1])) }
+        if puntiPerimetro.count >= 3, let a = puntiPerimetro.first, let b = puntiPerimetro.last {
+            lati.append((b, a))   // chiudi il perimetro
+        }
+        for (a, b) in lati {
+            let aH = a - simd_dot(a, su) * su, bH = b - simd_dot(b, su) * su   // parte orizzontale
+            var nrm = simd_cross(b - a, su)
+            if simd_length(nrm) < 1e-5 { continue }
+            nrm = simd_normalize(nrm)
+            let la = aH + su * sMin, lb = bH + su * sMin
+            let hb = bH + su * sMax, ha = aH + su * sMax
+            let colore = FacciaProxy.palette[facce.count % FacciaProxy.palette.count]
+            var f = FacciaProxy(id: prossimoIdFaccia, nome: "Facciata \(prossimoIdFaccia)", colore: colore)
+            prossimoIdFaccia += 1
+            f.poligono = [la, lb, hb, ha]
+            f.pianoNormale = nrm
+            f.pianoPunto = (la + lb + hb + ha) * 0.25
+            f.tipo = .facciata
+            facce.append(f)
+        }
+        esciPerimetro()
+        pianiGenerati = facce.count
+        mostraPiani = true
+        facciaAttivaId = facce.last?.id
+        ridisegnaFacce(); ridisegnaPiani()
+    }
+
+    private func geometriaSegmenti(_ segs: [(SIMD3<Float>, SIMD3<Float>)], colore: UIColor) -> SCNGeometry? {
+        guard !segs.isEmpty else { return nil }
+        var verts: [SCNVector3] = []; var idx: [Int32] = []
+        for (a, b) in segs {
+            let i = Int32(verts.count)
+            verts.append(SCNVector3(a.x, a.y, a.z)); verts.append(SCNVector3(b.x, b.y, b.z))
+            idx += [i, i + 1]
+        }
+        let src = SCNGeometrySource(vertices: verts)
+        let el = SCNGeometryElement(indices: idx, primitiveType: .line)
+        let g = SCNGeometry(sources: [src], elements: [el])
+        let m = SCNMaterial(); m.diffuse.contents = colore; m.lightingModel = .constant
+        m.readsFromDepthBuffer = false; m.writesToDepthBuffer = false
+        g.materials = [m]
+        return g
+    }
+
+    private func ridisegnaPerimetro(_ segs: [(SIMD3<Float>, SIMD3<Float>)]) {
+        perimetroNode.childNodes.forEach { $0.removeFromParentNode() }
+        // contorno della sezione (grigio chiaro) = guida da ricalcare
+        if let g = geometriaSegmenti(segs, colore: UIColor(white: 0.55, alpha: 1)) {
+            perimetroNode.addChildNode(SCNNode(geometry: g))
+        }
+        // traccia dell'utente (giallo) + punti
+        if puntiPerimetro.count >= 2 {
+            var ts: [(SIMD3<Float>, SIMD3<Float>)] = []
+            for i in 0..<(puntiPerimetro.count - 1) { ts.append((puntiPerimetro[i], puntiPerimetro[i + 1])) }
+            if let g = geometriaSegmenti(ts, colore: .systemYellow) {
+                perimetroNode.addChildNode(SCNNode(geometry: g))
+            }
+        }
+        let r = CGFloat(estensioneMesh) * 0.014
+        for p in puntiPerimetro {
+            let s = SCNSphere(radius: r); s.segmentCount = 12
+            let m = SCNMaterial(); m.diffuse.contents = UIColor.systemYellow
+            m.lightingModel = .constant; m.readsFromDepthBuffer = false; m.writesToDepthBuffer = false
+            s.materials = [m]
+            let node = SCNNode(geometry: s)
+            node.position = SCNVector3(p.x, p.y, p.z)
+            perimetroNode.addChildNode(node)
+        }
+    }
+
+    /// Genera i piani da ciò che hai marcato: ogni SEME (tocco) è un piano a sé;
+    /// una SELEZIONE (pennello/rettangolo/lazo) fa UN solo piano (cresce da tutto
+    /// il segno, non lo spezza). Più piani = più semi, o più selezioni separate.
     func generaDaMarcatura() {
         if numSemi > 0 { cresciTuttiSemi() }
-        else if !selezione.isEmpty { cresciDaSelezione(split: true) }
+        else if !selezione.isEmpty { cresciDaSelezione(split: false) }
     }
 
     /// Azzera la marcatura corrente (semi + selezione) senza generare.
@@ -2449,27 +2638,31 @@ final class Mesh3DModel: ObservableObject {
         guard mostraPiani else { return }
         let upRef = assiRif.u
         for f in facce {
-            guard let o = f.pianoPunto, let n = f.pianoNormale, !f.triangoli.isEmpty else { continue }
-            var right = simd_cross(upRef, n)
-            if simd_length(right) < 1e-4 { right = simd_cross(SIMD3(1, 0, 0), n) }
-            right = simd_normalize(right)
-            let up = simd_normalize(simd_cross(n, right))
-            var uMin = Float.greatestFiniteMagnitude, uMax = -Float.greatestFiniteMagnitude
-            var wMin = Float.greatestFiniteMagnitude, wMax = -Float.greatestFiniteMagnitude
-            for ti in f.triangoli {
-                let t = mesh.triangles[ti]
-                for v in [mesh.vertices[Int(t.x)], mesh.vertices[Int(t.y)], mesh.vertices[Int(t.z)]] {
-                    let d = v - o
-                    let u = simd_dot(d, right), w = simd_dot(d, up)
-                    uMin = min(uMin, u); uMax = max(uMax, u); wMin = min(wMin, w); wMax = max(wMax, w)
+            guard let n = f.pianoNormale else { continue }
+            // Poligono editabile se presente (anche per facciate estruse senza
+            // triangoli); altrimenti bbox del piano dai triangoli pennellati.
+            let pts3: [SIMD3<Float>]
+            if let poly = f.poligono, poly.count >= 3 {
+                pts3 = poly
+            } else if let o = f.pianoPunto, !f.triangoli.isEmpty {
+                var right = simd_cross(upRef, n)
+                if simd_length(right) < 1e-4 { right = simd_cross(SIMD3(1, 0, 0), n) }
+                right = simd_normalize(right)
+                let up = simd_normalize(simd_cross(n, right))
+                var uMin = Float.greatestFiniteMagnitude, uMax = -Float.greatestFiniteMagnitude
+                var wMin = Float.greatestFiniteMagnitude, wMax = -Float.greatestFiniteMagnitude
+                for ti in f.triangoli {
+                    let t = mesh.triangles[ti]
+                    for v in [mesh.vertices[Int(t.x)], mesh.vertices[Int(t.y)], mesh.vertices[Int(t.z)]] {
+                        let d = v - o
+                        let u = simd_dot(d, right), w = simd_dot(d, up)
+                        uMin = min(uMin, u); uMax = max(uMax, u); wMin = min(wMin, w); wMax = max(wMax, w)
+                    }
                 }
-            }
-            guard uMax > uMin else { continue }
-            // Poligono editabile (Fase B) se presente, altrimenti il bbox del piano.
-            let pts3: [SIMD3<Float>] = (f.poligono?.count ?? 0) >= 3
-                ? f.poligono!
-                : [o + right * uMin + up * wMin, o + right * uMax + up * wMin,
-                   o + right * uMax + up * wMax, o + right * uMin + up * wMax]
+                guard uMax > uMin else { continue }
+                pts3 = [o + right * uMin + up * wMin, o + right * uMax + up * wMin,
+                        o + right * uMax + up * wMax, o + right * uMin + up * wMax]
+            } else { continue }
             let corners = pts3.map { SCNVector3($0.x, $0.y, $0.z) }
             // riempimento a ventaglio (poligoni convessi)
             var idx: [Int32] = []

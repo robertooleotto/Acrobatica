@@ -475,6 +475,31 @@ struct EditableMesh: @unchecked Sendable {
         return (SIMD3(Float(mean.x), Float(mean.y), Float(mean.z)), nrm)
     }
 
+    /// Min/max della proiezione dei vertici lungo `dir` (range per lo slice).
+    func rangeLungo(_ dir: SIMD3<Float>) -> (Float, Float) {
+        let n = simd_normalize(dir)
+        var lo = Float.greatestFiniteMagnitude, hi = -lo
+        for v in vertices { let d = simd_dot(v, n); lo = min(lo, d); hi = max(hi, d) }
+        return (lo, hi)
+    }
+
+    /// Sezione: segmenti dell'intersezione mesh ∩ piano {x·n = s0}. Per il
+    /// "rileva perimetro" (slice orizzontale → footprint dell'edificio).
+    func sezione(quota s0: Float, normale dir: SIMD3<Float>) -> [(SIMD3<Float>, SIMD3<Float>)] {
+        let n = simd_normalize(dir)
+        var segs: [(SIMD3<Float>, SIMD3<Float>)] = []
+        for t in triangles {
+            let v0 = vertices[Int(t.x)], v1 = vertices[Int(t.y)], v2 = vertices[Int(t.z)]
+            let d0 = simd_dot(v0, n) - s0, d1 = simd_dot(v1, n) - s0, d2 = simd_dot(v2, n) - s0
+            var pts: [SIMD3<Float>] = []
+            if (d0 < 0) != (d1 < 0) { pts.append(v0 + (v1 - v0) * (d0 / (d0 - d1))) }
+            if (d1 < 0) != (d2 < 0) { pts.append(v1 + (v2 - v1) * (d1 / (d1 - d2))) }
+            if (d2 < 0) != (d0 < 0) { pts.append(v2 + (v0 - v2) * (d2 / (d2 - d0))) }
+            if pts.count == 2 { segs.append((pts[0], pts[1])) }
+        }
+        return segs
+    }
+
     /// Area totale (somma dei triangoli) di `sel`, nelle unità della mesh.
     /// Per i m² metrici va moltiplicata per il quadrato della scala mesh→metri.
     func areaTriangoli(_ sel: Set<Int>) -> Float {
