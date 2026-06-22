@@ -488,6 +488,36 @@ struct EditableMesh: @unchecked Sendable {
         return s
     }
 
+    /// Spezza `sel` in componenti connesse (triangoli che condividono un vertice
+    /// SALDATO per posizione → robusto sui vertici splittati OC). Serve a far
+    /// crescere più piani da più zone selezionate in una volta.
+    func componentiConnesse(_ sel: Set<Int>) -> [Set<Int>] {
+        guard !sel.isEmpty else { return [] }
+        let (alo, ahi) = aabb
+        let ext = max(ahi.x - alo.x, max(ahi.y - alo.y, ahi.z - alo.z))
+        let inv: Float = 1.0 / max(ext * 1e-3, 1e-6)
+        func chiave(_ vi: Int) -> SIMD3<Int32> {
+            let v = vertices[vi]
+            return SIMD3<Int32>(Int32((v.x * inv).rounded()),
+                                Int32((v.y * inv).rounded()),
+                                Int32((v.z * inv).rounded()))
+        }
+        var parent = [Int: Int](); for i in sel { parent[i] = i }
+        func find(_ a: Int) -> Int { var x = a; while parent[x]! != x { let p = parent[x]!; parent[x] = parent[p]!; x = parent[x]! }; return x }
+        func union(_ a: Int, _ b: Int) { let ra = find(a), rb = find(b); if ra != rb { parent[ra] = rb } }
+        var primo = [SIMD3<Int32>: Int]()
+        for i in sel {
+            let t = triangles[i]
+            for vi in [Int(t.x), Int(t.y), Int(t.z)] {
+                let k = chiave(vi)
+                if let j = primo[k] { union(i, j) } else { primo[k] = i }
+            }
+        }
+        var gruppi = [Int: Set<Int>]()
+        for i in sel { gruppi[find(i), default: []].insert(i) }
+        return Array(gruppi.values)
+    }
+
     /// True se i due insiemi di triangoli sono spazialmente attaccati (condividono
     /// un vertice saldato per posizione). Serve al merge complanare "solo se connessi"
     /// (#14): riunisce un muro spezzato dalle finestre, ma NON fonde due torrette.
@@ -567,19 +597,22 @@ struct EditableMesh: @unchecked Sendable {
     /// ma SEPARATE nello spazio (es. due torrette) NON si fondono — la crescita si
     /// ferma al vuoto fra di esse. Finestre rientranti/balconi sporgenti (offset
     /// diverso) restano comunque esclusi dal vincolo di distanza.
-    func crescePianare(da seed: Set<Int>, normale pianoNIniz: SIMD3<Float>, punto puntoIniz: SIMD3<Float>,
-                       tolGradi: Float = 18, tolDistFraz: Float = 0.008,
-                       tolCrestaGradi: Float = 45) -> Set<Int> {
-        guard !seed.isEmpty else { return seed }
-        var pianoN = pianoNIniz   // (#5) mutabili: il piano si ri-fitta mentre cresce
-        var punto = puntoIniz
+    /// Adiacenza saldata della mesh (vertici per posizione + mappa spigolo→triangoli).
+    /// Costosa da costruire (O(triangoli)): la si calcola una volta e la si riusa
+    /// per tutte le crescite (cache nel model).
+    struct Adiacenza: @unchecked Sendable {
+        let weld: [Int32]
+        let edge: [Int64: [Int]]
+    }
+
+    static func ekey(_ a: Int32, _ b: Int32) -> Int64 {
+        (Int64(min(a, b)) << 32) | Int64(UInt32(max(a, b)))
+    }
+
+    /// Costruisce l'adiacenza saldata (steps 1-2 della crescita). Da cacheare.
+    func costruisciAdiacenza() -> Adiacenza {
         let (alo, ahi) = aabb
         let ext = max(ahi.x - alo.x, max(ahi.y - alo.y, ahi.z - alo.z))
-        let tolDist = max(ext * tolDistFraz, 1e-4)
-        let cosT = cos(tolGradi * .pi / 180)
-        let cosCresta = cos(tolCrestaGradi * .pi / 180)   // (#4) barriera sullo spigolo vivo
-
-        // 1) salda i vertici su una griglia (~1‰ del lato) → id di vertice "fisico"
         let inv: Float = 1.0 / max(ext * 1e-3, 1e-6)
         var weld = [Int32](repeating: -1, count: vertices.count)
         var dict = [SIMD3<Int32>: Int32](); dict.reserveCapacity(vertices.count)
@@ -591,18 +624,33 @@ struct EditableMesh: @unchecked Sendable {
             if let id = dict[k] { weld[vi] = id }
             else { let id = Int32(dict.count); dict[k] = id; weld[vi] = id }
         }
-        // 2) mappa spigolo(saldato) → triangoli che lo condividono
-        func ekey(_ a: Int32, _ b: Int32) -> Int64 {
-            (Int64(min(a, b)) << 32) | Int64(UInt32(max(a, b)))
-        }
         var edgeMap = [Int64: [Int]](); edgeMap.reserveCapacity(triangles.count * 2)
         for ti in triangles.indices {
             let t = triangles[ti]
             let a = weld[Int(t.x)], b = weld[Int(t.y)], c = weld[Int(t.z)]
-            edgeMap[ekey(a, b), default: []].append(ti)
-            edgeMap[ekey(b, c), default: []].append(ti)
-            edgeMap[ekey(c, a), default: []].append(ti)
+            edgeMap[Self.ekey(a, b), default: []].append(ti)
+            edgeMap[Self.ekey(b, c), default: []].append(ti)
+            edgeMap[Self.ekey(c, a), default: []].append(ti)
         }
+        return Adiacenza(weld: weld, edge: edgeMap)
+    }
+
+    func crescePianare(da seed: Set<Int>, normale pianoNIniz: SIMD3<Float>, punto puntoIniz: SIMD3<Float>,
+                       tolGradi: Float = 18, tolDistFraz: Float = 0.008,
+                       tolCrestaGradi: Float = 45,
+                       adiacenza adj: Adiacenza? = nil) -> Set<Int> {
+        guard !seed.isEmpty else { return seed }
+        var pianoN = pianoNIniz   // (#5) mutabili: il piano si ri-fitta mentre cresce
+        var punto = puntoIniz
+        let (alo, ahi) = aabb
+        let ext = max(ahi.x - alo.x, max(ahi.y - alo.y, ahi.z - alo.z))
+        let tolDist = max(ext * tolDistFraz, 1e-4)
+        let cosT = cos(tolGradi * .pi / 180)
+        let cosCresta = cos(tolCrestaGradi * .pi / 180)   // (#4) barriera sullo spigolo vivo
+
+        // adiacenza saldata: riusa quella in cache o costruiscila al volo
+        let a = adj ?? costruisciAdiacenza()
+        let weld = a.weld, edgeMap = a.edge
         // 3) flood-fill connesso vincolato al piano (con #4 cresta + #5 ri-fit)
         var result = seed
         var coda = Array(seed); var qi = 0
@@ -612,7 +660,7 @@ struct EditableMesh: @unchecked Sendable {
             let nf = normale(f)
             let t = triangles[f]
             let a = weld[Int(t.x)], b = weld[Int(t.y)], c = weld[Int(t.z)]
-            for ek in [ekey(a, b), ekey(b, c), ekey(c, a)] {
+            for ek in [Self.ekey(a, b), Self.ekey(b, c), Self.ekey(c, a)] {
                 guard let vicini = edgeMap[ek] else { continue }
                 for g in vicini where !result.contains(g) {
                     let ng = normale(g)

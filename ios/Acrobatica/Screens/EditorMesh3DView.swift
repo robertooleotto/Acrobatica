@@ -32,6 +32,7 @@ struct EditorMesh3DView: View {
                 SceneKitContainer(model: model)
                 hud
                 NavGizmo(model: model).padding(.top, 8).padding(.trailing, 10)
+                railDestro
             }
             barraStrumenti
         }
@@ -76,43 +77,13 @@ struct EditorMesh3DView: View {
             }
             .disabled(!model.puoRedo)
             .foregroundStyle(model.puoRedo ? EditorTheme.testo : EditorTheme.testoMuto.opacity(0.4))
-            Menu {
-                Button { model.mostraProxy.toggle() } label: {
-                    Label("Proxy colorati", systemImage: model.mostraProxy ? "checkmark" : "circle")
-                }
-                Button { model.mostraPiani.toggle() } label: {
-                    Label("Piani fittati", systemImage: model.mostraPiani ? "checkmark" : "circle")
-                }
-                Divider()
-                ForEach(VistaValidazione.allCases) { v in
-                    Button { model.vistaValidazione = v } label: {
-                        Label(v.etichetta, systemImage: model.vistaValidazione == v ? "checkmark" : "")
-                    }
-                }
-            } label: {
-                Image(systemName: "eye")
-                    .frame(width: 36, height: 36)
-                    .foregroundStyle(EditorTheme.testo)
-            }
-            Button { model.inquadra() } label: {
-                Image(systemName: "scope")
-                    .frame(width: 36, height: 36)
-                    .foregroundStyle(EditorTheme.testo)
-            }
-            // PROVVISORIO: ricarica la mesh e riparte da zero.
-            Button { model.ricaricaDaCapo() } label: {
-                Image(systemName: "arrow.clockwise.circle")
-                    .frame(width: 36, height: 36)
-                    .foregroundStyle(Theme.danger)
-            }
-            .disabled(model.caricamento || model.numTriangoli == 0)
             Button {
                 let nome = model.nome.replacingOccurrences(of: " ", with: "_")
                 urlsExport = model.esportaProxy(nomeBase: nome)
             } label: {
                 Image(systemName: "square.and.arrow.up")
                     .frame(width: 36, height: 36)
-                    .foregroundStyle(EditorTheme.testo)
+                    .foregroundStyle(model.facce.isEmpty ? EditorTheme.testoMuto.opacity(0.4) : EditorTheme.testo)
             }
             .disabled(model.facce.isEmpty)
         }
@@ -121,6 +92,88 @@ struct EditorMesh3DView: View {
         .padding(.vertical, 6)
         .background(EditorTheme.panel)
         .overlay(Rectangle().fill(EditorTheme.hair).frame(height: 1), alignment: .bottom)
+    }
+
+    /// Menu delle viste (proxy/piani/geometria/texture/validazione) — nel rail.
+    private var vistaMenu: some View {
+        Menu {
+            Button { model.mostraProxy.toggle() } label: {
+                Label("Proxy colorati", systemImage: model.mostraProxy ? "checkmark" : "circle")
+            }
+            Button { model.mostraPiani.toggle() } label: {
+                Label("Piani fittati", systemImage: model.mostraPiani ? "checkmark" : "circle")
+            }
+            Divider()
+            Button { model.mostraMesh.toggle() } label: {
+                Label("Geometria OC", systemImage: model.mostraMesh ? "checkmark" : "circle")
+            }
+            if model.haTexturaOC {
+                Button { model.mostraTexturaOC.toggle() } label: {
+                    Label("Texture OC", systemImage: model.mostraTexturaOC ? "checkmark" : "circle")
+                }
+            }
+            Divider()
+            ForEach(VistaValidazione.allCases) { v in
+                Button { model.vistaValidazione = v } label: {
+                    Label(v.etichetta, systemImage: model.vistaValidazione == v ? "checkmark" : "")
+                }
+            }
+        } label: {
+            Image(systemName: "eye")
+                .font(.system(size: 18, weight: .medium))
+                .foregroundStyle(EditorTheme.testo)
+                .frame(width: 38, height: 38)
+        }
+    }
+
+    /// Rail verticale a destra: strumenti + viste + reset (sostituisce la fila in basso).
+    private var railDestro: some View {
+        HStack {
+            Spacer()
+            VStack(spacing: 0) {
+                Spacer()
+                VStack(spacing: 6) {
+                    ForEach(StrumentoMesh3D.allCases.filter { $0 != .punti }) { s in
+                        Button {
+                            model.annullaFaccia(); model.strumento = s
+                        } label: {
+                            Image(systemName: s.icona)
+                                .font(.system(size: 18, weight: .medium))
+                                .foregroundStyle(model.strumento == s ? .white : EditorTheme.testo)
+                                .frame(width: 38, height: 38)
+                                .background(model.strumento == s ? EditorTheme.accento : Color.clear,
+                                            in: RoundedRectangle(cornerRadius: 10))
+                        }
+                    }
+                    railDivisore
+                    vistaMenu
+                    Button { model.inquadra() } label: {
+                        Image(systemName: "scope")
+                            .font(.system(size: 18, weight: .medium))
+                            .foregroundStyle(EditorTheme.testo)
+                            .frame(width: 38, height: 38)
+                    }
+                    railDivisore
+                    Button { model.ricaricaDaCapo() } label: {
+                        Image(systemName: "arrow.clockwise.circle")
+                            .font(.system(size: 18, weight: .medium))
+                            .foregroundStyle(Theme.danger)
+                            .frame(width: 38, height: 38)
+                    }
+                    .disabled(model.caricamento || model.numTriangoli == 0)
+                }
+                .padding(.vertical, 7)
+                .padding(.horizontal, 5)
+                .background(EditorTheme.panel, in: RoundedRectangle(cornerRadius: 16))
+                .overlay(RoundedRectangle(cornerRadius: 16).stroke(EditorTheme.hair, lineWidth: 1))
+                Spacer()
+            }
+            .padding(.trailing, 10)
+        }
+    }
+
+    private var railDivisore: some View {
+        Rectangle().fill(EditorTheme.hair).frame(width: 22, height: 1).padding(.vertical, 2)
     }
 
     private var hud: some View {
@@ -164,34 +217,19 @@ struct EditorMesh3DView: View {
 
     // MARK: – Barra strumenti (Fase 2: creazione faccia per punti)
 
-    private var barraStrumenti: some View {
-        VStack(spacing: 8) {
-            // Barra contestuale del box di lavoro.
-            if model.strumento == .box {
-                barraBox
+    /// Barra inferiore = SOLO contesto dello strumento attivo (gli strumenti sono
+    /// nel rail a destra). In Naviga non c'è barra: massimo spazio al modello.
+    @ViewBuilder private var barraStrumenti: some View {
+        if model.strumento != .orbita {
+            VStack(spacing: 8) {
+                if model.strumento == .box { barraBox }
+                if model.strumento == .seleziona { barraSelezione }
+                if model.strumento == .facce { barraFacce }
             }
-            // Barra contestuale della selezione.
-            if model.strumento == .seleziona {
-                barraSelezione
-            }
-            // Barra contestuale delle facce proxy (pennelli colorati).
-            if model.strumento == .facce {
-                barraFacce
-            }
-            HStack(spacing: 8) {
-                ForEach(StrumentoMesh3D.allCases.filter { $0 != .punti }) { s in
-                    PulsanteStrumento3D(strumento: s, attivo: model.strumento == s) {
-                        model.annullaFaccia()
-                        model.strumento = s
-                    }
-                }
-                Spacer()
-            }
-            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(EditorTheme.panel)
+            .overlay(Rectangle().fill(EditorTheme.hair).frame(height: 1), alignment: .top)
         }
-        .padding(.vertical, 8)
-        .background(EditorTheme.panel)
-        .overlay(Rectangle().fill(EditorTheme.hair).frame(height: 1), alignment: .top)
     }
 
     private var barraFacce: some View {
@@ -216,6 +254,30 @@ struct EditorMesh3DView: View {
                 Text("pennella un segno per ogni facciata, poi riconosci")
                     .font(Theme.Typo.caption(10))
                     .foregroundStyle(EditorTheme.testoMuto)
+                Spacer()
+            }
+            // Flusso rapido: tocca una volta ogni superficie, poi cresci tutti.
+            HStack(spacing: 8) {
+                Button { model.modoSemi.toggle() } label: {
+                    Label(model.modoSemi ? "Semi: ON" : "Tocca semi", systemImage: "hand.tap")
+                        .font(Theme.Typo.caption(11, .semibold))
+                        .foregroundStyle(model.modoSemi ? .white : EditorTheme.testo)
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .background(model.modoSemi ? EditorTheme.accento : EditorTheme.panelAlt,
+                                    in: RoundedRectangle(cornerRadius: 8))
+                }
+                if model.numSemi > 0 {
+                    Button { model.cresciTuttiSemi() } label: {
+                        Label("Cresci tutti (\(model.numSemi))", systemImage: "square.stack.3d.up.fill")
+                            .font(Theme.Typo.caption(11, .bold))
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(Color(red: 0.18, green: 0.70, blue: 0.44), in: RoundedRectangle(cornerRadius: 8))
+                            .foregroundStyle(.white)
+                    }
+                    Button { model.annullaSemi() } label: {
+                        Image(systemName: "xmark.circle").foregroundStyle(EditorTheme.testoMuto)
+                    }
+                }
                 Spacer()
             }
             controlliPennello
@@ -415,7 +477,19 @@ struct EditorMesh3DView: View {
                     ChipSelezione("Frammenti", "sparkles") { model.selezionaFrammenti() }
                     ChipSelezione("Espandi", "plus.magnifyingglass") { model.espandiSelezione() }
                     ChipSelezione("Restringi", "minus.magnifyingglass") { model.restringiSelezione() }
-                    ChipSelezione("Cresci piano", "square.stack.3d.up") { model.cresciDaSelezione() }
+                    Button { model.selezioneAdditiva.toggle() } label: {
+                        Label("Aggiungi", systemImage: model.selezioneAdditiva ? "plus.square.fill.on.square.fill" : "plus.square.on.square")
+                            .font(Theme.Typo.caption(11, .semibold))
+                            .foregroundStyle(model.selezioneAdditiva ? .white : EditorTheme.testo)
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(model.selezioneAdditiva ? EditorTheme.accento : EditorTheme.panelAlt,
+                                        in: RoundedRectangle(cornerRadius: 8))
+                    }
+                    ChipSelezione("Cresci piano", "square.stack.3d.up") { model.cresciDaSelezione(split: false) }
+                    ChipSelezione("Cresci piani", "square.stack.3d.up.fill") { model.cresciDaSelezione(split: true) }
+                    if model.facciaAttivaId != nil {
+                        ChipSelezione("Aggiungi a piano", "plus.rectangle.on.rectangle") { model.aggiungiSelezioneAlPianoAttivo() }
+                    }
                 }
             }
         }
@@ -827,7 +901,13 @@ private struct SceneKitContainer: UIViewRepresentable {
                     return
                 }
                 let hits = v.hitTest(pt, options: [.searchMode: SCNHitTestSearchMode.closest.rawValue])
-                if let h = hits.first(where: { $0.node === model.contentNode }) {
+                guard let h = hits.first(where: { $0.node === model.contentNode }) else { return }
+                // Modo semi: il tocco lascia un seme (cresce dopo, in batch); altrimenti
+                // semina e cresce subito.
+                if model.modoSemi {
+                    let w = h.worldCoordinates
+                    model.aggiungiSeme(triangolo: h.faceIndex, punto: SIMD3<Float>(w.x, w.y, w.z))
+                } else {
                     model.toccaPerPiano(triangolo: h.faceIndex)
                 }
                 return
@@ -906,32 +986,56 @@ private struct SceneKitContainer: UIViewRepresentable {
         }
 
         /// Proietta tutti i baricentri dei triangoli in coordinate schermo.
+        // z-buffer grezzo per la selezione: distanza minima dalla camera per cella
+        // schermo → si tiene solo il layer frontale (no facce dietro/occluse).
+        private var depthGrid: [Int: Float] = [:]
+        private var depthTol: Float = 1
+        private let cellaPx: CGFloat = 14
+        private func cella(_ p: CGPoint) -> Int { Int(p.y / cellaPx) &* 4096 &+ Int(p.x / cellaPx) }
+
         @MainActor private func proiettaCentroidi(in v: SCNView) {
             let tris = model.mesh.triangles
+            let cam = v.pointOfView?.simdWorldPosition ?? SIMD3<Float>(0, 0, 0)
             var out: [(Int, CGPoint)] = []
             out.reserveCapacity(tris.count)
+            depthGrid.removeAll(keepingCapacity: true)
+            // tolleranza ~5% del lato mesh: assorbe lo spessore del muro, scarta il fondo
+            depthTol = model.estensioneLato * 0.05
             for i in tris.indices {
                 let c = model.mesh.centroid(tris[i])
                 let sp = v.projectPoint(SCNVector3(c.x, c.y, c.z))
-                if sp.z > 0, sp.z < 1 {
-                    out.append((i, CGPoint(x: CGFloat(sp.x), y: CGFloat(sp.y))))
-                }
+                guard sp.z > 0, sp.z < 1 else { continue }
+                let p = CGPoint(x: CGFloat(sp.x), y: CGFloat(sp.y))
+                let dist = simd_length(c - cam)
+                out.append((i, p))
+                let k = cella(p)
+                if let m = depthGrid[k] { if dist < m { depthGrid[k] = dist } } else { depthGrid[k] = dist }
+                // memorizza la distanza accanto allo screen point
+                distCache[i] = dist
             }
             cacheSchermo = out
         }
 
+        private var distCache: [Int: Float] = [:]
+
+        /// True se il triangolo `i` (a schermo `p`) è nel layer frontale della sua cella.
+        @MainActor private func visibile(_ i: Int, _ p: CGPoint) -> Bool {
+            guard let d = distCache[i], let m = depthGrid[cella(p)] else { return true }
+            return d <= m + depthTol
+        }
+
         @MainActor private func selezionaDaPoligono(_ poly: [CGPoint]) {
             var sel = Set<Int>()
-            for (i, sp) in cacheSchermo where puntoInPoligono(sp, poly) { sel.insert(i) }
-            model.applicaLazo(sel, aggiungi: false)
+            for (i, sp) in cacheSchermo where puntoInPoligono(sp, poly) && visibile(i, sp) { sel.insert(i) }
+            model.applicaLazo(sel, aggiungi: model.selezioneAdditiva)
         }
 
         @MainActor private func selezionaDaRettangolo(_ a: CGPoint, _ b: CGPoint) {
             let r = CGRect(x: min(a.x, b.x), y: min(a.y, b.y),
                            width: abs(b.x - a.x), height: abs(b.y - a.y))
             var sel = Set<Int>()
-            for (i, sp) in cacheSchermo where r.contains(sp) { sel.insert(i) }
-            model.applicaLazo(sel, aggiungi: false)
+            for (i, sp) in cacheSchermo where r.contains(sp) && visibile(i, sp) { sel.insert(i) }
+            model.applicaLazo(sel, aggiungi: model.selezioneAdditiva)
         }
 
         /// Pennello §3: assegna i triangoli sotto il dito alla faccia attiva.
@@ -996,7 +1100,7 @@ private struct SceneKitContainer: UIViewRepresentable {
             var sel = Set<Int>()
             for (i, sp) in cacheSchermo {
                 let dx = sp.x - p.x, dy = sp.y - p.y
-                if dx * dx + dy * dy <= r2 && passaNormale(i) { sel.insert(i) }
+                if dx * dx + dy * dy <= r2 && passaNormale(i) && visibile(i, sp) { sel.insert(i) }
             }
             if !sel.isEmpty { model.assegnaAFacciaAttiva(sel) }
         }
@@ -1006,7 +1110,7 @@ private struct SceneKitContainer: UIViewRepresentable {
             var sel = Set<Int>()
             for (i, sp) in cacheSchermo {
                 let dx = sp.x - p.x, dy = sp.y - p.y
-                if dx * dx + dy * dy <= r2 && passaNormale(i) { sel.insert(i) }
+                if dx * dx + dy * dy <= r2 && passaNormale(i) && visibile(i, sp) { sel.insert(i) }
             }
             if !sel.isEmpty { model.aggiungiAllaSelezione(sel) }
         }
@@ -1186,6 +1290,7 @@ final class Mesh3DModel: ObservableObject {
     private let lineNode = SCNNode()     // polilinea della faccia in costruzione
     private let pianoBaseNode = SCNNode() // quad del piano livello-zero (§4)
     private let pianiNode = SCNNode()     // quad dei piani proxy fittati (§6)
+    private let semiNode = SCNNode()      // puntini-seme del flusso rapido "Tocca semi"
     private let cursoreNode = SCNNode()   // mirino 3D d'ispezione
 
     @Published var numVertici = 0
@@ -1211,9 +1316,21 @@ final class Mesh3DModel: ObservableObject {
     private(set) var mesh = EditableMesh(vertices: [], triangles: [])
     /// Mesh come caricata (prima di crop/pulizia): per "riparti da zero".
     private var meshOriginale: EditableMesh?
+    /// Adiacenza saldata in cache (ricostruita pigramente): velocizza ogni crescita.
+    private var adiacenzaCache: EditableMesh.Adiacenza?
+    func adiacenza() -> EditableMesh.Adiacenza {
+        if let a = adiacenzaCache { return a }
+        let a = mesh.costruisciAdiacenza(); adiacenzaCache = a; return a
+    }
     private(set) var selezione = Set<Int>()
     @Published var numSelezionati = 0
     @Published var modoSelezione: ModoSelezione = .lazo
+    /// Le nuove selezioni si sommano invece di sostituire (più zone insieme).
+    @Published var selezioneAdditiva = false
+    /// Flusso rapido: ogni tocco lascia un seme; "Cresci tutti" li fa crescere insieme.
+    @Published var modoSemi = false
+    @Published private(set) var numSemi = 0
+    private var semiTocco: [(tri: Int, punto: SIMD3<Float>)] = []
     // Pennello: dimensione + vincolo alle normali della geometria
     @Published var raggioPennello: CGFloat = 42
     @Published var vincolaNormali = false
@@ -1275,6 +1392,13 @@ final class Mesh3DModel: ObservableObject {
     @Published var mostraProxy = true { didSet { aggiornaVista() } }
     @Published var vistaValidazione: VistaValidazione = .normale { didSet { aggiornaVista() } }
     @Published var mostraPiani = false { didSet { ridisegnaPiani() } }
+    /// Mostra/nasconde la geometria OC grigia editabile.
+    @Published var mostraMesh = true { didSet { aggiornaVista() } }
+    /// Attiva la versione texturizzata OC (nodo originale tenuto nascosto).
+    @Published var mostraTexturaOC = false { didSet { aggiornaVista() } }
+    /// Nodo texturizzato OC originale (estratto al caricamento, normalmente nascosto).
+    private var ocTextureNode: SCNNode?
+    var haTexturaOC: Bool { ocTextureNode != nil }
     @Published var puoUndo = false
     @Published var puoRedo = false
     private var undoStack: [(EditableMesh, Set<Int>, [FacciaProxy])] = []
@@ -1288,6 +1412,8 @@ final class Mesh3DModel: ObservableObject {
     private var estensioneMesh: Float = 1      // lato maggiore della mesh
     /// Soglia di planarità "buona" per le facce (1% del lato mesh).
     var sogliaErrore: Float { estensioneMesh * 0.01 }
+    /// Lato maggiore della mesh (per soglie geometriche esterne, es. occlusione).
+    var estensioneLato: Float { estensioneMesh }
     /// (#15) Verso "su" stimato dalla mesh (media delle facce orizzontali). Default
     /// world-Y; va sostituibile col vettore gravità reale delle pose ARKit.
     private(set) var gravitaSu = SIMD3<Float>(0, 1, 0)
@@ -1331,6 +1457,7 @@ final class Mesh3DModel: ObservableObject {
         contentNode.addChildNode(boxNode)
         scene.rootNode.addChildNode(pianoBaseNode)
         contentNode.addChildNode(pianiNode)
+        contentNode.addChildNode(semiNode)
         cursoreNode.isHidden = true
         contentNode.addChildNode(cursoreNode)
         markersNode.addChildNode(lineNode)
@@ -1368,6 +1495,7 @@ final class Mesh3DModel: ObservableObject {
 
     /// (Ri)costruisce la geometria SceneKit dalla mesh editabile + overlay selezione.
     private func renderMesh() {
+        adiacenzaCache = nil   // la mesh è cambiata: invalida l'adiacenza in cache
         contentNode.geometry = mesh.scnGeometry(colore: Self.coloreMesh)
         numVertici = mesh.vertexCount
         numTriangoli = mesh.triangleCount
@@ -1427,7 +1555,11 @@ final class Mesh3DModel: ObservableObject {
             // estrai i buffer editabili e sostituisci con la geometria unica.
             contentNode.addChildNode(radice)
             if let em = EditableMesh.from(node: radice) {
-                radice.removeFromParentNode()
+                // Conserva il nodo texturizzato OC (nascosto + non selezionabile)
+                // per il toggle "Texture OC", invece di scartarlo.
+                radice.isHidden = true
+                radice.enumerateHierarchy { n, _ in n.categoryBitMask = 0 }
+                ocTextureNode = radice
                 meshOriginale = em
                 installaMesh(em)
             } else {
@@ -1658,12 +1790,13 @@ final class Mesh3DModel: ObservableObject {
         registraUndo()
         let m = mesh
         let tol = Float(tolleranzaNormaleGradi)
+        let adj = adiacenza()   // costruita una volta, condivisa da tutti i semi
         let risultati = await Task.detached(priority: .userInitiated) {
             () -> [(id: Int, tri: Set<Int>, punto: SIMD3<Float>, normale: SIMD3<Float>)] in
             var out: [(Int, Set<Int>, SIMD3<Float>, SIMD3<Float>)] = []
             for s in semi {
                 guard let (p, n) = m.fitPianoRANSAC(s.seed) else { continue }
-                let cresciuto = m.crescePianare(da: s.seed, normale: n, punto: p, tolGradi: tol)
+                let cresciuto = m.crescePianare(da: s.seed, normale: n, punto: p, tolGradi: tol, adiacenza: adj)
                 let (p2, n2) = m.fitPianoRANSAC(cresciuto) ?? (p, n)
                 out.append((s.id, cresciuto, p2, n2))
             }
@@ -1967,14 +2100,12 @@ final class Mesh3DModel: ObservableObject {
 
     // MARK: Fase A — semina rettangolare
 
-    /// Usa la selezione (rettangolo/lazo/pennello) come seme e fa crescere il piano.
-    func cresciDaSelezione() {
-        guard !selezione.isEmpty else { return }
-        registraUndo()
-        let seme = selezione
-        guard let (p, n) = mesh.fitPianoRANSAC(seme) else { return }
+    /// Cresce UN piano dal seme dato; ritorna l'id della faccia creata (o nil).
+    @discardableResult
+    private func creaPianoDa(seme: Set<Int>, adiacenza adj: EditableMesh.Adiacenza? = nil) -> Int? {
+        guard let (p, n) = mesh.fitPianoRANSAC(seme) else { return nil }
         let tol = Float(tolleranzaNormaleGradi)
-        let cresciuto = mesh.crescePianare(da: seme, normale: n, punto: p, tolGradi: tol)
+        let cresciuto = mesh.crescePianare(da: seme, normale: n, punto: p, tolGradi: tol, adiacenza: adj ?? adiacenza())
         let (p2, n2) = mesh.fitPianoRANSAC(cresciuto) ?? (p, n)
         for j in facce.indices { facce[j].triangoli.subtract(cresciuto) }
         let colore = FacciaProxy.palette[facce.count % FacciaProxy.palette.count]
@@ -1983,11 +2114,95 @@ final class Mesh3DModel: ObservableObject {
         f.triangoli = cresciuto; f.pianoPunto = p2; f.pianoNormale = n2
         f.erroreRms = mesh.rmsDalPiano(cresciuto, punto: p2, normale: n2)
         facce.append(f)
-        facciaAttivaId = f.id
+        return f.id
+    }
+
+    /// Aggiunge i triangoli SELEZIONATI al piano attivo (per completare porzioni
+    /// che la crescita ha mancato), ne ricalcola il piano e ri-espande il poligono.
+    func aggiungiSelezioneAlPianoAttivo() {
+        guard !selezione.isEmpty, let id = facciaAttivaId,
+              let i = facce.firstIndex(where: { $0.id == id }) else { return }
+        registraUndo()
+        let nuovi = selezione
+        for j in facce.indices where j != i { facce[j].triangoli.subtract(nuovi) }
+        facce[i].triangoli.formUnion(nuovi)
+        if let (p, n) = mesh.fitPianoRANSAC(facce[i].triangoli) {
+            facce[i].pianoPunto = p; facce[i].pianoNormale = n
+            facce[i].erroreRms = mesh.rmsDalPiano(facce[i].triangoli, punto: p, normale: n)
+        }
+        generaPoligono(perFaccia: id)
+        deselezionaTutto()
+        mostraProxy = true; mostraPiani = true
+        ridisegnaFacce(); ridisegnaPiani()
+    }
+
+    // MARK: Flusso rapido — Tocca semi + Cresci tutti
+
+    /// Lascia un seme sul triangolo toccato (un futuro piano). Istantaneo.
+    func aggiungiSeme(triangolo i: Int, punto: SIMD3<Float>) {
+        guard i >= 0, i < mesh.triangles.count else { return }
+        semiTocco.append((i, punto))
+        numSemi = semiTocco.count
+        ridisegnaSemi()
+    }
+
+    /// Rimuove tutti i semi marcati (senza crescere).
+    func annullaSemi() {
+        semiTocco.removeAll(); numSemi = 0; ridisegnaSemi()
+    }
+
+    /// Fa crescere TUTTI i semi in una passata (adiacenza condivisa = veloce),
+    /// creando un piano per ciascuno.
+    func cresciTuttiSemi() {
+        guard !semiTocco.isEmpty else { return }
+        registraUndo()
+        let adj = adiacenza()
+        var ultimo: Int? = nil
+        for s in semiTocco {
+            if facce.contains(where: { $0.triangoli.contains(s.tri) }) { continue } // già coperto
+            if let id = creaPianoDa(seme: [s.tri], adiacenza: adj) { ultimo = id }
+        }
         facce.removeAll { $0.triangoli.isEmpty }
         stimaGravita()
         classificaPerGravita()
-        generaPoligono(perFaccia: f.id)
+        for f in facce { generaPoligono(perFaccia: f.id) }
+        if let id = ultimo { facciaAttivaId = id }
+        pianiGenerati = facce.count
+        mostraProxy = true; mostraPiani = true
+        annullaSemi()
+        strumento = .facce
+        ridisegnaFacce(); ridisegnaPiani()
+    }
+
+    private func ridisegnaSemi() {
+        semiNode.childNodes.forEach { $0.removeFromParentNode() }
+        let r = CGFloat(estensioneMesh) * 0.012
+        for s in semiTocco {
+            let sf = SCNSphere(radius: r); sf.segmentCount = 12
+            let m = SCNMaterial(); m.diffuse.contents = UIColor.systemYellow
+            m.lightingModel = .constant; m.readsFromDepthBuffer = false; m.writesToDepthBuffer = false
+            sf.materials = [m]
+            let node = SCNNode(geometry: sf)
+            node.position = SCNVector3(s.punto.x, s.punto.y, s.punto.z)
+            semiNode.addChildNode(node)
+        }
+    }
+
+    /// Usa la selezione come seme. `split=false` → un solo piano da tutta la
+    /// selezione (più zone unite in un piano). `split=true` → un piano per ogni
+    /// zona connessa della selezione (più zone → più piani).
+    func cresciDaSelezione(split: Bool = false) {
+        guard !selezione.isEmpty else { return }
+        registraUndo()
+        let semi = split ? mesh.componentiConnesse(selezione) : [selezione]
+        let adj = adiacenza()
+        var ultimo: Int? = nil
+        for seme in semi { if let id = creaPianoDa(seme: seme, adiacenza: adj) { ultimo = id } }
+        facce.removeAll { $0.triangoli.isEmpty }
+        stimaGravita()
+        classificaPerGravita()
+        for f in facce { generaPoligono(perFaccia: f.id) }
+        if let id = ultimo { facciaAttivaId = id }
         pianiGenerati = facce.count
         mostraProxy = true; mostraPiani = true
         deselezionaTutto()
@@ -2046,7 +2261,7 @@ final class Mesh3DModel: ObservableObject {
               let (p, n) = mesh.fitPianoRANSAC(facce[i].triangoli) else { return }
         registraUndo()
         let cresciuto = mesh.crescePianare(da: facce[i].triangoli, normale: n, punto: p,
-                                           tolGradi: Float(tolleranzaNormaleGradi))
+                                           tolGradi: Float(tolleranzaNormaleGradi), adiacenza: adiacenza())
         for j in facce.indices where j != i { facce[j].triangoli.subtract(cresciuto) }
         facce[i].triangoli = cresciuto
         if let (p2, n2) = mesh.fitPianoRANSAC(cresciuto) {
@@ -2072,7 +2287,7 @@ final class Mesh3DModel: ObservableObject {
         let p = mesh.centroid(mesh.triangles[i])
         let n = mesh.normale(i)
         let cresciuto = mesh.crescePianare(da: [i], normale: n, punto: p,
-                                           tolGradi: Float(tolleranzaNormaleGradi))
+                                           tolGradi: Float(tolleranzaNormaleGradi), adiacenza: adiacenza())
         // non rubare triangoli a piani già marcati
         for j in facce.indices { facce[j].triangoli.subtract(cresciuto) }
         let colore = FacciaProxy.palette[facce.count % FacciaProxy.palette.count]
@@ -2277,9 +2492,15 @@ final class Mesh3DModel: ObservableObject {
             let src = SCNGeometrySource(vertices: corners)
             let elem = SCNGeometryElement(indices: idx, primitiveType: .triangles)
             let g = SCNGeometry(sources: [src], elements: [elem])
+            // Pieno & opaco quando si guardano SOLO i piani (geometria/texture nascoste),
+            // così il piano si legge come una superficie solida; semi-trasparente quando
+            // è sovrapposto alla mesh (per non coprirla). Con i piani pieni si scrive sul
+            // depth → si occludono correttamente fra loro.
+            let soloPiani = !mostraMesh && !mostraTexturaOC
             let m = SCNMaterial()
-            m.diffuse.contents = f.colore.withAlphaComponent(0.45)
-            m.isDoubleSided = true; m.lightingModel = .constant; m.writesToDepthBuffer = false
+            m.diffuse.contents = f.colore.withAlphaComponent(soloPiani ? 1.0 : 0.45)
+            m.isDoubleSided = true; m.lightingModel = .constant
+            m.writesToDepthBuffer = soloPiani
             g.materials = [m]
             pianiNode.addChildNode(SCNNode(geometry: g))
             if let c = MeshFactory.lineaGeometria(corners, colore: f.colore, chiusa: true) {
@@ -2326,13 +2547,18 @@ final class Mesh3DModel: ObservableObject {
         }
     }
 
-    /// Applica la vista corrente: trasparenza mesh + visibilità overlay proxy.
+    /// Applica la vista corrente: trasparenza mesh + visibilità overlay proxy +
+    /// mostra/nascondi la geometria OC grigia e la versione texturizzata OC.
     private func aggiornaVista() {
         let t: CGFloat = vistaValidazione == .soloProxy ? 0.04
             : (vistaValidazione == .soloScarti ? 0.18 : 1.0)
-        contentNode.geometry?.firstMaterial?.transparency = t
+        // geometria grigia nascosta se l'utente la spegne o se mostra la texture
+        let mostraGrigia = mostraMesh && !mostraTexturaOC
+        contentNode.geometry?.firstMaterial?.transparency = mostraGrigia ? t : 0
+        ocTextureNode?.isHidden = !mostraTexturaOC
         facceProxyNode.isHidden = !mostraProxy
         ridisegnaFacce()
+        ridisegnaPiani()   // i piani diventano pieni/trasparenti secondo la visibilità mesh
     }
 
     /// Riallinea gli insiemi di triangoli delle facce dopo un taglio (remap).
