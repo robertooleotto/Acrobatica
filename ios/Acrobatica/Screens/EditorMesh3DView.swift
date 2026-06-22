@@ -30,6 +30,7 @@ struct EditorMesh3DView: View {
             barraSuperiore
             ZStack(alignment: .topTrailing) {
                 SceneKitContainer(model: model)
+                if model.modoPerimetro { PannelloPerimetro(model: model) }
                 hud
                 NavGizmo(model: model).padding(.top, 8).padding(.trailing, 10)
                 railDestro
@@ -247,8 +248,12 @@ struct EditorMesh3DView: View {
                     .foregroundStyle(EditorTheme.testoMuto).frame(width: 36, alignment: .trailing)
             }
             HStack(spacing: 8) {
-                Text("Tocca i punti del perimetro sul contorno")
-                    .font(Theme.Typo.caption(10)).foregroundStyle(EditorTheme.testoMuto)
+                Button { model.vistaDallAlto() } label: {
+                    Label("Dall'alto", systemImage: "arrow.down.to.line")
+                        .font(Theme.Typo.caption(11, .semibold)).foregroundStyle(EditorTheme.testo)
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .background(EditorTheme.panelAlt, in: RoundedRectangle(cornerRadius: 8))
+                }
                 Spacer()
                 Button { model.annullaUltimoPuntoPerimetro() } label: {
                     Label("Indietro", systemImage: "arrow.uturn.backward")
@@ -1246,6 +1251,81 @@ private struct MultipianoJSON: Codable {
 // MARK: – Modello: scena, camera, caricamento mesh
 
 /// Strumento attivo nell'editor 3D.
+/// Dati 2D per il pannello "rileva perimetro" (coordinate u,v nel piano di slice).
+struct PerimetroDisegno {
+    var segmenti: [(CGPoint, CGPoint)] = []
+    var punti: [CGPoint] = []
+    var spline: [CGPoint] = []
+    var bounds: CGRect = .zero
+}
+
+/// Pannello 2D top-down della sezione: mostra il bordo (ciano) e lo ricalca a
+/// linea/spline (giallo). Tap = aggiunge un punto. Disaccoppiato dalla camera 3D
+/// (la sezione di una facciata è una curva piana: niente "sparizione" di geometria).
+private struct PannelloPerimetro: View {
+    @ObservedObject var model: Mesh3DModel
+
+    var body: some View {
+        GeometryReader { geo in
+            let d = model.disegnoPerimetro
+            let b = d.bounds
+            let pad: CGFloat = 28
+            let scala: CGFloat = (b.width > 0 && b.height > 0)
+                ? min((geo.size.width - 2 * pad) / b.width, (geo.size.height - 2 * pad) / b.height)
+                : 1
+            let offX = (geo.size.width - b.width * scala) / 2
+            let offY = (geo.size.height - b.height * scala) / 2
+            let toView = { (p: CGPoint) -> CGPoint in
+                CGPoint(x: offX + (p.x - b.minX) * scala, y: offY + (b.maxY - p.y) * scala)
+            }
+            let toUV = { (p: CGPoint) -> CGPoint in
+                CGPoint(x: b.minX + (p.x - offX) / scala, y: b.maxY - (p.y - offY) / scala)
+            }
+            ZStack {
+                Color.black.opacity(0.9)
+                Canvas { ctx, _ in
+                    var sp = Path()
+                    for s in d.segmenti { sp.move(to: toView(s.0)); sp.addLine(to: toView(s.1)) }
+                    ctx.stroke(sp, with: .color(.teal), lineWidth: 1.5)
+                    for s in d.segmenti {
+                        let m = CGPoint(x: (s.0.x + s.1.x) / 2, y: (s.0.y + s.1.y) / 2)
+                        let v = toView(m)
+                        ctx.fill(Path(ellipseIn: CGRect(x: v.x - 1.5, y: v.y - 1.5, width: 3, height: 3)), with: .color(.teal))
+                    }
+                    if d.spline.count >= 2 {
+                        var yp = Path(); yp.move(to: toView(d.spline[0]))
+                        for q in d.spline.dropFirst() { yp.addLine(to: toView(q)) }
+                        ctx.stroke(yp, with: .color(.yellow), lineWidth: 2.5)
+                    }
+                    for q in d.punti {
+                        let v = toView(q)
+                        ctx.fill(Path(ellipseIn: CGRect(x: v.x - 5, y: v.y - 5, width: 10, height: 10)), with: .color(.yellow))
+                    }
+                }
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0).onEnded { val in
+                    guard b.width > 0 else { return }
+                    model.toccaUV(toUV(val.location))
+                })
+                if b.width == 0 {
+                    Text("Nessuna sezione a questa quota — sposta lo slider")
+                        .font(.caption).foregroundStyle(.white.opacity(0.7))
+                }
+                VStack {
+                    HStack {
+                        Text("Sezione dall'alto · ricalca il bordo")
+                            .font(.caption).foregroundStyle(.white.opacity(0.8))
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(.black.opacity(0.4), in: Capsule())
+                        Spacer()
+                    }.padding(12)
+                    Spacer()
+                }
+            }
+        }
+    }
+}
+
 enum StrumentoMesh3D: String, CaseIterable, Identifiable {
     case orbita     // naviga (orbit/pan/zoom)
     case box        // box di lavoro + crop
@@ -1363,6 +1443,10 @@ final class Mesh3DModel: ObservableObject {
     private var puntiPerimetro: [SIMD3<Float>] = []
     private var sliceS0: Float = 0   // quota assoluta del piano di slice (lungo su)
     private var prevMostraMesh = true   // ripristino visibilità mesh uscendo dal perimetro
+    private var perimE1 = SIMD3<Float>(1, 0, 0)   // base orizzontale 2D del piano di slice
+    private var perimE2 = SIMD3<Float>(0, 0, 1)
+    /// Dati per il pannello 2D del perimetro (coordinate u,v nel piano orizzontale).
+    @Published private(set) var disegnoPerimetro = PerimetroDisegno()
     // Pennello: dimensione + vincolo alle normali della geometria
     @Published var raggioPennello: CGFloat = 42
     @Published var vincolaNormali = false
@@ -2226,13 +2310,11 @@ final class Mesh3DModel: ObservableObject {
     /// Entra in modalità perimetro: calcola lo slice e mette la vista dall'alto.
     func avviaPerimetro() {
         modoPerimetro = true
-        strumento = .orbita        // il pan ruota la vista; il tap posa i punti
+        strumento = .orbita
         puntiPerimetro = []; numPuntiPerimetro = 0
-        prevMostraMesh = mostraMesh
-        mostraMesh = false         // dall'alto la mesh sarebbe di taglio: mostra solo il profilo
+        // La SEZIONE si vede e si ricalca nel PANNELLO 2D (la sezione di una facciata
+        // è una curva piana). La geometria 3D resta intatta dietro: non sparisce.
         aggiornaSlice()
-        snapAlto()                 // vista dall'alto: si vede il footprint
-        inquadra()
     }
 
     /// Esce dalla modalità perimetro e pulisce slice/traccia.
@@ -2241,8 +2323,10 @@ final class Mesh3DModel: ObservableObject {
         strumento = .facce         // torna all'editor dei piani
         puntiPerimetro = []; numPuntiPerimetro = 0
         perimetroNode.childNodes.forEach { $0.removeFromParentNode() }
-        mostraMesh = prevMostraMesh
     }
+
+    /// Vista dall'alto on-demand per tracciare il perimetro (la mesh resta visibile).
+    func vistaDallAlto() { snapAlto() }
 
     /// Piano di slice corrente (punto, normale) — per il raycast dei tap.
     func pianoSlice() -> (p: SIMD3<Float>, n: SIMD3<Float>) {
@@ -2250,14 +2334,47 @@ final class Mesh3DModel: ObservableObject {
         return (su * sliceS0, su)
     }
 
-    /// Ricalcola lo slice alla quota corrente e ridisegna.
+    /// Ricalcola lo slice alla quota corrente e aggiorna pannello 2D + overlay 3D.
     func aggiornaSlice() {
         guard modoPerimetro else { return }
         let su = simd_normalize(gravitaSu)
+        // base orizzontale stabile del piano di slice
+        var e1 = simd_cross(su, SIMD3<Float>(0, 0, 1))
+        if simd_length(e1) < 1e-4 { e1 = simd_cross(su, SIMD3<Float>(1, 0, 0)) }
+        perimE1 = simd_normalize(e1); perimE2 = simd_normalize(simd_cross(su, perimE1))
         let (sMin, sMax) = mesh.rangeLungo(su)
         sliceS0 = sMin + max(0, min(1, quotaSlice)) * (sMax - sMin)
         let segs = mesh.sezione(quota: sliceS0, normale: su)
-        ridisegnaPerimetro(segs)
+        ridisegnaPerimetro(segs)         // overlay 3D
+        aggiornaDisegno2D(segs)          // pannello 2D
+    }
+
+    /// (u,v) nel piano di slice da un punto 3D, e viceversa.
+    private func uv(_ p: SIMD3<Float>) -> CGPoint {
+        CGPoint(x: CGFloat(simd_dot(p, perimE1)), y: CGFloat(simd_dot(p, perimE2)))
+    }
+    func mondoDaUV(_ p: CGPoint) -> SIMD3<Float> {
+        simd_normalize(gravitaSu) * sliceS0 + perimE1 * Float(p.x) + perimE2 * Float(p.y)
+    }
+
+    /// Aggiunge un punto del perimetro dal pannello 2D (coord u,v).
+    func toccaUV(_ p: CGPoint) { aggiungiPuntoPerimetro(mondoDaUV(p)) }
+
+    private func aggiornaDisegno2D(_ segs: [(SIMD3<Float>, SIMD3<Float>)]) {
+        var d = PerimetroDisegno()
+        d.segmenti = segs.map { (uv($0.0), uv($0.1)) }
+        d.punti = puntiPerimetro.map { uv($0) }
+        d.spline = (puntiPerimetro.count >= 3 ? splinePunti() : puntiPerimetro).map { uv($0) }
+        // bounds (unione di tutti i punti)
+        var minX = CGFloat.greatestFiniteMagnitude, minY = minX
+        var maxX = -CGFloat.greatestFiniteMagnitude, maxY = maxX
+        func acc(_ q: CGPoint) { minX = min(minX, q.x); minY = min(minY, q.y); maxX = max(maxX, q.x); maxY = max(maxY, q.y) }
+        for s in d.segmenti { acc(s.0); acc(s.1) }
+        for q in d.punti { acc(q) }
+        if maxX > minX, maxY > minY {
+            d.bounds = CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+        }
+        disegnoPerimetro = d
     }
 
     /// Aggiunge un punto del perimetro (sul piano di slice).
@@ -2370,9 +2487,24 @@ final class Mesh3DModel: ObservableObject {
 
     private func ridisegnaPerimetro(_ segs: [(SIMD3<Float>, SIMD3<Float>)]) {
         perimetroNode.childNodes.forEach { $0.removeFromParentNode() }
-        // contorno della sezione (ciano acceso) = guida da ricalcare
+        // contorno della sezione (ciano acceso) = guida da ricalcare: linee + pallini
         if let g = geometriaSegmenti(segs, colore: UIColor.systemTeal) {
             perimetroNode.addChildNode(SCNNode(geometry: g))
+        }
+        if !segs.isEmpty {
+            let rp = CGFloat(estensioneMesh) * 0.006
+            let passo = max(1, segs.count / 160)   // ~160 pallini max
+            var k = 0
+            while k < segs.count {
+                let m = (segs[k].0 + segs[k].1) * 0.5
+                let s = SCNSphere(radius: rp); s.segmentCount = 8
+                let mat = SCNMaterial(); mat.diffuse.contents = UIColor.systemTeal
+                mat.lightingModel = .constant; mat.readsFromDepthBuffer = false; mat.writesToDepthBuffer = false
+                s.materials = [mat]
+                let node = SCNNode(geometry: s); node.position = SCNVector3(m.x, m.y, m.z)
+                perimetroNode.addChildNode(node)
+                k += passo
+            }
         }
         // traccia dell'utente come SPLINE morbida (giallo) + punti di controllo
         let curva = puntiPerimetro.count >= 3 ? splinePunti() : puntiPerimetro
