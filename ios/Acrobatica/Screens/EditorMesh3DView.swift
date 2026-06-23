@@ -840,19 +840,19 @@ private struct SceneKitContainer: UIViewRepresentable {
     /// Orienta la camera lungo `dir` inquadrando la mesh (chiamato dallo snap).
     static func orientaCamera(_ v: SCNView, contentNode: SCNNode,
                               dir: SIMD3<Float>, up: SIMD3<Float>) {
-        let bb = contentNode.flattenedClone().boundingBox
-        let center = SIMD3<Float>((bb.min.x + bb.max.x) / 2, (bb.min.y + bb.max.y) / 2, (bb.min.z + bb.max.z) / 2)
-        let diag = simd_length(SIMD3<Float>(bb.max.x - bb.min.x, bb.max.y - bb.min.y, bb.max.z - bb.min.z))
+        // Bounds della SOLA mesh (la geometria di contentNode), non dei figli:
+        // flattenedClone includeva nodi enormi/overlay e mandava la camera lontano.
+        let bb = contentNode.boundingBox
+        let lo = SIMD3<Float>(bb.min.x, bb.min.y, bb.min.z)
+        let hi = SIMD3<Float>(bb.max.x, bb.max.y, bb.max.z)
+        let center = contentNode.simdConvertPosition((lo + hi) * 0.5, to: nil)
+        let diag = max(simd_length(hi - lo), 1e-3)
         let fovDeg = v.pointOfView?.camera?.fieldOfView ?? 55
         let fov = Float(fovDeg * .pi / 180)
-        let dist = (diag * 0.5) / tan(fov * 0.5) * 1.25
-        let eye = center + dir * dist
-        let m = lookAt(eye: eye, center: center, up: up)
+        let dist = (diag * 0.5) / tan(fov * 0.5) * 1.3
+        let eye = center + simd_normalize(dir) * dist
+        let m = lookAt(eye: eye, center: center, up: simd_normalize(up))
 
-        // Riusa un unico nodo camera "snapCam" e FALLO ADOTTARE al controller
-        // (sia v.pointOfView sia defaultCameraController.pointOfView): senza questo
-        // il controller continua a gestire la vecchia camera e al primo update la
-        // ripristina → la mesh sparisce.
         let nodo: SCNNode
         if let esistente = v.scene?.rootNode.childNode(withName: "snapCam", recursively: false) {
             nodo = esistente
@@ -861,14 +861,10 @@ private struct SceneKitContainer: UIViewRepresentable {
             v.scene?.rootNode.addChildNode(nodo)
         }
         nodo.camera?.fieldOfView = fovDeg
-        nodo.camera?.zNear = max(0.001, Double(diag) * 0.001)
+        nodo.camera?.zNear = max(0.01, Double(diag) * 0.002)
         nodo.camera?.zFar = Double(dist + diag) * 4
-        SCNTransaction.begin(); SCNTransaction.animationDuration = 0.25
         nodo.simdTransform = m
-        SCNTransaction.commit()
         v.pointOfView = nodo
-        v.defaultCameraController.pointOfView = nodo
-        v.defaultCameraController.target = SCNVector3(center.x, center.y, center.z)
     }
 
     /// Matrice di vista (camera SceneKit guarda lungo -Z).
