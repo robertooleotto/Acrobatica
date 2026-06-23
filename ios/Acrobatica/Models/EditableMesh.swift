@@ -55,6 +55,8 @@ struct FacciaProxy: Identifiable {
     var pianoPunto: SIMD3<Float>? = nil
     var pianoNormale: SIMD3<Float>? = nil
     var erroreRms: Float? = nil   // planarità: RMS distanza triangoli↔piano
+    /// Nascondi questo piano dalla scena (solo visualizzazione: non lo elimina).
+    var nascosto: Bool = false
     /// Poligono editabile sul piano (vertici 3D in ordine, chiuso): l'area di
     /// QUESTO poligono = m² del piano (Fase B dell'editor poligonale).
     var poligono: [SIMD3<Float>]? = nil

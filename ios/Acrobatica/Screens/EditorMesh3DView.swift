@@ -346,6 +346,13 @@ struct EditorMesh3DView: View {
                                         in: RoundedRectangle(cornerRadius: 8))
                     }
                 }
+                Button { Task { await model.segmentaTuttoAutomatico() } } label: {
+                    Label(model.segmentando ? "Rilevo…" : "Auto piani", systemImage: "wand.and.stars")
+                        .font(Theme.Typo.caption(11, .semibold)).foregroundStyle(.white)
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .background(Color(red: 0.18, green: 0.70, blue: 0.44), in: RoundedRectangle(cornerRadius: 8))
+                }
+                .disabled(model.numTriangoli == 0 || model.segmentando)
                 Button { model.avviaPerimetro() } label: {
                     Label("Perimetro", systemImage: "scissors")
                         .font(Theme.Typo.caption(11, .semibold)).foregroundStyle(EditorTheme.testo)
@@ -501,21 +508,38 @@ struct EditorMesh3DView: View {
                 HStack(spacing: 6) {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 6) {
-                            ForEach(model.facce) { f in
-                                Button { model.selezionaFacciaAttiva(f.id) } label: {
-                                    HStack(spacing: 5) {
-                                        Circle().fill(Color(uiColor: f.colore)).frame(width: 9, height: 9)
-                                        Text("\(f.nome) · \(f.triangoli.count)")
-                                            .font(Theme.Typo.caption(10, .semibold))
-                                            .foregroundStyle(EditorTheme.testo)
-                                    }
-                                    .padding(.horizontal, 8).padding(.vertical, 6)
-                                    .background(model.facceSelezionate.contains(f.id) ? EditorTheme.accento.opacity(0.35)
-                                                : (f.id == model.facciaAttivaId ? EditorTheme.accento.opacity(0.25) : EditorTheme.panelAlt),
-                                                in: RoundedRectangle(cornerRadius: 8))
-                                    .overlay(RoundedRectangle(cornerRadius: 8)
-                                        .stroke(model.facceSelezionate.contains(f.id) ? EditorTheme.accento : .clear, lineWidth: 1.5))
+                            if model.facce.contains(where: { $0.nascosto }) {
+                                Button { model.mostraTuttiIPiani() } label: {
+                                    Label("Mostra tutti", systemImage: "eye")
+                                        .font(Theme.Typo.caption(10, .semibold))
+                                        .foregroundStyle(EditorTheme.testo)
+                                        .padding(.horizontal, 8).padding(.vertical, 6)
+                                        .background(EditorTheme.panelAlt, in: RoundedRectangle(cornerRadius: 8))
                                 }
+                            }
+                            ForEach(model.facce) { f in
+                                HStack(spacing: 5) {
+                                    Button { model.toggleVisibilitaFaccia(f.id) } label: {
+                                        Image(systemName: f.nascosto ? "eye.slash" : "eye")
+                                            .font(.system(size: 11))
+                                            .foregroundStyle(f.nascosto ? EditorTheme.testoMuto : EditorTheme.testo)
+                                    }
+                                    Button { model.selezionaFacciaAttiva(f.id) } label: {
+                                        HStack(spacing: 5) {
+                                            Circle().fill(Color(uiColor: f.colore)).frame(width: 9, height: 9)
+                                            Text("\(f.nome) · \(f.triangoli.count)")
+                                                .font(Theme.Typo.caption(10, .semibold))
+                                                .foregroundStyle(EditorTheme.testo)
+                                        }
+                                    }
+                                }
+                                .opacity(f.nascosto ? 0.45 : 1)
+                                .padding(.horizontal, 8).padding(.vertical, 6)
+                                .background(model.facceSelezionate.contains(f.id) ? EditorTheme.accento.opacity(0.35)
+                                            : (f.id == model.facciaAttivaId ? EditorTheme.accento.opacity(0.25) : EditorTheme.panelAlt),
+                                            in: RoundedRectangle(cornerRadius: 8))
+                                .overlay(RoundedRectangle(cornerRadius: 8)
+                                    .stroke(model.facceSelezionate.contains(f.id) ? EditorTheme.accento : .clear, lineWidth: 1.5))
                             }
                         }
                     }
@@ -806,6 +830,14 @@ private struct SceneKitContainer: UIViewRepresentable {
         v.addGestureRecognizer(pan)
         context.coordinator.pan = pan
 
+        // Pinch = zoom camera negli strumenti dove spegniamo allowsCameraControl
+        // (Piani/Seleziona/Box): senza questo lo zoom a due dita non esisterebbe.
+        let pinch = UIPinchGestureRecognizer(target: context.coordinator,
+                                             action: #selector(Coordinator.handlePinch(_:)))
+        pinch.isEnabled = false
+        v.addGestureRecognizer(pinch)
+        context.coordinator.pinch = pinch
+
         let lasso = CAShapeLayer()
         lasso.fillColor = UIColor(EditorTheme.accento).withAlphaComponent(0.15).cgColor
         lasso.strokeColor = UIColor(EditorTheme.accento).cgColor
@@ -829,6 +861,7 @@ private struct SceneKitContainer: UIViewRepresentable {
             || model.strumento == .facce
         v.allowsCameraControl = !panNostro
         context.coordinator.pan?.isEnabled = panNostro
+        context.coordinator.pinch?.isEnabled = panNostro   // zoom 2 dita quando la camera SceneKit è spenta
 
         if context.coordinator.lastTick != model.reframeTick {
             context.coordinator.lastTick = model.reframeTick
@@ -886,6 +919,7 @@ private struct SceneKitContainer: UIViewRepresentable {
         let model: Mesh3DModel
         weak var view: SCNView?
         weak var pan: UIPanGestureRecognizer?
+        weak var pinch: UIPinchGestureRecognizer?
         var lassoLayer: CAShapeLayer?
         var lastTick = -1
         var lastSnap = 0
@@ -939,6 +973,26 @@ private struct SceneKitContainer: UIViewRepresentable {
                 ultimoQuat = q
                 model.cameraQuat = q
             }
+        }
+
+        /// Zoom a due dita (dolly verso/da il centro mesh). Attivo solo quando
+        /// `allowsCameraControl` è spento (Piani/Seleziona/Box).
+        @MainActor @objc func handlePinch(_ g: UIPinchGestureRecognizer) {
+            guard g.state == .changed, let v = view, let pov = v.pointOfView else { return }
+            let s = Float(g.scale); g.scale = 1
+            guard s > 0.001 else { return }
+            let bs = model.contentNode.boundingSphere
+            let center = model.contentNode.simdConvertPosition(
+                SIMD3<Float>(bs.center.x, bs.center.y, bs.center.z), to: nil)
+            let ext = max(bs.radius * 2, 1e-3)
+            let pos = pov.simdWorldPosition
+            var dir = pos - center
+            var dist = simd_length(dir)
+            guard dist > 1e-5 else { return }
+            dir /= dist
+            dist /= s                                   // pinch out (s>1) → avvicina
+            dist = max(ext * 0.05, min(ext * 8, dist))  // clamp: non entrare/volare via
+            pov.simdWorldPosition = center + dir * dist
         }
 
         @MainActor @objc func handleTap(_ g: UITapGestureRecognizer) {
@@ -2085,6 +2139,71 @@ final class Mesh3DModel: ObservableObject {
         segmentando = false
     }
 
+    /// Rileva AUTOMATICAMENTE tutti i piani sull'INTERA mesh (RANSAC globale),
+    /// senza dover pennellare semi a mano. Poi applica la STESSA pipeline di
+    /// pulizia di `riconosciFacce` (merge complanari, scarto non-planari/sliver/
+    /// piccoli, snap Manhattan, poligoni) → piani planari come fatti a mano.
+    func segmentaTuttoAutomatico() async {
+        guard !segmentando, !mesh.triangles.isEmpty else { return }
+        segmentando = true
+        registraUndo()
+        let m = mesh
+        let piani = await Task.detached(priority: .userInitiated) {
+            () -> [(triangoli: Set<Int>, punto: SIMD3<Float>, normale: SIMD3<Float>)] in
+            m.segmentaPiani(maxPiani: 24,
+                            sogliaDistFrazione: 0.012,
+                            sogliaNormaleGradi: 22,
+                            minTriangoliFrazione: 0.006,
+                            campioni: 120)
+        }.value
+
+        // Ricostruisci le facce dai piani trovati. Gli inlier RANSAC sono GLOBALI
+        // e scollegati: spezzali nelle COMPONENTI CONNESSE così ogni faccia è un
+        // singolo muro contiguo (niente rettangoli che sbordano su pezzi lontani).
+        facce.removeAll()
+        facceSelezionate.removeAll()
+        facciaAttivaId = nil
+        let minComp = max(Int(Float(mesh.triangles.count) * 0.003), 50)
+        for p in piani {
+            // Spezza in componenti connesse, SCARTA le isole piccole/lontane (rumore,
+            // pezzi sull'altro lato dell'edificio) e RIUNISCI quelle grandi: un muro
+            // forato dalle finestre resta UN piano, ma niente più inlier vaganti.
+            let comps = mesh.componentiConnesse(p.triangoli)
+            let maxC = comps.map(\.count).max() ?? 0
+            let soglia = max(minComp, Int(Float(maxC) * 0.15))
+            var tri = Set<Int>()
+            for c in comps where c.count >= soglia { tri.formUnion(c) }
+            guard tri.count >= minComp else { continue }
+            let (cp, cn) = mesh.fitPianoRANSAC(tri) ?? (p.punto, p.normale)
+            let colore = FacciaProxy.palette[facce.count % FacciaProxy.palette.count]
+            var f = FacciaProxy(id: prossimoIdFaccia, nome: "Piano \(prossimoIdFaccia)", colore: colore)
+            prossimoIdFaccia += 1
+            f.triangoli = tri
+            f.pianoPunto = cp
+            f.pianoNormale = cn
+            f.erroreRms = mesh.rmsDalPiano(tri, punto: cp, normale: cn)
+            facce.append(f)
+        }
+
+        // Stessa pulizia del flusso manuale.
+        mergeComplanariConnessi()
+        stimaGravita()
+        stimaGravitaDaMuri()           // "su" dai muri verticali → rettangoli dritti
+        scartaNonPlanari()
+        scartaSlivers()
+        scartaPianiPiccoli()
+        snapManhattan()
+        classificaPerGravita()
+        generaPoligoniTutti()
+        facciaAttivaId = facce.first?.id
+        pianiGenerati = facce.count
+        mostraProxy = true
+        mostraPiani = true
+        ridisegnaFacce()
+        ridisegnaPiani()
+        segmentando = false
+    }
+
     /// #14 — Unisce facce COMPLANARI e CONNESSE (stesso muro spezzato dalle
     /// finestre o segnato con più tratti). Due torrette complanari ma staccate
     /// NON si fondono (test `adiacenti`).
@@ -2130,6 +2249,29 @@ final class Mesh3DModel: ObservableObject {
             }
         }
         gravitaSu = (peso > 0 && simd_length(acc) > 1e-4) ? simd_normalize(acc) : y
+    }
+
+    /// Stima "su" dai MURI verticali, non dal terreno: l'asse è ortogonale a
+    /// tutte le normali dei muri (per ogni coppia non parallela, `n_i × n_j`
+    /// punta lungo la verticale dell'edificio). Robusto al terreno inclinato →
+    /// rettangoli dritti. Usa la stima del terreno solo come fallback.
+    private func stimaGravitaDaMuri() {
+        let y = SIMD3<Float>(0, 1, 0)
+        let muri = facce.compactMap { $0.pianoNormale }.map { simd_normalize($0) }
+            .filter { abs(simd_dot($0, gravitaSu)) < 0.6 }   // ~verticali rispetto alla stima corrente
+        guard muri.count >= 2 else { return }
+        var up = SIMD3<Float>(0, 0, 0)
+        for i in 0..<muri.count {
+            for j in (i + 1)..<muri.count {
+                var c = simd_cross(muri[i], muri[j])
+                let l = simd_length(c)
+                if l < 0.34 { continue }                     // muri quasi paralleli: niente info sull'asse
+                c /= l
+                if simd_dot(c, y) < 0 { c = -c }             // orienta verso l'alto mondiale
+                up += c * l                                  // peso = sin(angolo tra i muri)
+            }
+        }
+        if simd_length(up) > 1e-3 { gravitaSu = simd_normalize(up) }
     }
 
     /// #7 — Classifica ogni piano per angolo rispetto alla verticale (gravità stimata).
@@ -2194,14 +2336,24 @@ final class Mesh3DModel: ObservableObject {
         if simd_length(right) < 1e-5 { right = simd_cross(SIMD3(1, 0, 0), n) }
         right = simd_normalize(right)
         let up = simd_normalize(simd_cross(n, right))
-        var minx = Float.greatestFiniteMagnitude, maxx = -minx, miny = minx, maxy = -minx
+        var xs: [Float] = [], ys: [Float] = []
+        xs.reserveCapacity(facce[i].triangoli.count * 3)
+        ys.reserveCapacity(facce[i].triangoli.count * 3)
         for t in facce[i].triangoli {
             let tri = mesh.triangles[t]
             for v in [mesh.vertices[Int(tri.x)], mesh.vertices[Int(tri.y)], mesh.vertices[Int(tri.z)]] {
-                let x = simd_dot(v - p, right), y = simd_dot(v - p, up)
-                minx = min(minx, x); maxx = max(maxx, x); miny = min(miny, y); maxy = max(maxy, y)
+                xs.append(simd_dot(v - p, right)); ys.append(simd_dot(v - p, up))
             }
         }
+        guard xs.count >= 3 else { return }
+        xs.sort(); ys.sort()
+        // Percentili anziché min/max assoluto: scarta il bordo sfrangiato dell'OC e
+        // qualche triangolo isolato, così il rettangolo non sborda dalla geometria.
+        func perc(_ a: [Float], _ f: Float) -> Float {
+            a[min(a.count - 1, max(0, Int((Float(a.count - 1) * f).rounded())))]
+        }
+        let minx = perc(xs, 0.01), maxx = perc(xs, 0.99)
+        let miny = perc(ys, 0.01), maxy = perc(ys, 0.99)
         func pt(_ x: Float, _ y: Float) -> SIMD3<Float> { p + right * x + up * y }
         facce[i].poligono = [pt(minx, miny), pt(maxx, miny), pt(maxx, maxy), pt(minx, maxy)]
     }
@@ -2646,18 +2798,22 @@ final class Mesh3DModel: ObservableObject {
     /// fittato. Così, se il muro è inclinato, il piano lo segue.
     func fittaPianoAllaMesh(_ id: Int) {
         guard let i = facce.firstIndex(where: { $0.id == id }),
-              var poly = facce[i].poligono, let n0 = facce[i].pianoNormale,
+              let poly0 = facce[i].poligono, let n0 = facce[i].pianoNormale,
               let p0 = facce[i].pianoPunto else { return }
         let n = simd_normalize(n0)
-        let banda = estensioneMesh * 0.12
+        let (lo, hi) = mesh.aabb
+        let ext = max(hi.x - lo.x, max(hi.y - lo.y, hi.z - lo.z))
+        let banda = ext * 0.12
         let cosN = cos(50 * Float.pi / 180)
-        // estensione orizzontale del poligono (per non prendere muri lontani)
-        let su = simd_normalize(gravitaSu)
-        var asseOr = simd_cross(su, n)
+
+        // 1) Ri-fitta l'ORIENTAMENTO del piano sul muro reale, usando i triangoli
+        //    vicini al poligono corrente (clamp orizzontale: non agganciare muri lontani).
+        let su0 = simd_normalize(gravitaSu)
+        var asseOr = simd_cross(su0, n)
         if simd_length(asseOr) < 1e-5 { asseOr = simd_cross(SIMD3(1, 0, 0), n) }
         asseOr = simd_normalize(asseOr)
-        let proj = poly.map { simd_dot($0 - p0, asseOr) }
-        let oMin = (proj.min() ?? 0) - banda, oMax = (proj.max() ?? 0) + banda
+        let projO = poly0.map { simd_dot($0 - p0, asseOr) }
+        let oMin = (projO.min() ?? 0) - banda, oMax = (projO.max() ?? 0) + banda
         var vicini = Set<Int>()
         for t in mesh.triangles.indices {
             let c = mesh.centroid(mesh.triangles[t])
@@ -2665,17 +2821,45 @@ final class Mesh3DModel: ObservableObject {
             let o = simd_dot(c - p0, asseOr)
             if o >= oMin, o <= oMax { vicini.insert(t) }
         }
-        guard vicini.count >= 8, let (p2, n2v) = mesh.fitPianoRANSAC(vicini) else { return }
-        var n2 = simd_normalize(n2v)
-        if simd_dot(n2, n) < 0 { n2 = -n2 }
-        // Aggancia il piano al MURO reale e ricostruisci il poligono come rettangolo
-        // del muro (orientamento + estensione dai triangoli fittati): risultato visibile
-        // anche su muri verticali (il piano si sposta/ridimensiona sulla superficie vera).
-        facce[i].pianoNormale = n2
-        facce[i].pianoPunto = p2
+        guard vicini.count >= 8, let (pf, nfv) = mesh.fitPianoRANSAC(vicini) else { return }
+        var nf = simd_normalize(nfv)
+        if simd_dot(nf, n) < 0 { nf = -nf }
+
+        // 2) ESTENSIONE PIENA della facciata. Il poligono NON deve fermarsi dove la
+        //    crescita planare si è interrotta (la "cresta" del parapetto): prendiamo
+        //    il bbox di TUTTI i triangoli complanari entro una banda perpendicolare,
+        //    con tolleranza di normale ampia così includiamo le facce verticali di
+        //    parapetti/torrette. Risultato: il piano copre base→colmo dell'edificio.
+        let su = simd_normalize(gravitaSu)
+        var right = simd_cross(su, nf)
+        if simd_length(right) < 1e-5 { right = simd_cross(SIMD3(1, 0, 0), nf) }
+        right = simd_normalize(right)
+        let up = simd_normalize(simd_cross(nf, right))
+        let cosWide = cos(65 * Float.pi / 180)   // ammette parapetti/torrette leggermente inclinati
+        let bandaExt = ext * 0.10                // assorbe spessore muro + parapetto rientrante
+        var xs: [Float] = [], ys: [Float] = []
+        for t in mesh.triangles.indices {
+            let c = mesh.centroid(mesh.triangles[t])
+            guard abs(simd_dot(c - pf, nf)) < bandaExt,
+                  abs(simd_dot(mesh.normale(t), nf)) > cosWide else { continue }
+            xs.append(simd_dot(c - pf, right)); ys.append(simd_dot(c - pf, up))
+        }
+        guard xs.count >= 8 else { return }
+        xs.sort(); ys.sort()
+        // percentili robusti: scarta triangoli isolati senza tagliare il parapetto
+        func perc(_ a: [Float], _ f: Float) -> Float {
+            a[min(a.count - 1, max(0, Int((Float(a.count - 1) * f).rounded())))]
+        }
+        let minx = perc(xs, 0.004), maxx = perc(xs, 0.996)
+        let miny = perc(ys, 0.004), maxy = perc(ys, 0.996)
+        guard maxx > minx, maxy > miny else { return }
+        func pt(_ x: Float, _ y: Float) -> SIMD3<Float> { pf + right * x + up * y }
+
+        facce[i].pianoNormale = nf
+        facce[i].pianoPunto = pf
         facce[i].triangoli = vicini
-        facce[i].erroreRms = mesh.rmsDalPiano(vicini, punto: p2, normale: n2)
-        generaPoligono(perFaccia: id)
+        facce[i].erroreRms = mesh.rmsDalPiano(vicini, punto: pf, normale: nf)
+        facce[i].poligono = [pt(minx, miny), pt(maxx, miny), pt(maxx, maxy), pt(minx, maxy)]
         mostraPiani = true
         ridisegnaPiani()
     }
@@ -2829,6 +3013,20 @@ final class Mesh3DModel: ObservableObject {
         }
         facciaAttivaId = id
         mostraPiani = true   // le maniglie vivono sul layer dei piani: assicurane la visibilità
+        ridisegnaFacce(); ridisegnaPiani()
+    }
+
+    /// Mostra/nascondi UN piano (solo visualizzazione, non lo elimina). Per
+    /// valutare i piani rilevati uno alla volta.
+    func toggleVisibilitaFaccia(_ id: Int) {
+        guard let i = facce.firstIndex(where: { $0.id == id }) else { return }
+        facce[i].nascosto.toggle()
+        ridisegnaFacce(); ridisegnaPiani()
+    }
+
+    /// Mostra tutti i piani nascosti.
+    func mostraTuttiIPiani() {
+        for i in facce.indices { facce[i].nascosto = false }
         ridisegnaFacce(); ridisegnaPiani()
     }
 
@@ -3147,6 +3345,7 @@ final class Mesh3DModel: ObservableObject {
         guard mostraPiani else { return }
         let upRef = assiRif.u
         for f in facce {
+            if f.nascosto { continue }
             guard let n = f.pianoNormale else { continue }
             // Poligono editabile se presente (anche per facciate estruse senza
             // triangoli); altrimenti bbox del piano dai triangoli pennellati.
@@ -3233,6 +3432,7 @@ final class Mesh3DModel: ObservableObject {
     // MARK: Validazione (§8)
 
     private func mostraFaccia(_ f: FacciaProxy) -> Bool {
+        if f.nascosto { return false }
         switch vistaValidazione {
         case .normale, .soloProxy: return true
         case .soloAccettate:       return f.tipo != .scarto
