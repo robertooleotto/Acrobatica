@@ -1549,6 +1549,12 @@ final class Mesh3DModel: ObservableObject {
     // Facce proxy (§3): pennelli colorati = facce/piani
     @Published var facce: [FacciaProxy] = []
     @Published var facciaAttivaId: Int?
+    /// Insieme dei piani su cui mostrare le maniglie: i selezionati + l'attivo.
+    var facceAttiveSet: Set<Int> {
+        var s = facceSelezionate
+        if let a = facciaAttivaId { s.insert(a) }
+        return s
+    }
     /// Multi-selezione: insieme dei piani selezionati (oltre a quello attivo).
     @Published var facceSelezionate: Set<Int> = []
     @Published var multiSelezione = false
@@ -1762,9 +1768,10 @@ final class Mesh3DModel: ObservableObject {
     /// Scala i marker dei punti in base all'estensione della mesh (le coordinate
     /// OC sono arbitrarie: una sfera fissa sarebbe invisibile o gigante).
     private func calcolaScala() {
-        let bb = contentNode.flattenedClone().boundingBox
-        let ext = max(bb.max.x - bb.min.x, max(bb.max.y - bb.min.y, bb.max.z - bb.min.z))
-        estensioneMesh = ext
+        let (lo, hi) = mesh.aabb   // bbox reale della mesh (flattenedClone dava 0 → maniglie/fit rotti)
+        let d = hi - lo
+        let ext = max(d.x, max(d.y, d.z))
+        estensioneMesh = ext > 1e-5 ? ext : 1
         raggioMarker = CGFloat(max(ext * 0.012, 0.001))
         // Mirino: sfera arancione + croce bianca, sempre sopra la mesh.
         let sfera = SCNSphere(radius: CGFloat(ext * 0.008))
@@ -3191,8 +3198,8 @@ final class Mesh3DModel: ObservableObject {
             // Maniglie (solo sul poligono editabile della faccia attiva):
             // sfere bianche = angoli (Fase C drag), cubetti arancioni = edge
             // (trascina lato / tocca per splittare).
-            if f.poligono != nil, f.id == facciaAttivaId {
-                let r = CGFloat(estensioneMesh) * 0.02   // più grandi e sempre sopra (no depth)
+            if f.poligono != nil, facceAttiveSet.contains(f.id) {
+                let r = CGFloat(estensioneMesh) * 0.02   // maniglie su TUTTI i piani selezionati
                 for (k, c) in corners.enumerated() {
                     let s = SCNSphere(radius: r); s.segmentCount = 14
                     let sm = SCNMaterial(); sm.diffuse.contents = UIColor.white
@@ -3201,6 +3208,7 @@ final class Mesh3DModel: ObservableObject {
                     s.materials = [sm]
                     let node = SCNNode(geometry: s)
                     node.position = c
+                    node.renderingOrder = 1000   // sempre sopra la mesh opaca
                     node.name = "maniglia:\(f.id):\(k)"
                     pianiNode.addChildNode(node)
                 }
@@ -3214,6 +3222,7 @@ final class Mesh3DModel: ObservableObject {
                     box.materials = [bm]
                     let node = SCNNode(geometry: box)
                     node.position = SCNVector3(mid.x, mid.y, mid.z)
+                    node.renderingOrder = 1000
                     node.name = "edge:\(f.id):\(k)"
                     pianiNode.addChildNode(node)
                 }
