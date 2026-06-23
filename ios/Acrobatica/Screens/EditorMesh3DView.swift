@@ -1560,20 +1560,54 @@ final class Mesh3DModel: ObservableObject {
     /// Impostato dal container: applica l'orientamento camera (dir, up).
     var richiediSnap: ((SIMD3<Float>, SIMD3<Float>) -> Void)?
 
-    /// Snap della vista lungo una direzione (assi del piano base se c'è).
+    /// Assi dell'EDIFICIO per la navigazione (fronte facciata + gravità), così il
+    /// cubo mostra i lati buoni invece di tagliare la facciata sugli assi mondo.
+    private(set) var assiNav: (r: SIMD3<Float>, u: SIMD3<Float>, n: SIMD3<Float>) =
+        (SIMD3(1, 0, 0), SIMD3(0, 1, 0), SIMD3(0, 0, 1))
+
+    /// Stima gli assi edificio: up = gravità; normale facciata = direzione di MINOR
+    /// spessore orizzontale (PCA 2D dei vertici); destra = larghezza facciata.
+    func calcolaAssiNavigazione() {
+        guard !mesh.vertices.isEmpty else { return }
+        let su = simd_normalize(gravitaSu)
+        var e1 = simd_cross(su, SIMD3<Float>(0, 0, 1))
+        if simd_length(e1) < 1e-4 { e1 = simd_cross(su, SIMD3<Float>(1, 0, 0)) }
+        e1 = simd_normalize(e1); let e2 = simd_normalize(simd_cross(su, e1))
+        var mean = SIMD3<Double>(repeating: 0)
+        for v in mesh.vertices { mean += SIMD3<Double>(Double(v.x), Double(v.y), Double(v.z)) }
+        mean /= Double(mesh.vertices.count)
+        let c = SIMD3<Float>(Float(mean.x), Float(mean.y), Float(mean.z))
+        var sxx = 0.0, sxy = 0.0, syy = 0.0
+        for v in mesh.vertices {
+            let d = v - c
+            let x = Double(simd_dot(d, e1)), y = Double(simd_dot(d, e2))
+            sxx += x * x; sxy += x * y; syy += y * y
+        }
+        let tr = sxx + syy, det = sxx * syy - sxy * sxy
+        let disc = max(0, tr * tr / 4 - det).squareRoot()
+        let l1 = tr / 2 + disc                              // autovalore maggiore
+        var mx = sxy, my = l1 - sxx                          // autovettore maggiore (larghezza)
+        if abs(mx) + abs(my) < 1e-9 { mx = 1; my = 0 }
+        let ml = (mx * mx + my * my).squareRoot()
+        let major = simd_normalize(e1 * Float(mx / ml) + e2 * Float(my / ml))
+        let nFronte = simd_normalize(simd_cross(su, major))  // minor spessore = fronte
+        assiNav = (r: major, u: su, n: nFronte)
+    }
+
+    /// Snap della vista lungo una direzione, inquadrando la mesh.
     func snapVista(_ dir: SIMD3<Float>) {
         let d = simd_normalize(dir)
-        let up: SIMD3<Float> = abs(simd_dot(d, assiRif.u)) > 0.9 ? assiRif.r : assiRif.u
+        let up: SIMD3<Float> = abs(simd_dot(d, assiNav.u)) > 0.9 ? assiNav.r : assiNav.u
         richiediSnap?(d, up)
     }
-    func snapFronte()   { snapVista(assiRif.n) }
-    func snapAlto()     { snapVista(assiRif.u) }
-    func snapDestra()   { snapVista(assiRif.r) }
-    func snapIso()      { snapVista(assiRif.n + assiRif.r * 0.7 + assiRif.u * 0.6) }
+    func snapFronte()   { snapVista(assiNav.n) }
+    func snapAlto()     { snapVista(assiNav.u) }
+    func snapDestra()   { snapVista(assiNav.r) }
+    func snapIso()      { snapVista(assiNav.n + assiNav.r * 0.7 + assiNav.u * 0.6) }
 
-    /// Snap dal ViewCube: asse 0=right,1=up,2=normale, con segno.
+    /// Snap dal ViewCube: asse 0=right,1=up,2=normale(fronte), con segno.
     func snapAsse(_ idx: Int, _ segno: Float) {
-        let a = assiRif
+        let a = assiNav
         let d = idx == 0 ? a.r : (idx == 1 ? a.u : a.n)
         snapVista(d * segno)
     }
@@ -1699,6 +1733,7 @@ final class Mesh3DModel: ObservableObject {
         puoUndo = false; puoRedo = false
         renderMesh()
         calcolaScala()
+        calcolaAssiNavigazione()   // assi edificio per il ViewCube
         allineaBox()        // default: box allineato alla geometria (mesh storte)
         inquadra()
     }
@@ -2619,15 +2654,18 @@ final class Mesh3DModel: ObservableObject {
             let o = simd_dot(c - p0, asseOr)
             if o >= oMin, o <= oMax { vicini.insert(t) }
         }
-        guard vicini.count >= 10, let (p2, n2v) = mesh.fitPianoRANSAC(vicini) else { return }
+        guard vicini.count >= 8, let (p2, n2v) = mesh.fitPianoRANSAC(vicini) else { return }
         var n2 = simd_normalize(n2v)
         if simd_dot(n2, n) < 0 { n2 = -n2 }
-        for k in poly.indices { poly[k] = poly[k] - simd_dot(poly[k] - p2, n2) * n2 }   // sul piano fittato
-        facce[i].poligono = poly
+        // Aggancia il piano al MURO reale e ricostruisci il poligono come rettangolo
+        // del muro (orientamento + estensione dai triangoli fittati): risultato visibile
+        // anche su muri verticali (il piano si sposta/ridimensiona sulla superficie vera).
         facce[i].pianoNormale = n2
-        facce[i].pianoPunto = poly.reduce(SIMD3<Float>(0, 0, 0), +) / Float(poly.count)
+        facce[i].pianoPunto = p2
         facce[i].triangoli = vicini
         facce[i].erroreRms = mesh.rmsDalPiano(vicini, punto: p2, normale: n2)
+        generaPoligono(perFaccia: id)
+        mostraPiani = true
         ridisegnaPiani()
     }
 
@@ -2779,6 +2817,7 @@ final class Mesh3DModel: ObservableObject {
             facceSelezionate = [id]
         }
         facciaAttivaId = id
+        mostraPiani = true   // le maniglie vivono sul layer dei piani: assicurane la visibilità
         ridisegnaFacce(); ridisegnaPiani()
     }
 
