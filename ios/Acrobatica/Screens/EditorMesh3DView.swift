@@ -849,18 +849,26 @@ private struct SceneKitContainer: UIViewRepresentable {
         let eye = center + dir * dist
         let m = lookAt(eye: eye, center: center, up: up)
 
-        // Nuovo nodo camera: il defaultCameraController lo adotta col target,
-        // così lo snap regge (impostare il transform del pov esistente viene
-        // sovrascritto dal controller).
-        let cam = SCNCamera()
-        cam.fieldOfView = fovDeg
-        cam.zNear = 0.01
-        cam.zFar = Double(dist + diag) * 4
-        v.scene?.rootNode.childNode(withName: "snapCam", recursively: false)?.removeFromParentNode()
-        let nodo = SCNNode(); nodo.name = "snapCam"; nodo.camera = cam; nodo.simdTransform = m
-        v.scene?.rootNode.addChildNode(nodo)
-        v.defaultCameraController.target = SCNVector3(center.x, center.y, center.z)
+        // Riusa un unico nodo camera "snapCam" e FALLO ADOTTARE al controller
+        // (sia v.pointOfView sia defaultCameraController.pointOfView): senza questo
+        // il controller continua a gestire la vecchia camera e al primo update la
+        // ripristina → la mesh sparisce.
+        let nodo: SCNNode
+        if let esistente = v.scene?.rootNode.childNode(withName: "snapCam", recursively: false) {
+            nodo = esistente
+        } else {
+            nodo = SCNNode(); nodo.name = "snapCam"; nodo.camera = SCNCamera()
+            v.scene?.rootNode.addChildNode(nodo)
+        }
+        nodo.camera?.fieldOfView = fovDeg
+        nodo.camera?.zNear = max(0.001, Double(diag) * 0.001)
+        nodo.camera?.zFar = Double(dist + diag) * 4
+        SCNTransaction.begin(); SCNTransaction.animationDuration = 0.25
+        nodo.simdTransform = m
+        SCNTransaction.commit()
         v.pointOfView = nodo
+        v.defaultCameraController.pointOfView = nodo
+        v.defaultCameraController.target = SCNVector3(center.x, center.y, center.z)
     }
 
     /// Matrice di vista (camera SceneKit guarda lungo -Z).
