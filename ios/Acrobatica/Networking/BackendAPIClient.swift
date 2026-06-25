@@ -16,6 +16,48 @@ actor BackendAPIClient {
 
     static let shared = BackendAPIClient()
 
+    /// Sessione URL dedicata: timeout generosi + attesa connettività + pochi
+    /// socket per host (evita di saturare con decine di upload paralleli).
+    private let urlSession: URLSession = {
+        let c = URLSessionConfiguration.default
+        c.timeoutIntervalForRequest = 90
+        c.timeoutIntervalForResource = 600
+        c.waitsForConnectivity = true
+        c.httpMaximumConnectionsPerHost = 4
+        return URLSession(configuration: c)
+    }()
+
+    /// Cache della sessione corrente: `ensureSession()` la crea UNA sola volta
+    /// anche se chiamata in parallelo (l'actor serializza), evitando sessioni doppie.
+    private var cachedSessionId: String?
+
+    func ensureSession() async throws -> String {
+        if let s = cachedSessionId { return s }
+        let s = try await createSession()
+        cachedSessionId = s
+        return s
+    }
+
+    /// Reset della sessione cache (es. inizio nuovo rilievo).
+    func resetCachedSession() { cachedSessionId = nil }
+
+    /// Upload con retry + backoff: ritenta sui timeout/errori di rete così un
+    /// singolo intoppo non perde la foto (i frame sono già su disco).
+    func uploadPhotoRetrying(sessionId: String, photo: CapturedFacadePhoto,
+                             maxAttempts: Int = 4) async throws -> UploadResponse {
+        var lastError: Error?
+        for attempt in 1...maxAttempts {
+            do { return try await uploadPhoto(sessionId: sessionId, photo: photo) }
+            catch {
+                lastError = error
+                if attempt < maxAttempts {
+                    try? await Task.sleep(nanoseconds: UInt64(Double(attempt) * 0.6 * 1_000_000_000))
+                }
+            }
+        }
+        throw lastError ?? APIError.httpError(0, "upload fallito")
+    }
+
     // MARK: - Session
 
     struct CreateSessionResponse: Codable {
@@ -26,7 +68,7 @@ actor BackendAPIClient {
     func createSession() async throws -> String {
         var req = URLRequest(url: baseURL.appendingPathComponent("/facade-sessions"))
         req.httpMethod = "POST"
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let (data, resp) = try await urlSession.data(for: req)
         try assertHTTPOK(resp, data: data)
         let decoded = try JSONDecoder().decode(CreateSessionResponse.self, from: data)
         return decoded.session_id
@@ -47,7 +89,7 @@ actor BackendAPIClient {
         req.httpMethod = "POST"
         req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         let body = try makeMultipartBody(boundary: boundary, photo: photo)
-        let (data, resp) = try await URLSession.shared.upload(for: req, from: body)
+        let (data, resp) = try await urlSession.upload(for: req, from: body)
         try assertHTTPOK(resp, data: data)
         return try JSONDecoder().decode(UploadResponse.self, from: data)
     }
@@ -255,6 +297,91 @@ actor BackendAPIClient {
         return try JSONDecoder().decode(SetScaleResult.self, from: data)
     }
 
+    // MARK: - Marcatura zone (upload del documento dall'editor)
+
+    struct ZoneMarkupResult: Codable {
+        let session_id: String
+        let zone_count: Int
+        let area_m2_per_tipo: [String: Double]
+        let lunghezza_m_per_tipo: [String: Double]
+        let markup_url: String?
+        let warnings: [String]
+    }
+
+    /// Invia il JSON di marcatura (già nello schema concordato, prodotto da
+    /// `MarcaturaFacciata.jsonData()`). PUT idempotente: sostituisce la
+    /// marcatura precedente della sessione.
+    func uploadZoneMarkup(sessionId: String, jsonData: Data) async throws -> ZoneMarkupResult {
+        let url = baseURL.appendingPathComponent("/facade-sessions/\(sessionId)/zone-markup")
+        var req = URLRequest(url: url)
+        req.httpMethod = "PUT"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = jsonData
+        let (data, resp) = try await urlSession.data(for: req)
+        try assertHTTPOK(resp, data: data)
+        return try JSONDecoder().decode(ZoneMarkupResult.self, from: data)
+    }
+
+    /// Scarica le zone fuori-piano proposte dal backend (pre-marcatura
+    /// automatica: balconi/aggetti oltre `sogliaM` dal piano facciata).
+    /// Ritorna i Data del documento JSON nello schema di marcatura (lo
+    /// decodifica l'editor con `MarcaturaFacciata.da(jsonData:)`).
+    /// Prerequisito server: GET /planes già eseguito sulla sessione (409 se no).
+    func fetchZoneProposals(sessionId: String, ppm: Double,
+                            sogliaM: Double = 0.15) async throws -> Data {
+        var comp = URLComponents(
+            url: baseURL.appendingPathComponent("/facade-sessions/\(sessionId)/zone-proposals"),
+            resolvingAgainstBaseURL: false)!
+        comp.queryItems = [
+            URLQueryItem(name: "ppm", value: String(ppm)),
+            URLQueryItem(name: "soglia_m", value: String(sogliaM)),
+        ]
+        var req = URLRequest(url: comp.url!)
+        req.httpMethod = "GET"
+        let (data, resp) = try await urlSession.data(for: req)
+        try assertHTTPOK(resp, data: data)
+        return data
+    }
+
+    // MARK: - Mesh 3D (Object Capture: download per l'editor 3D)
+
+    struct MeshFileInfo: Codable, Identifiable {
+        let name: String
+        let url: String
+        let size_bytes: Int
+        var id: String { name }
+    }
+    struct MeshInfoResult: Codable {
+        let session_id: String
+        let main_obj: MeshFileInfo?
+        let files: [MeshFileInfo]
+    }
+
+    /// Info sulla mesh disponibile per la sessione (URL firmati). 404 se il Mac
+    /// non l'ha ancora caricata via PUT /mesh.
+    func fetchMeshInfo(sessionId: String) async throws -> MeshInfoResult {
+        let url = baseURL.appendingPathComponent("/facade-sessions/\(sessionId)/mesh")
+        var req = URLRequest(url: url); req.httpMethod = "GET"
+        let (data, resp) = try await urlSession.data(for: req)
+        try assertHTTPOK(resp, data: data)
+        return try JSONDecoder().decode(MeshInfoResult.self, from: data)
+    }
+
+    /// Scarica un file mesh (OBJ/USDZ/texture) su un file temporaneo locale e ne
+    /// ritorna l'URL — SceneKit carica da file, non da Data.
+    func downloadMeshFile(_ info: MeshFileInfo) async throws -> URL {
+        guard let remote = URL(string: info.url) else {
+            throw APIError.httpError(0, "URL mesh non valido")
+        }
+        let (tmp, resp) = try await urlSession.download(from: remote)
+        try assertHTTPOK(resp, data: Data())
+        let dest = FileManager.default.temporaryDirectory
+            .appendingPathComponent(info.name)
+        try? FileManager.default.removeItem(at: dest)
+        try FileManager.default.moveItem(at: tmp, to: dest)
+        return dest
+    }
+
     // MARK: - Keystone (Step 2: foto raddrizzate singolarmente)
 
     struct KeystonePhotoResult: Codable, Identifiable {
@@ -308,5 +435,254 @@ actor BackendAPIClient {
 private extension Data {
     mutating func appendString(_ s: String) {
         if let d = s.data(using: .utf8) { append(d) }
+    }
+}
+
+// MARK: - Background uploader (spostato qui: i file nuovi non sono nel pbxproj)
+
+/// Stato di upload di una singola foto (condiviso con la UI).
+enum UploadStatus: String, Codable { case pending, uploading, done, failed }
+
+/// Uploader in BACKGROUND, robusto a standby / chiusura / crash.
+///
+/// Usa una `URLSession` con configurazione `.background`: i task continuano
+/// quando l'app è in standby o terminata, e vengono **ripresi al riavvio**.
+/// I body multipart sono scritti su file (requisito delle background session).
+/// Una coda persistente su disco (`pending_uploads.json`) consente di
+/// **ri-accodare** ciò che non era ancora partito dopo un crash.
+@MainActor
+final class BackgroundUploader: NSObject, ObservableObject {
+
+    static let shared = BackgroundUploader()
+
+    /// Stato per-foto (chiave = order_index) per la UI.
+    @Published private(set) var statusByOrder: [Int: UploadStatus] = [:]
+    @Published private(set) var total = 0
+    @Published private(set) var done = 0
+    @Published private(set) var failed = 0
+
+    /// Handler di sistema da chiamare quando finiscono gli eventi background
+    /// (settato dall'AppDelegate in `handleEventsForBackgroundURLSession`).
+    var backgroundCompletionHandler: (() -> Void)?
+
+    private let baseURL = URL(string: "https://acrobatica-production.up.railway.app")!
+    private let maxRetry = 5
+    private var responseData: [Int: Data] = [:]   // per taskIdentifier
+
+    private lazy var session: URLSession = {
+        let c = URLSessionConfiguration.background(withIdentifier: "com.acrobatica.upload.bg")
+        c.isDiscretionary = false
+        c.sessionSendsLaunchEvents = true
+        c.waitsForConnectivity = true
+        c.httpMaximumConnectionsPerHost = 3
+        c.timeoutIntervalForResource = 7 * 24 * 3600   // 7 giorni per completare
+        return URLSession(configuration: c, delegate: self, delegateQueue: nil)
+    }()
+
+    private struct Pending: Codable {
+        let id: String
+        let sessionId: String
+        let photo: CapturedFacadePhoto
+        var retry: Int
+    }
+
+    private var storeURL: URL {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("pending_uploads.json")
+    }
+    private var bodyDir: URL {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("upload_bodies")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    // MARK: - Store
+
+    private func loadStore() -> [Pending] {
+        guard let d = try? Data(contentsOf: storeURL) else { return [] }
+        return (try? JSONDecoder().decode([Pending].self, from: d)) ?? []
+    }
+    private func saveStore(_ items: [Pending]) {
+        if let d = try? JSONEncoder().encode(items) { try? d.write(to: storeURL) }
+    }
+    private func removeFromStore(id: String) {
+        var items = loadStore(); items.removeAll { $0.id == id }; saveStore(items)
+    }
+
+    // MARK: - API
+
+    /// Accoda le foto per l'upload in background. Ritorna subito: il caricamento
+    /// prosegue anche se l'utente lascia la schermata o mette l'app in standby.
+    func enqueue(sessionId: String, photos: [CapturedFacadePhoto]) {
+        var store = loadStore()
+        let alreadyOrders = Set(store.map { $0.photo.orderIndex })
+        for p in photos where !alreadyOrders.contains(p.orderIndex) {
+            let pending = Pending(id: UUID().uuidString, sessionId: sessionId, photo: p, retry: 0)
+            store.append(pending)
+            statusByOrder[p.orderIndex] = .uploading
+            startTask(for: pending)
+        }
+        saveStore(store)
+        recomputeCounters()
+    }
+
+    /// Da chiamare all'avvio dell'app: ricollega la background session (i task
+    /// ancora vivi consegnano il completamento) e ri-accoda ciò che non era partito.
+    func resumeOnLaunch() {
+        let store = loadStore()
+        guard !store.isEmpty else { return }
+        for p in store { statusByOrder[p.photo.orderIndex] = .uploading }
+        recomputeCounters()
+        session.getAllTasks { tasks in
+            let liveIds = Set(tasks.compactMap { $0.taskDescription })
+            Task { @MainActor in
+                for p in store where !liveIds.contains(p.id) {
+                    self.startTask(for: p)   // non aveva un task vivo → ricrea
+                }
+            }
+        }
+    }
+
+    /// Riprova una singola foto fallita.
+    func retry(orderIndex: Int) {
+        guard let p = loadStore().first(where: { $0.photo.orderIndex == orderIndex }) else { return }
+        statusByOrder[orderIndex] = .uploading
+        recomputeCounters()
+        startTask(for: p)
+    }
+
+    /// Resetta lo stato visibile (a batch concluso) — non tocca i task in volo.
+    func clearFinishedUI() {
+        statusByOrder.removeAll(); total = 0; done = 0; failed = 0
+    }
+
+    var allFinished: Bool { total > 0 && done + failed >= total }
+
+    // MARK: - Task creation
+
+    private func startTask(for p: Pending) {
+        guard let bodyURL = writeMultipartBody(for: p) else {
+            markFailed(p, permanent: true); return
+        }
+        let boundary = "Boundary-\(p.id)"
+        var req = URLRequest(url: baseURL.appendingPathComponent("/facade-sessions/\(p.sessionId)/photos"))
+        req.httpMethod = "POST"
+        req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        let task = session.uploadTask(with: req, fromFile: bodyURL)
+        task.taskDescription = p.id
+        statusByOrder[p.photo.orderIndex] = .uploading
+        task.resume()
+    }
+
+    private func writeMultipartBody(for p: Pending) -> URL? {
+        let crlf = "\r\n"; let boundary = "Boundary-\(p.id)"
+        guard let imageData = try? Data(contentsOf: p.photo.localImageURL) else { return nil }
+        var meta: [String: Any] = [
+            "order_index": p.photo.orderIndex,
+            "timestamp": p.photo.timestampMs,
+            "camera_transform": p.photo.cameraTransform,
+            "camera_intrinsics": p.photo.cameraIntrinsics,
+            "euler_angles": p.photo.eulerAnglesDeg,
+            "tracking_state": p.photo.trackingState,
+            "image_width": p.photo.imageWidth,
+            "image_height": p.photo.imageHeight,
+        ]
+        if let n = p.photo.wallNormalWorld { meta["wall_normal_world"] = n }
+        guard let metaData = try? JSONSerialization.data(withJSONObject: meta) else { return nil }
+
+        var body = Data()
+        func add(_ s: String) { body.append(s.data(using: .utf8)!) }
+        add("--\(boundary)\(crlf)")
+        add("Content-Disposition: form-data; name=\"metadata\"\(crlf)")
+        add("Content-Type: application/json\(crlf)\(crlf)")
+        body.append(metaData); add(crlf)
+        add("--\(boundary)\(crlf)")
+        add("Content-Disposition: form-data; name=\"image\"; filename=\"\(p.photo.localImageURL.lastPathComponent)\"\(crlf)")
+        add("Content-Type: image/jpeg\(crlf)\(crlf)")
+        body.append(imageData); add(crlf)
+        add("--\(boundary)--\(crlf)")
+
+        let url = bodyDir.appendingPathComponent("\(p.id).multipart")
+        do { try body.write(to: url); return url } catch { return nil }
+    }
+
+    // MARK: - Completion handling
+
+    private func finishSuccess(_ id: String) {
+        let store = loadStore()
+        if let p = store.first(where: { $0.id == id }) {
+            statusByOrder[p.photo.orderIndex] = .done
+        }
+        try? FileManager.default.removeItem(at: bodyDir.appendingPathComponent("\(id).multipart"))
+        removeFromStore(id: id)
+        recomputeCounters()
+    }
+
+    private func handleFailure(id: String) {
+        var store = loadStore()
+        guard let idx = store.firstIndex(where: { $0.id == id }) else { return }
+        var p = store[idx]
+        try? FileManager.default.removeItem(at: bodyDir.appendingPathComponent("\(id).multipart"))
+        if p.retry < maxRetry {
+            p.retry += 1
+            store[idx] = p
+            saveStore(store)
+            // backoff semplice prima di ricreare il task
+            let delay = Double(p.retry) * 2.0
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                Task { @MainActor in self?.startTask(for: p) }
+            }
+        } else {
+            statusByOrder[p.photo.orderIndex] = .failed
+            store.remove(at: idx); saveStore(store)
+            recomputeCounters()
+        }
+    }
+
+    private func markFailed(_ p: Pending, permanent: Bool) {
+        statusByOrder[p.photo.orderIndex] = .failed
+        removeFromStore(id: p.id)
+        recomputeCounters()
+    }
+
+    private func recomputeCounters() {
+        total = statusByOrder.count
+        done = statusByOrder.values.filter { $0 == .done }.count
+        failed = statusByOrder.values.filter { $0 == .failed }.count
+    }
+}
+
+// MARK: - URLSession delegate
+
+extension BackgroundUploader: URLSessionDataDelegate {
+
+    nonisolated func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        let tid = dataTask.taskIdentifier
+        Task { @MainActor in self.responseData[tid, default: Data()].append(data) }
+    }
+
+    nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        let id = task.taskDescription
+        let code = (task.response as? HTTPURLResponse)?.statusCode ?? -1
+        let tid = task.taskIdentifier
+        Task { @MainActor in
+            self.responseData[tid] = nil
+            guard let id = id else { return }
+            if error == nil, (200..<300).contains(code) {
+                self.finishSuccess(id)
+            } else {
+                self.handleFailure(id: id)
+            }
+        }
+    }
+
+    nonisolated func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        Task { @MainActor in
+            let h = self.backgroundCompletionHandler
+            self.backgroundCompletionHandler = nil
+            h?()
+        }
     }
 }

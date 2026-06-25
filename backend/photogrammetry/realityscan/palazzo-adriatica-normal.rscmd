@@ -1,0 +1,25 @@
+# RealityScan / RealityCapture command-file template.
+#
+# Copy this file to the Windows GPU VM and replace the paths below:
+#   C:\photogrammetry\1553ab3c\photos
+#   C:\photogrammetry\1553ab3c\out
+#
+# Run example from PowerShell:
+#   & "C:\Program Files\Epic Games\RealityScan\RealityScan.exe" -delegateTo * -execRSCMD "C:\photogrammetry\1553ab3c\palazzo-adriatica-normal.rscmd"
+#
+# If -execRSCMD is not available in the installed build, run the same commands
+# directly after the executable path.
+
+-newScene
+-addFolder "C:\photogrammetry\1553ab3c\photos"
+-align
+-selectMaximalComponent
+-setReconstructionRegionAuto
+-calculateNormalModel
+-simplify 3000000
+-unwrap
+-calculateTexture
+-exportModel "Model 1" "C:\photogrammetry\1553ab3c\out\palazzo-adriatica.obj" "C:\photogrammetry\1553ab3c\export-obj.xml"
+-save "C:\photogrammetry\1553ab3c\out\palazzo-adriatica.rsproj"
+-quit
+

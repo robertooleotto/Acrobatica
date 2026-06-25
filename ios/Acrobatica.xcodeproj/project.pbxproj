@@ -10,6 +10,7 @@
 		1BF4EA18F92D4771C5B00446 /* AcrobaticaModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3968BB0A647FA6697945A87 /* AcrobaticaModels.swift */; };
 		233535E38489D6F2D259C217 /* FacadeCaptureSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AAB2ADE8C35D061B5FD941E /* FacadeCaptureSession.swift */; };
 		3D39741B48AA0D8F6CAA1284 /* FrameStrip.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CDE35BF5B1B772E7F1572A3 /* FrameStrip.swift */; };
+		448E7A52D8121E1AAB230BA2 /* CaptureMatchAnalyzer.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA6E535BFFD0F517AC369FC5 /* CaptureMatchAnalyzer.swift */; };
 		4CF65B0E4150636D653D1EA2 /* AnteprimaPreventivoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E64A5DA5F2EC4D5C981EA98 /* AnteprimaPreventivoView.swift */; };
 		51E5B427678DA897233BA9BC /* CantieriListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8E07680504053B52C170437 /* CantieriListView.swift */; };
 		569CEF5FFD3ABE86B3B35D3C /* CapturedFacadePhoto.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1445107498B1254682E63404 /* CapturedFacadePhoto.swift */; };
@@ -19,18 +20,29 @@
 		822051E32D6830231B04FDE0 /* ListaPreventiviView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BB324F04816C2F0232B916F /* ListaPreventiviView.swift */; };
 		870811DCDE5C135871522F3E /* FirmaClienteView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC222326D094F56C881CB927 /* FirmaClienteView.swift */; };
 		8CCCCE939DF41BBA325A945D /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5539BCECE5689D083EFC227D /* Theme.swift */; };
+		913420FC6B940221A9650E59 /* SmartGhostOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B20DCB9C5930C96C5D83562 /* SmartGhostOverlay.swift */; };
 		93C526665DDE161B6F6198B4 /* MeasureScaleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 863870D7CB1F9B497A9F7501 /* MeasureScaleView.swift */; };
 		95C290024223B84A86688B8C /* AcrobaticaApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6C202BCFA7055D0E02D5ECD /* AcrobaticaApp.swift */; };
+		BB12C3D4E5F6071829304191 /* CrashReporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB12C3D4E5F6071829304190 /* CrashReporter.swift */; };
+		97D96D5A16B14AF888DF729E /* LevelGridOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E3164DE0B638CE170B20099 /* LevelGridOverlay.swift */; };
 		A201361AB22694F8A23394FC /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 578FA7BB14F86217CFEBCC1F /* Assets.xcassets */; };
+		BB12C3D4E5F6071829304171 /* facciata_demo.obj in Resources */ = {isa = PBXBuildFile; fileRef = AB12C3D4E5F6071829304170 /* facciata_demo.obj */; };
 		A72C629727199E4A5C16790E /* DettaglioCantiereView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3131FAD44663090F22DE9AB /* DettaglioCantiereView.swift */; };
 		AA2EA4B122224BDDFC786543 /* BackendAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49928F98B55B057264EDD010 /* BackendAPIClient.swift */; };
 		AEDAFCAF02A652D1AF7F05F4 /* CatturaARView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76BB94EDE2BAE0D54BA99139 /* CatturaARView.swift */; };
 		C29C3712937D4BBB18CE1B78 /* BrandButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F6CF9B766C137FCC0821F72 /* BrandButton.swift */; };
+		C6EF437FAD19011ADD2F3B44 /* CompassStripOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6157C7309F698F67C834A225 /* CompassStripOverlay.swift */; };
+		CACC14F6D401EC9717BEF85A /* PitchLadderOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA72429905ECAB4F881366B9 /* PitchLadderOverlay.swift */; };
 		D0B9B8F66F1C12D909B1CEA9 /* PDFPreventivoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FACDED47CEB242E07978EE6 /* PDFPreventivoView.swift */; };
 		E3E6267F3038DC1DD6429160 /* RisultatoPanoramaView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A8E376261B27EA74B81C490 /* RisultatoPanoramaView.swift */; };
 		EFD0D633027E9752E22196D9 /* ARPreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59DAFDD7F2EB30EEBEB66FD8 /* ARPreviewView.swift */; };
 		FB6B50967C6052A165C60BC1 /* ShutterButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = D80C56BDFB1904F88745BAA2 /* ShutterButton.swift */; };
 		FF556CD6897B68CD73CCE167 /* RectifyFacadeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57FEA8EBFAA241D57DF68DA8 /* RectifyFacadeView.swift */; };
+		BB12C3D4E5F6071829304151 /* ZonaFacciata.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB12C3D4E5F6071829304150 /* ZonaFacciata.swift */; };
+		BB12C3D4E5F6071829304181 /* EditableMesh.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB12C3D4E5F6071829304180 /* EditableMesh.swift */; };
+		BB12C3D4E5F6071829304153 /* MarcaturaFacciataView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB12C3D4E5F6071829304152 /* MarcaturaFacciataView.swift */; };
+		BB12C3D4E5F6071829304161 /* EditorMesh3DView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB12C3D4E5F6071829304160 /* EditorMesh3DView.swift */; };
+		BB12C3D4E5F6071829304155 /* EditorGestureView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB12C3D4E5F6071829304154 /* EditorGestureView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -40,9 +52,12 @@
 		4AAB2ADE8C35D061B5FD941E /* FacadeCaptureSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FacadeCaptureSession.swift; sourceTree = "<group>"; };
 		5539BCECE5689D083EFC227D /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		578FA7BB14F86217CFEBCC1F /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		AB12C3D4E5F6071829304170 /* facciata_demo.obj */ = {isa = PBXFileReference; lastKnownFileType = text; path = Resources/facciata_demo.obj; sourceTree = "<group>"; };
 		57FEA8EBFAA241D57DF68DA8 /* RectifyFacadeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RectifyFacadeView.swift; sourceTree = "<group>"; };
 		59DAFDD7F2EB30EEBEB66FD8 /* ARPreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ARPreviewView.swift; sourceTree = "<group>"; };
+		5B20DCB9C5930C96C5D83562 /* SmartGhostOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmartGhostOverlay.swift; sourceTree = "<group>"; };
 		5FACDED47CEB242E07978EE6 /* PDFPreventivoView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PDFPreventivoView.swift; sourceTree = "<group>"; };
+		6157C7309F698F67C834A225 /* CompassStripOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompassStripOverlay.swift; sourceTree = "<group>"; };
 		6A8E376261B27EA74B81C490 /* RisultatoPanoramaView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RisultatoPanoramaView.swift; sourceTree = "<group>"; };
 		6F6CF9B766C137FCC0821F72 /* BrandButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrandButton.swift; sourceTree = "<group>"; };
 		76BB94EDE2BAE0D54BA99139 /* CatturaARView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatturaARView.swift; sourceTree = "<group>"; };
@@ -52,14 +67,23 @@
 		92D7F6D5CC7B960A9E720E63 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		9BB324F04816C2F0232B916F /* ListaPreventiviView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ListaPreventiviView.swift; sourceTree = "<group>"; };
 		9DE0A01CE25933D499B74A0C /* ARFacadeCaptureManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ARFacadeCaptureManager.swift; sourceTree = "<group>"; };
+		9E3164DE0B638CE170B20099 /* LevelGridOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LevelGridOverlay.swift; sourceTree = "<group>"; };
 		BCE794A2EB80DAF3460C7557 /* GlassPill.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassPill.swift; sourceTree = "<group>"; };
 		CC222326D094F56C881CB927 /* FirmaClienteView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FirmaClienteView.swift; sourceTree = "<group>"; };
 		D80C56BDFB1904F88745BAA2 /* ShutterButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShutterButton.swift; sourceTree = "<group>"; };
 		D8E07680504053B52C170437 /* CantieriListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CantieriListView.swift; sourceTree = "<group>"; };
+		DA6E535BFFD0F517AC369FC5 /* CaptureMatchAnalyzer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureMatchAnalyzer.swift; sourceTree = "<group>"; };
 		E3968BB0A647FA6697945A87 /* AcrobaticaModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AcrobaticaModels.swift; sourceTree = "<group>"; };
 		E6C202BCFA7055D0E02D5ECD /* AcrobaticaApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AcrobaticaApp.swift; sourceTree = "<group>"; };
+		AB12C3D4E5F6071829304190 /* CrashReporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrashReporter.swift; sourceTree = "<group>"; };
 		F3131FAD44663090F22DE9AB /* DettaglioCantiereView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DettaglioCantiereView.swift; sourceTree = "<group>"; };
 		F4EB3402A0E87FE94AC35FEC /* TapWallPlaneView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TapWallPlaneView.swift; sourceTree = "<group>"; };
+		FA72429905ECAB4F881366B9 /* PitchLadderOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PitchLadderOverlay.swift; sourceTree = "<group>"; };
+		AB12C3D4E5F6071829304150 /* ZonaFacciata.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZonaFacciata.swift; sourceTree = "<group>"; };
+		AB12C3D4E5F6071829304180 /* EditableMesh.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditableMesh.swift; sourceTree = "<group>"; };
+		AB12C3D4E5F6071829304152 /* MarcaturaFacciataView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarcaturaFacciataView.swift; sourceTree = "<group>"; };
+		AB12C3D4E5F6071829304160 /* EditorMesh3DView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorMesh3DView.swift; sourceTree = "<group>"; };
+		AB12C3D4E5F6071829304154 /* EditorGestureView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorGestureView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -67,7 +91,9 @@
 			isa = PBXGroup;
 			children = (
 				E6C202BCFA7055D0E02D5ECD /* AcrobaticaApp.swift */,
+				AB12C3D4E5F6071829304190 /* CrashReporter.swift */,
 				578FA7BB14F86217CFEBCC1F /* Assets.xcassets */,
+				AB12C3D4E5F6071829304170 /* facciata_demo.obj */,
 				92D7F6D5CC7B960A9E720E63 /* Info.plist */,
 				EFF8D7561ED35BAFBBD7AEA2 /* Capture */,
 				F2B1724DCE58E84C49EFC3E3 /* DesignSystem */,
@@ -99,9 +125,15 @@
 			isa = PBXGroup;
 			children = (
 				6F6CF9B766C137FCC0821F72 /* BrandButton.swift */,
+				DA6E535BFFD0F517AC369FC5 /* CaptureMatchAnalyzer.swift */,
+				6157C7309F698F67C834A225 /* CompassStripOverlay.swift */,
+				AB12C3D4E5F6071829304154 /* EditorGestureView.swift */,
 				2CDE35BF5B1B772E7F1572A3 /* FrameStrip.swift */,
 				BCE794A2EB80DAF3460C7557 /* GlassPill.swift */,
+				9E3164DE0B638CE170B20099 /* LevelGridOverlay.swift */,
+				FA72429905ECAB4F881366B9 /* PitchLadderOverlay.swift */,
 				D80C56BDFB1904F88745BAA2 /* ShutterButton.swift */,
+				5B20DCB9C5930C96C5D83562 /* SmartGhostOverlay.swift */,
 			);
 			path = Components;
 			sourceTree = "<group>";
@@ -139,6 +171,8 @@
 				F3131FAD44663090F22DE9AB /* DettaglioCantiereView.swift */,
 				CC222326D094F56C881CB927 /* FirmaClienteView.swift */,
 				9BB324F04816C2F0232B916F /* ListaPreventiviView.swift */,
+				AB12C3D4E5F6071829304152 /* MarcaturaFacciataView.swift */,
+				AB12C3D4E5F6071829304160 /* EditorMesh3DView.swift */,
 				863870D7CB1F9B497A9F7501 /* MeasureScaleView.swift */,
 				5FACDED47CEB242E07978EE6 /* PDFPreventivoView.swift */,
 				57FEA8EBFAA241D57DF68DA8 /* RectifyFacadeView.swift */,
@@ -163,6 +197,8 @@
 				E3968BB0A647FA6697945A87 /* AcrobaticaModels.swift */,
 				1445107498B1254682E63404 /* CapturedFacadePhoto.swift */,
 				4AAB2ADE8C35D061B5FD941E /* FacadeCaptureSession.swift */,
+				AB12C3D4E5F6071829304150 /* ZonaFacciata.swift */,
+				AB12C3D4E5F6071829304180 /* EditableMesh.swift */,
 			);
 			path = Models;
 			sourceTree = "<group>";
@@ -228,6 +264,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A201361AB22694F8A23394FC /* Assets.xcassets in Resources */,
+				BB12C3D4E5F6071829304171 /* facciata_demo.obj in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -241,24 +278,35 @@
 				61A1C8E5BAC7E4F62ECD9F0F /* ARFacadeCaptureManager.swift in Sources */,
 				EFD0D633027E9752E22196D9 /* ARPreviewView.swift in Sources */,
 				95C290024223B84A86688B8C /* AcrobaticaApp.swift in Sources */,
+				BB12C3D4E5F6071829304191 /* CrashReporter.swift in Sources */,
 				1BF4EA18F92D4771C5B00446 /* AcrobaticaModels.swift in Sources */,
 				4CF65B0E4150636D653D1EA2 /* AnteprimaPreventivoView.swift in Sources */,
 				AA2EA4B122224BDDFC786543 /* BackendAPIClient.swift in Sources */,
 				C29C3712937D4BBB18CE1B78 /* BrandButton.swift in Sources */,
 				51E5B427678DA897233BA9BC /* CantieriListView.swift in Sources */,
+				448E7A52D8121E1AAB230BA2 /* CaptureMatchAnalyzer.swift in Sources */,
 				569CEF5FFD3ABE86B3B35D3C /* CapturedFacadePhoto.swift in Sources */,
 				AEDAFCAF02A652D1AF7F05F4 /* CatturaARView.swift in Sources */,
+				C6EF437FAD19011ADD2F3B44 /* CompassStripOverlay.swift in Sources */,
 				A72C629727199E4A5C16790E /* DettaglioCantiereView.swift in Sources */,
 				233535E38489D6F2D259C217 /* FacadeCaptureSession.swift in Sources */,
+				BB12C3D4E5F6071829304155 /* EditorGestureView.swift in Sources */,
+				BB12C3D4E5F6071829304153 /* MarcaturaFacciataView.swift in Sources */,
+				BB12C3D4E5F6071829304161 /* EditorMesh3DView.swift in Sources */,
+				BB12C3D4E5F6071829304151 /* ZonaFacciata.swift in Sources */,
+				BB12C3D4E5F6071829304181 /* EditableMesh.swift in Sources */,
 				870811DCDE5C135871522F3E /* FirmaClienteView.swift in Sources */,
 				3D39741B48AA0D8F6CAA1284 /* FrameStrip.swift in Sources */,
 				7935F22E7734E3FA5FEF36B2 /* GlassPill.swift in Sources */,
+				97D96D5A16B14AF888DF729E /* LevelGridOverlay.swift in Sources */,
 				822051E32D6830231B04FDE0 /* ListaPreventiviView.swift in Sources */,
 				93C526665DDE161B6F6198B4 /* MeasureScaleView.swift in Sources */,
 				D0B9B8F66F1C12D909B1CEA9 /* PDFPreventivoView.swift in Sources */,
+				CACC14F6D401EC9717BEF85A /* PitchLadderOverlay.swift in Sources */,
 				FF556CD6897B68CD73CCE167 /* RectifyFacadeView.swift in Sources */,
 				E3E6267F3038DC1DD6429160 /* RisultatoPanoramaView.swift in Sources */,
 				FB6B50967C6052A165C60BC1 /* ShutterButton.swift in Sources */,
+				913420FC6B940221A9650E59 /* SmartGhostOverlay.swift in Sources */,
 				7173DDC306E4219F39ECB625 /* TapWallPlaneView.swift in Sources */,
 				8CCCCE939DF41BBA325A945D /* Theme.swift in Sources */,
 			);

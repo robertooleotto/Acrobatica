@@ -714,6 +714,283 @@ struct EditableMesh: @unchecked Sendable {
 
     // MARK: Segmentazione automatica in piani (§3)
 
+    /// Segmentazione Manhattan/Atlanta: stima pochi assi dominanti dell'edificio
+    /// dalle normali dei triangoli, poi raggruppa superfici coerenti con quegli assi
+    /// per offset. È utile su edifici regolari perché ricompone facciate/spallette
+    /// anche se il rumore OC rende le normali locali instabili.
+    func segmentaPianiManhattanAtlanta(maxPiani: Int = 80,
+                                       maxAssi: Int = 6,
+                                       sogliaAsseGradi: Float = 20,
+                                       sogliaDistFrazione: Float = 0.006,
+                                       minAreaFrazione: Float = 0.00010,
+                                       minTriangoliFrazione: Float = 0.00010) -> [(triangoli: Set<Int>, punto: SIMD3<Float>, normale: SIMD3<Float>)] {
+        guard triangles.count > 20 else { return [] }
+
+        struct AxisVote {
+            var asse: SIMD3<Float>
+            var peso: Float
+        }
+        struct PlaneBucket {
+            var triangoli: Set<Int>
+            var area: Float
+            var offsetAcc: Float
+        }
+
+        let cent = triangles.indices.map { centroid(triangles[$0]) }
+        let norm = triangles.indices.map { normale($0) }
+        let triArea = triangles.indices.map { i -> Float in
+            let t = triangles[i]
+            return simd_length(simd_cross(vertices[Int(t.y)] - vertices[Int(t.x)],
+                                          vertices[Int(t.z)] - vertices[Int(t.x)])) * 0.5
+        }
+        let areaTotale = triArea.reduce(0, +)
+        let minArea = max(areaTotale * minAreaFrazione, 1e-6)
+        let minTri = max(Int(Float(triangles.count) * minTriangoliFrazione), 8)
+        let (alo, ahi) = aabb
+        let ext = max(ahi.x - alo.x, max(ahi.y - alo.y, ahi.z - alo.z))
+        let tolOffset = max(ext * sogliaDistFrazione, 1e-4)
+        let cosAxis = cos(sogliaAsseGradi * .pi / 180)
+
+        func canonica(_ n0: SIMD3<Float>) -> SIMD3<Float> {
+            var n = simd_normalize(n0)
+            let ax = abs(n.x), ay = abs(n.y), az = abs(n.z)
+            if ax >= ay && ax >= az {
+                if n.x < 0 { n = -n }
+            } else if ay >= ax && ay >= az {
+                if n.y < 0 { n = -n }
+            } else if n.z < 0 {
+                n = -n
+            }
+            return n
+        }
+
+        var assi: [AxisVote] = []
+        for ti in triangles.indices {
+            let a = triArea[ti]
+            guard a > 1e-9 else { continue }
+            let n = canonica(norm[ti])
+            if let best = assi.indices.max(by: { simd_dot(n, assi[$0].asse) < simd_dot(n, assi[$1].asse) }),
+               simd_dot(n, assi[best].asse) > cosAxis {
+                assi[best].asse = simd_normalize(assi[best].asse * assi[best].peso + n * a)
+                assi[best].peso += a
+            } else {
+                assi.append(AxisVote(asse: n, peso: a))
+            }
+        }
+        assi = assi.sorted { $0.peso > $1.peso }.prefix(maxAssi).map { $0 }
+        guard !assi.isEmpty else { return [] }
+
+        var buckets: [String: PlaneBucket] = [:]
+        for ti in triangles.indices {
+            let n = norm[ti]
+            guard let ai = assi.indices.max(by: { abs(simd_dot(n, assi[$0].asse)) < abs(simd_dot(n, assi[$1].asse)) }) else { continue }
+            var axis = assi[ai].asse
+            if simd_dot(n, axis) < 0 { axis = -axis }
+            guard simd_dot(n, axis) > cosAxis else { continue }
+            let d = simd_dot(axis, cent[ti])
+            let qd = Int((d / tolOffset).rounded())
+            let key = "\(ai),\(qd)"
+            let area = triArea[ti]
+            if var b = buckets[key] {
+                b.triangoli.insert(ti)
+                b.area += area
+                b.offsetAcc += d * area
+                buckets[key] = b
+            } else {
+                buckets[key] = PlaneBucket(triangoli: [ti], area: area, offsetAcc: d * area)
+            }
+        }
+
+        var out: [(triangoli: Set<Int>, punto: SIMD3<Float>, normale: SIMD3<Float>)] = []
+        for b in buckets.values where b.triangoli.count >= minTri && b.area >= minArea {
+            guard var fit = fitPiano(b.triangoli) else { continue }
+            let avg = b.triangoli.reduce(SIMD3<Float>(0, 0, 0)) { $0 + norm[$1] }
+            if simd_length(avg) > 1e-6, simd_dot(fit.normale, avg) < 0 { fit.normale = -fit.normale }
+            out.append((b.triangoli, fit.punto, fit.normale))
+        }
+
+        return out.sorted(by: { areaTriangoli($0.triangoli) > areaTriangoli($1.triangoli) })
+            .prefix(maxPiani)
+            .map { $0 }
+    }
+
+    /// Segmentazione globale per clustering piano: raggruppa triangoli con normale
+    /// simile e offset piano compatibile. A differenza del region growing può
+    /// ricomporre facciate interrotte da buchi, finestre o parti mancanti della
+    /// mesh, perché non richiede connettività diretta.
+    func segmentaPianiClustering(maxPiani: Int = 64,
+                                 sogliaDistFrazione: Float = 0.007,
+                                 sogliaNormaleGradi: Float = 14,
+                                 minAreaFrazione: Float = 0.0005,
+                                 minTriangoliFrazione: Float = 0.0005) -> [(triangoli: Set<Int>, punto: SIMD3<Float>, normale: SIMD3<Float>)] {
+        guard triangles.count > 20 else { return [] }
+
+        struct Cluster {
+            var triangoli: Set<Int>
+            var normaleAcc: SIMD3<Float>
+            var offsetAcc: Float
+            var area: Float
+
+            var normale: SIMD3<Float> {
+                simd_length(normaleAcc) > 1e-6 ? simd_normalize(normaleAcc) : SIMD3<Float>(0, 0, 1)
+            }
+
+            var offset: Float { area > 1e-8 ? offsetAcc / area : 0 }
+        }
+
+        let cent = triangles.indices.map { centroid(triangles[$0]) }
+        let norm = triangles.indices.map { normale($0) }
+        let triArea = triangles.indices.map { i -> Float in
+            let t = triangles[i]
+            return simd_length(simd_cross(vertices[Int(t.y)] - vertices[Int(t.x)],
+                                          vertices[Int(t.z)] - vertices[Int(t.x)])) * 0.5
+        }
+        let areaTotale = triArea.reduce(0, +)
+        let minArea = max(areaTotale * minAreaFrazione, 1e-6)
+        let minTri = max(Int(Float(triangles.count) * minTriangoliFrazione), 8)
+
+        let (alo, ahi) = aabb
+        let ext = max(ahi.x - alo.x, max(ahi.y - alo.y, ahi.z - alo.z))
+        let tolOffset = max(ext * sogliaDistFrazione, 1e-4)
+
+        func canonica(_ n0: SIMD3<Float>) -> SIMD3<Float> {
+            var n = simd_normalize(n0)
+            let ax = abs(n.x), ay = abs(n.y), az = abs(n.z)
+            if ax >= ay && ax >= az {
+                if n.x < 0 { n = -n }
+            } else if ay >= ax && ay >= az {
+                if n.y < 0 { n = -n }
+            } else if n.z < 0 {
+                n = -n
+            }
+            return n
+        }
+
+        var clusters: [Cluster] = []
+        var bucketToCluster: [String: Int] = [:]
+        let normalStep: Float = 0.10
+
+        for ti in triangles.indices {
+            let area = max(triArea[ti], 1e-9)
+            let n = canonica(norm[ti])
+            let d = simd_dot(n, cent[ti])
+            let qx = Int((n.x / normalStep).rounded())
+            let qy = Int((n.y / normalStep).rounded())
+            let qz = Int((n.z / normalStep).rounded())
+            let qd = Int((d / tolOffset).rounded())
+            let key = "\(qx),\(qy),\(qz),\(qd)"
+
+            if let ci = bucketToCluster[key] {
+                let cn = clusters[ci].normale
+                let nn = simd_dot(n, cn) < 0 ? -n : n
+                clusters[ci].triangoli.insert(ti)
+                clusters[ci].normaleAcc += nn * area
+                clusters[ci].offsetAcc += simd_dot(nn, cent[ti]) * area
+                clusters[ci].area += area
+            } else {
+                clusters.append(Cluster(triangoli: [ti],
+                                        normaleAcc: n * area,
+                                        offsetAcc: d * area,
+                                        area: area))
+                bucketToCluster[key] = clusters.count - 1
+            }
+        }
+
+        var out: [(triangoli: Set<Int>, punto: SIMD3<Float>, normale: SIMD3<Float>)] = []
+        for c in clusters where c.triangoli.count >= minTri && c.area >= minArea {
+            guard var f = fitPiano(c.triangoli) else { continue }
+            if simd_dot(f.normale, c.normale) < 0 { f.normale = -f.normale }
+            out.append((c.triangoli, f.punto, f.normale))
+        }
+
+        return out.sorted(by: { areaTriangoli($0.triangoli) > areaTriangoli($1.triangoli) })
+            .prefix(maxPiani)
+            .map { $0 }
+    }
+
+    /// Segmentazione deterministica per crescita regionale: parte dai triangoli più
+    /// grandi non assegnati e fa un flood-fill solo su triangoli connessi, con
+    /// normale compatibile e baricentro vicino allo stesso piano. È più adatta ai
+    /// proxy architettonici di RANSAC globale perché non fonde superfici separate e
+    /// non cerca "tutti" i piani possibili nello spazio.
+    func segmentaPianiRegionGrowing(maxPiani: Int = 36,
+                                    sogliaDistFrazione: Float = 0.008,
+                                    sogliaNormaleGradi: Float = 18,
+                                    minAreaFrazione: Float = 0.001,
+                                    minTriangoliFrazione: Float = 0.001) -> [(triangoli: Set<Int>, punto: SIMD3<Float>, normale: SIMD3<Float>)] {
+        guard triangles.count > 20 else { return [] }
+
+        let cent = triangles.indices.map { centroid(triangles[$0]) }
+        let norm = triangles.indices.map { normale($0) }
+        let triArea = triangles.indices.map { i -> Float in
+            let t = triangles[i]
+            return simd_length(simd_cross(vertices[Int(t.y)] - vertices[Int(t.x)],
+                                          vertices[Int(t.z)] - vertices[Int(t.x)])) * 0.5
+        }
+        let areaTotale = triArea.reduce(0, +)
+        let minArea = max(areaTotale * minAreaFrazione, 1e-6)
+        let minTri = max(Int(Float(triangles.count) * minTriangoliFrazione), 12)
+
+        let (alo, ahi) = aabb
+        let ext = max(ahi.x - alo.x, max(ahi.y - alo.y, ahi.z - alo.z))
+        let tolDist = max(ext * sogliaDistFrazione, 1e-4)
+        let cosT = cos(sogliaNormaleGradi * .pi / 180)
+        let cosCresta = cos(42 * Float.pi / 180)
+
+        let adj = costruisciAdiacenza()
+        let weld = adj.weld, edgeMap = adj.edge
+        let semi = triangles.indices.sorted { triArea[$0] > triArea[$1] }
+        var disponibili = Set(triangles.indices)
+        var out: [(triangoli: Set<Int>, punto: SIMD3<Float>, normale: SIMD3<Float>)] = []
+
+        func cresci(seed: Int) -> Set<Int> {
+            var pianoN = norm[seed]
+            var punto = cent[seed]
+            var result: Set<Int> = [seed]
+            var coda = [seed]
+            var qi = 0
+            var prossimoRefit = 160
+
+            while qi < coda.count {
+                let f = coda[qi]; qi += 1
+                let nf = norm[f]
+                let t = triangles[f]
+                let a = weld[Int(t.x)], b = weld[Int(t.y)], c = weld[Int(t.z)]
+                for ek in [Self.ekey(a, b), Self.ekey(b, c), Self.ekey(c, a)] {
+                    guard let vicini = edgeMap[ek] else { continue }
+                    for g in vicini where disponibili.contains(g) && !result.contains(g) {
+                        let ng = norm[g]
+                        if abs(simd_dot(nf, ng)) <= cosCresta { continue }
+                        guard abs(simd_dot(cent[g] - punto, pianoN)) < tolDist,
+                              abs(simd_dot(ng, pianoN)) > cosT else { continue }
+                        result.insert(g)
+                        coda.append(g)
+                    }
+                }
+
+                if result.count >= prossimoRefit, let (p2, n2) = fitPiano(result) {
+                    punto = p2
+                    pianoN = simd_dot(n2, pianoN) < 0 ? -n2 : n2
+                    prossimoRefit = result.count * 2
+                }
+            }
+            return result
+        }
+
+        for seed in semi where out.count < maxPiani && disponibili.count >= minTri {
+            guard disponibili.contains(seed) else { continue }
+            let regione = cresci(seed: seed)
+            let area = regione.reduce(Float(0)) { $0 + triArea[$1] }
+            disponibili.subtract(regione)
+            guard regione.count >= minTri, area >= minArea else { continue }
+            guard var fit = fitPiano(regione) else { continue }
+            if simd_dot(fit.normale, norm[seed]) < 0 { fit.normale = -fit.normale }
+            out.append((regione, fit.punto, fit.normale))
+        }
+
+        return out.sorted(by: { areaTriangoli($0.triangoli) > areaTriangoli($1.triangoli) })
+    }
+
     /// Segmenta TUTTA la mesh in piani (RANSAC sequenziale per prossimità +
     /// normale). Ritorna, per ogni piano, i triangoli + (punto, normale).
     /// Pesante (CPU): da chiamare off-main con indicatore di avanzamento.
@@ -760,7 +1037,10 @@ struct EditableMesh: @unchecked Sendable {
             for ti in poolArr where abs(simd_dot(cent[ti] - bestP, bestN)) < thr
                 && abs(simd_dot(norm[ti], bestN)) > cosN { bestInliers.insert(ti) }
             if bestInliers.count < minTri { break }
-            let (p, n) = fitPiano(bestInliers) ?? (bestP, bestN)
+            let (p, n) = fitPianoRANSAC(bestInliers,
+                                        iters: 100,
+                                        tolDistFraz: sogliaDistFrazione * 0.5,
+                                        tolGradi: min(sogliaNormaleGradi, 15)) ?? fitPiano(bestInliers) ?? (bestP, bestN)
             out.append((bestInliers, p, n))
             pool.subtract(bestInliers)
         }

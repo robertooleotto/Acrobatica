@@ -13,10 +13,13 @@ struct RisultatoPanoramaView: View {
     @State private var showTapPiano = false       // legacy: 3D-triangulation (sperimentale)
     @State private var showRectifyFacade = false  // NUOVO: 2D homography 4-tap
     @State private var showMeasureScale = false
+    @State private var showMarcatura = false      // editor marcatura zone (m²)
+    @State private var showEditor3D = false        // editor 3D mesh (pulizia + piani)
     @State private var rectifiedFacadeUrl: URL?
     @State private var metersPerPixel: Double?
     @State private var orthoComposite: URL?
     @State private var errore: String?
+    @State private var previewGrandeURL: URL?
 
     var body: some View {
         ScrollView {
@@ -70,6 +73,36 @@ struct RisultatoPanoramaView: View {
                 )
             }
         }
+        .fullScreenCover(isPresented: Binding(
+            get: { previewGrandeURL != nil },
+            set: { if !$0 { previewGrandeURL = nil } }
+        )) {
+            if let url = previewGrandeURL {
+                FacadeImageFullscreenView(url: url) {
+                    previewGrandeURL = nil
+                }
+            }
+        }
+        .fullScreenCover(isPresented: $showMarcatura) {
+            if let url = stitchedUrl {
+                MarcaturaFacciataCaricamentoView(
+                    url: url,
+                    ppm: metersPerPixel.map { 1.0 / $0 } ?? 110,
+                    nomeDocumento: "marcatura_\(rilievo.sessionId ?? rilievo.id.uuidString)",
+                    sessionId: rilievo.sessionId,
+                    onChiudi: { showMarcatura = false }
+                )
+            }
+        }
+        .fullScreenCover(isPresented: $showEditor3D) {
+            // Con sessione: scarica la mesh dal backend; senza: mesh demo.
+            if let sid = rilievo.sessionId {
+                EditorMesh3DCaricamentoView(sessionId: sid,
+                                            onChiudi: { showEditor3D = false })
+            } else {
+                EditorMesh3DView(onChiudi: { showEditor3D = false })
+            }
+        }
         .fullScreenCover(isPresented: $showTapPiano) {
             if let sid = rilievo.sessionId {
                 TapWallPlaneView(
@@ -109,16 +142,12 @@ struct RisultatoPanoramaView: View {
                 }
                 .frame(maxWidth: .infinity, minHeight: 200)
             } else if let url = stitchedUrl {
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .empty: ProgressView().frame(maxWidth: .infinity, minHeight: 200)
-                    case .success(let img):
-                        img.resizable().scaledToFit()
-                            .clipShape(RoundedRectangle(cornerRadius: 14))
-                    case .failure: Text("⚠ panorama non scaricabile").foregroundStyle(Theme.danger)
-                    @unknown default: EmptyView()
-                    }
+                Button {
+                    previewGrandeURL = url
+                } label: {
+                    ProcessedFacadeImage(url: url)
                 }
+                .buttonStyle(.plain)
             } else {
                 Text("Nessun panorama disponibile.")
                     .font(Theme.Typo.body()).foregroundStyle(Theme.muted)
@@ -215,6 +244,17 @@ struct RisultatoPanoramaView: View {
                 }
             }
 
+            BrandButton(title: "Editor 3D mesh (pulizia / piani)", systemImage: "cube.transparent",
+                        kind: .secondary) {
+                showEditor3D = true
+            }
+
+            BrandButton(title: "Segna zone (escluse / da rifare)", systemImage: "square.on.square.dashed",
+                        kind: .secondary) {
+                showMarcatura = true
+            }
+            .disabled(stitchedUrl == nil)
+
             BrandButton(title: "Genera preventivo", systemImage: "doc.text.fill",
                         kind: .ghost) {
                 creaPreventivoDaRilievo()
@@ -258,6 +298,116 @@ struct RisultatoPanoramaView: View {
             rilievo.stato = .elaborato
         } catch {
             errore = error.localizedDescription
+        }
+    }
+}
+
+private struct ProcessedFacadeImage: View {
+    let url: URL
+    @State private var image: UIImage?
+    @State private var failed = false
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image.acrobaticaPortraitOriented())
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: .infinity)
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
+            } else if failed {
+                Text("Panorama non scaricabile")
+                    .font(Theme.Typo.body(13))
+                    .foregroundStyle(Theme.danger)
+                    .frame(maxWidth: .infinity, minHeight: 200)
+            } else {
+                ProgressView().frame(maxWidth: .infinity, minHeight: 200)
+            }
+        }
+        .task(id: url) { await load() }
+    }
+
+    private func load() async {
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            guard let ui = UIImage(data: data) else {
+                await MainActor.run { failed = true }
+                return
+            }
+            await MainActor.run {
+                image = ui
+                failed = false
+            }
+        } catch {
+            await MainActor.run { failed = true }
+        }
+    }
+}
+
+private struct FacadeImageFullscreenView: View {
+    let url: URL
+    let onClose: () -> Void
+    @State private var image: UIImage?
+    @State private var failed = false
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                Color.black.ignoresSafeArea()
+                if let image {
+                    ScrollView([.horizontal, .vertical], showsIndicators: true) {
+                        Image(uiImage: image.acrobaticaPortraitOriented())
+                            .resizable()
+                            .scaledToFit()
+                            .padding(12)
+                    }
+                } else if failed {
+                    Text("Immagine non scaricabile")
+                        .foregroundStyle(.white)
+                } else {
+                    ProgressView().tint(.white)
+                }
+            }
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Chiudi") { onClose() }
+                        .foregroundStyle(.white)
+                }
+            }
+        }
+        .task(id: url) { await load() }
+    }
+
+    private func load() async {
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            guard let ui = UIImage(data: data) else {
+                await MainActor.run { failed = true }
+                return
+            }
+            await MainActor.run {
+                image = ui
+                failed = false
+            }
+        } catch {
+            await MainActor.run { failed = true }
+        }
+    }
+}
+
+private extension UIImage {
+    func acrobaticaPortraitOriented() -> UIImage {
+        guard size.width > size.height else { return self }
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = scale
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: size.height, height: size.width),
+                                                format: format)
+        return renderer.image { context in
+            let cg = context.cgContext
+            cg.translateBy(x: size.height / 2, y: size.width / 2)
+            cg.rotate(by: .pi / 2)
+            draw(in: CGRect(x: -size.width / 2, y: -size.height / 2,
+                            width: size.width, height: size.height))
         }
     }
 }

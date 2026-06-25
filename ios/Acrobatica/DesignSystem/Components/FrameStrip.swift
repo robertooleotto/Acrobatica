@@ -11,7 +11,7 @@ struct FrameStrip: View {
             HStack(spacing: 8) {
                 ForEach(Array(thumbnails.suffix(maxVisible).reversed().enumerated()), id: \.offset) { _, data in
                     if let ui = UIImage(data: data) {
-                        Image(uiImage: ui)
+                        Image(uiImage: ui.acrobaticaPortraitOriented())
                             .resizable()
                             .aspectRatio(contentMode: .fill)
                             .frame(width: 56, height: 56)
@@ -24,6 +24,23 @@ struct FrameStrip: View {
                 }
                 Spacer(minLength: 0)
             }
+        }
+    }
+}
+
+private extension UIImage {
+    func acrobaticaPortraitOriented() -> UIImage {
+        guard size.width > size.height else { return self }
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = scale
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: size.height, height: size.width),
+                                                format: format)
+        return renderer.image { context in
+            let cg = context.cgContext
+            cg.translateBy(x: size.height / 2, y: size.width / 2)
+            cg.rotate(by: .pi / 2)
+            draw(in: CGRect(x: -size.width / 2, y: -size.height / 2,
+                            width: size.width, height: size.height))
         }
     }
 }

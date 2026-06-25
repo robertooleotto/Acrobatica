@@ -64,6 +64,18 @@ struct CapturedFacadePhoto: Identifiable, Codable {
         ]
     }
 
+    /// Ricostruisce la simd_float4x4 a partire dal flat array col-major salvato.
+    var cameraTransformMatrix: simd_float4x4 {
+        let c = cameraTransform
+        guard c.count >= 16 else { return matrix_identity_float4x4 }
+        return simd_float4x4(
+            SIMD4<Float>(c[0],  c[1],  c[2],  c[3]),
+            SIMD4<Float>(c[4],  c[5],  c[6],  c[7]),
+            SIMD4<Float>(c[8],  c[9],  c[10], c[11]),
+            SIMD4<Float>(c[12], c[13], c[14], c[15])
+        )
+    }
+
     private static func flatten3(_ m: simd_float3x3) -> [Float] {
         [
             m.columns.0.x, m.columns.0.y, m.columns.0.z,

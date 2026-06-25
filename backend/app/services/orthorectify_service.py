@@ -317,3 +317,147 @@ def composite_orthos(orthos: list[np.ndarray], method: str = "best_source") -> n
         sel = (best == i) & any_cov & (masks[i].astype(bool))
         out[sel] = orthos[i][sel]
     return out
+
+
+def composite_orthos_multiband(orthos: list[np.ndarray], num_bands: int = 5) -> np.ndarray:
+    """Compone N ortho dello STESSO piano con seam best-source + MultiBandBlender.
+
+    Logica:
+      1. best-source per pixel (argmax distance-transform) → UNA sola foto per
+         regione: niente ghosting/sdoppiamento da parallasse (elementi fuori piano).
+      2. cv2.detail.MultiBandBlender fonde i bordi tra regioni in piramide
+         Laplaciana: basse frequenze (luminosità/ombre) con transizione morbida
+         → niente scalini di esposizione; alte frequenze (texture) nette.
+
+    Calcolo dei label best-source INCREMENTALE per non stackare N maschere full-canvas
+    (memoria). Ogni foto viene poi croppata al suo bounding box prima del feed.
+    """
+    if not orthos:
+        raise ValueError("no orthos")
+    H, W = orthos[0].shape[:2]
+    for o in orthos:
+        if o.shape[:2] != (H, W):
+            raise ValueError("orthos non hanno tutte la stessa dimensione")
+
+    # 1. best-source labels (incrementale)
+    best_w = np.zeros((H, W), dtype=np.float32)
+    best_i = np.full((H, W), -1, dtype=np.int32)
+    masks: list[np.ndarray] = []
+    for i, o in enumerate(orthos):
+        m = (o.sum(axis=-1) > 0).astype(np.uint8)
+        masks.append(m)
+        dt = cv2.distanceTransform(m, cv2.DIST_L2, 3)
+        upd = dt > best_w
+        best_w[upd] = dt[upd]
+        best_i[upd] = i
+
+    # 2. MultiBandBlender feed (crop al bbox per ogni foto)
+    blender = cv2.detail.MultiBandBlender(0, num_bands)
+    blender.prepare((0, 0, W, H))
+    fed = 0
+    for i, o in enumerate(orthos):
+        sel = ((best_i == i) & (masks[i] > 0)).astype(np.uint8) * 255
+        ys, xs = np.where(sel > 0)
+        if len(xs) == 0:
+            continue
+        x0, x1 = int(xs.min()), int(xs.max()) + 1
+        y0, y1 = int(ys.min()), int(ys.max()) + 1
+        crop = o[y0:y1, x0:x1].astype(np.int16)
+        cmask = sel[y0:y1, x0:x1]
+        blender.feed(crop, cmask, (x0, y0))
+        fed += 1
+    if fed == 0:
+        raise ValueError("nessuna regione da fondere")
+    out, _ = blender.blend(None, None)
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def composite_orthos_graphcut(orthos: list[np.ndarray], num_bands: int = 5,
+                              seam_megapix: float = 0.1) -> np.ndarray:
+    """Compone N ortho dello STESSO piano con GraphCutSeamFinder + MultiBandBlender.
+
+    Rispetto a `composite_orthos_multiband` (seam best-source per pixel), qui il
+    seam viene cercato con GraphCut: instrada le cuciture lungo le zone a bassa
+    differenza (muro piatto) ed EVITA di tagliare i dettagli (finestre, cornici)
+    → ogni elemento arriva intero da UNA foto, niente sdoppiamento da parallasse
+    moderata. È il metodo "seam-driven parallax-tolerant", tutto su CPU.
+
+    Robustezza copertura: dopo il GraphCut ogni pixel COPERTO ma non assegnato a
+    nessuna maschera (gap lungo le cuciture) viene assegnato al best-source →
+    niente buchi neri. Un inpaint finale chiude eventuali residui.
+    """
+    if not orthos:
+        raise ValueError("no orthos")
+    H, W = orthos[0].shape[:2]
+    for o in orthos:
+        if o.shape[:2] != (H, W):
+            raise ValueError("orthos non hanno tutte la stessa dimensione")
+
+    # 1. content masks, bbox, best-source labels (per gap-fill)
+    best_w = np.zeros((H, W), dtype=np.float32)
+    best_i = np.full((H, W), -1, dtype=np.int32)
+    content: list[np.ndarray] = []
+    bboxes: list[tuple[int, int, int, int] | None] = []
+    for i, o in enumerate(orthos):
+        m = (o.sum(axis=-1) > 0).astype(np.uint8)
+        content.append(m)
+        ys, xs = np.where(m > 0)
+        if len(xs) == 0:
+            bboxes.append(None); continue
+        bboxes.append((int(xs.min()), int(xs.max()) + 1, int(ys.min()), int(ys.max()) + 1))
+        dt = cv2.distanceTransform(m, cv2.DIST_L2, 3)
+        upd = dt > best_w
+        best_w[upd] = dt[upd]; best_i[upd] = i
+
+    # 2. GraphCut seam a risoluzione ridotta (sui crop)
+    seam_scale = min(1.0, (seam_megapix * 1e6 / float(W * H)) ** 0.5)
+    seam_imgs, seam_masks, seam_corners, idx_map = [], [], [], []
+    for i, o in enumerate(orthos):
+        bb = bboxes[i]
+        if bb is None: continue
+        x0, x1, y0, y1 = bb
+        crop = o[y0:y1, x0:x1]
+        cm = content[i][y0:y1, x0:x1] * 255
+        seam_imgs.append(cv2.resize(crop, (0, 0), fx=seam_scale, fy=seam_scale).astype(np.float32))
+        seam_masks.append(cv2.UMat(cv2.resize(cm, (0, 0), fx=seam_scale, fy=seam_scale,
+                                              interpolation=cv2.INTER_NEAREST)))
+        seam_corners.append((int(round(x0 * seam_scale)), int(round(y0 * seam_scale))))
+        idx_map.append(i)
+    finder = cv2.detail_GraphCutSeamFinder('COST_COLOR')
+    finder.find(seam_imgs, seam_corners, seam_masks)
+    seam_found = {idx_map[k]: seam_masks[k].get() for k in range(len(idx_map))}
+
+    # 3. assegnazione full-canvas dai seam + gap-fill col best-source
+    assigned = np.full((H, W), -1, dtype=np.int32)
+    for i, sm_small in seam_found.items():
+        x0, x1, y0, y1 = bboxes[i]
+        sm = cv2.resize(sm_small, (x1 - x0, y1 - y0), interpolation=cv2.INTER_NEAREST)
+        sub = assigned[y0:y1, x0:x1]
+        sub[(sm > 0) & (content[i][y0:y1, x0:x1] > 0)] = i
+        assigned[y0:y1, x0:x1] = sub
+    covered = best_i >= 0
+    gap = covered & (assigned < 0)
+    assigned[gap] = best_i[gap]
+
+    # 4. MultiBandBlender feed con le maschere assegnate
+    blender = cv2.detail.MultiBandBlender(0, num_bands)
+    blender.prepare((0, 0, W, H))
+    fed = 0
+    for i, o in enumerate(orthos):
+        bb = bboxes[i]
+        if bb is None: continue
+        x0, x1, y0, y1 = bb
+        fm = ((assigned[y0:y1, x0:x1] == i) & (content[i][y0:y1, x0:x1] > 0)).astype(np.uint8) * 255
+        if fm.max() == 0: continue
+        blender.feed(o[y0:y1, x0:x1].astype(np.int16), fm, (x0, y0))
+        fed += 1
+    if fed == 0:
+        raise ValueError("nessuna regione da fondere")
+    out, _ = blender.blend(None, None)
+    out = np.clip(out, 0, 255).astype(np.uint8)
+
+    # 5. safety inpaint di eventuali buchi residui dentro la copertura
+    holes = ((out.sum(axis=-1) == 0) & covered).astype(np.uint8)
+    if int(holes.sum()) > 0:
+        out = cv2.inpaint(out, holes, 3, cv2.INPAINT_TELEA)
+    return out

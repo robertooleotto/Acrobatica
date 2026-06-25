@@ -1,5 +1,6 @@
 import Foundation
 import ARKit
+import AVFoundation
 import RealityKit
 import UIKit
 import simd
@@ -11,6 +12,16 @@ enum PlaneQuality {
     case hidden
     case unstable
     case stable
+}
+
+/// Tempo di scatto (otturatore) selezionabile dall'operatore. Preset veloci
+/// anti-mosso: più alto il denominatore, più congela il movimento (ma più ISO).
+/// Default molto veloce (1/1000) per la cattura in camminata.
+enum ShutterSpeed: Int, CaseIterable, Identifiable {
+    case s250 = 250, s500 = 500, s1000 = 1000, s2000 = 2000
+    var id: Int { rawValue }
+    var label: String { "1/\(rawValue)" }
+    var duration: CMTime { CMTime(value: 1, timescale: Int32(rawValue)) }
 }
 
 /// Tipo di hit risultante dal raycast centrale del reticle.
@@ -34,11 +45,52 @@ final class ARFacadeCaptureManager: NSObject, ObservableObject {
     @Published private(set) var trackingState: String = "limited.initializing"
     @Published private(set) var hasLidar: Bool = ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
     @Published private(set) var isBusy: Bool = false
+    @Published private(set) var cameraControlsLocked: Bool = false
+    @Published private(set) var cameraControlsStatus: String = "camera.auto"
+
+    /// Tempo di scatto scelto dall'operatore (default veloce 1/1000 anti-mosso).
+    /// Cambiarlo riapplica l'esposizione custom se la camera è bloccata.
+    @Published var shutterSpeed: ShutterSpeed = .s1000 {
+        didSet { if cameraControlsLocked { lockCameraControlsForFacadeCapture() } }
+    }
+    /// Compensazione esposizione scelta dall'operatore (EV, −2…+2). Regola la
+    /// luminosità target: <0 più scuro, >0 più chiaro. Applicata live (auto) e
+    /// preservata al blocco (incide sull'ISO custom).
+    @Published var exposureBiasEV: Float = 0 {
+        didSet {
+            applyExposureBias()
+            if cameraControlsLocked { lockCameraControlsForFacadeCapture() }
+        }
+    }
+    /// Rotazione (in gradi) della camera rispetto all'ultima cattura. Insieme a
+    /// `distanceFromLastCaptureM` guida il trigger della modalità Auto.
+    @Published private(set) var rotationFromLastCaptureDeg: Float = 0
+    private var lastCaptureOrientation: simd_quatf? = nil
     @Published private(set) var verticalPlanesCount: Int = 0
     @Published private(set) var planeUnderReticleId: UUID? = nil
     @Published private(set) var planeUnderReticleQuality: PlaneQuality = .hidden
     @Published private(set) var planeHitType: PlaneHitType = .none
     @Published private(set) var distanceFromLastCaptureM: Float? = nil
+    /// Pose corrente della camera (camera→world). Aggiornato a ogni frame ARKit.
+    /// Usato dall'UI per: livella (roll), ghost direzionale, debugging.
+    @Published private(set) var currentPose: simd_float4x4? = nil
+    /// Roll corrente in gradi (live, da ARKit eulerAngles.z).
+    @Published private(set) var currentRollDeg: Float = 0
+    /// Pitch corrente in gradi (live, da ARKit eulerAngles.x).
+    @Published private(set) var currentPitchDeg: Float = 0
+    /// Yaw corrente in radianti (live, da ARKit eulerAngles.y). Riferimento:
+    /// posa di partenza della sessione (.gravity worldAlignment).
+    @Published private(set) var currentYawRad: Float = 0
+    /// Quando è partita l'ARKit session corrente (in unix-epoch ms). Le foto
+    /// scattate PRIMA di questo timestamp hanno coordinate `camera_transform`
+    /// in un world frame ARKit ORMAI INVALIDATO — vanno escluse da ogni
+    /// matching geometrico (smart-ghost, readiness, ortho).
+    @Published private(set) var sessionStartedAtMs: Double = 0
+    /// FOV verticale corrente in gradi, calcolata da intrinsics + image height
+    /// del frame ARKit live. Cambia con device/lens (wide vs ultra-wide vs
+    /// telephoto). Serve a `CaptureMatchAnalyzer` per calibrare la soglia
+    /// "Pronto" in funzione della lente reale.
+    @Published private(set) var currentVerticalFOVDeg: Float = 0
     /// Baseline "smussata" (media mobile su ~1s). Più affidabile dell'istantaneo
     /// per il chip UI: filtra il jitter di ARKit su scene povere di feature, dove
     /// la stima posizionale può flickerare di metri tra frame consecutivi anche
@@ -67,6 +119,7 @@ final class ARFacadeCaptureManager: NSObject, ObservableObject {
     private var lastEstimatedPlaneTransform: simd_float4x4? = nil
     private var lastEstimatedPlaneAt: TimeInterval = 0
     private let estimatedPlaneFreshnessSec: TimeInterval = 0.6
+    private var lastPoseUpdateAt: TimeInterval = 0
 
     private let ciContext = CIContext(options: nil)
 
@@ -92,7 +145,10 @@ final class ARFacadeCaptureManager: NSObject, ObservableObject {
 
     func startSession() {
         let config = ARWorldTrackingConfiguration()
-        config.planeDetection = [.vertical, .horizontal]
+        // Rilevamento piani DISATTIVATO: il flusso pose-prior usa solo le POSE
+        // della camera, non gli ARPlaneAnchor. Toglierlo riduce molto il carico
+        // CPU/termico (e la batteria) durante catture lunghe.
+        config.planeDetection = []
         config.environmentTexturing = .none
         config.worldAlignment = .gravity
 
@@ -105,22 +161,43 @@ final class ARFacadeCaptureManager: NSObject, ObservableObject {
         // `recommendedVideoFormatForHighResolutionFrameCapturing` su iPhone Pro tende a scegliere
         // il telephoto (2x/3x) per via della risoluzione massima, dando l'effetto "zoom" indesiderato.
         // Qui prendiamo la risoluzione massima TRA i formati wide-angle.
+        // Risoluzione MEDIA, non massima: ~1920px di larghezza bastano per la
+        // ricostruzione (i test mostrano che 1500px regge) e l'ISP scalda molto
+        // meno che al formato massimo. Scelgo il formato wide più piccolo con
+        // larghezza ≥ targetWidth; se non esiste, il più grande disponibile.
+        let targetWidth: CGFloat = 1920
         let wideFormats = ARWorldTrackingConfiguration.supportedVideoFormats.filter {
             $0.captureDeviceType == .builtInWideAngleCamera
         }
-        if let bestWide = wideFormats.max(by: {
-            $0.imageResolution.width * $0.imageResolution.height
-                < $1.imageResolution.width * $1.imageResolution.height
-        }) {
-            config.videoFormat = bestWide
-            let r = bestWide.imageResolution
-            print("[ARFacadeCapture] using WIDE format: \(bestWide.captureDeviceType.rawValue) \(Int(r.width))×\(Int(r.height)) @\(Int(bestWide.framesPerSecond))fps")
+        let atLeastTarget = wideFormats.filter { $0.imageResolution.width >= targetWidth }
+        let chosen = atLeastTarget.min(by: { $0.imageResolution.width < $1.imageResolution.width })
+            ?? wideFormats.max(by: { $0.imageResolution.width < $1.imageResolution.width })
+        if let fmt = chosen {
+            config.videoFormat = fmt
+            let r = fmt.imageResolution
+            print("[ARFacadeCapture] using WIDE format (medium): \(Int(r.width))×\(Int(r.height)) @\(Int(fmt.framesPerSecond))fps")
         } else if let hires = ARWorldTrackingConfiguration.recommendedVideoFormatForHighResolutionFrameCapturing {
             config.videoFormat = hires
             print("[ARFacadeCapture] using HIRES fallback format: \(hires.captureDeviceType.rawValue)")
         }
 
         arView.session.run(config, options: [.resetTracking, .removeExistingAnchors])
+        cameraControlsLocked = false
+        cameraControlsStatus = "camera.auto"
+        // Niente auto-lock: l'esposizione resta in auto (live) finché l'operatore
+        // non punta la luce e blocca manualmente (lockCameraControlsForFacadeCapture).
+        // Tag della sessione: tutte le foto già scattate PRIMA di questo
+        // momento hanno camera_transform in un world frame diverso (ARKit
+        // resetta l'origine ad ogni startSession) e vanno escluse dai
+        // calcoli geometrici.
+        sessionStartedAtMs = Date().timeIntervalSince1970 * 1000
+    }
+
+    /// Ferma ARKit e la fotocamera (es. al "Fine"): spegne il feed video → il
+    /// telefono smette di scaldare mentre gli upload proseguono in background.
+    func pauseSession() {
+        arView.session.pause()
+        raycastTimer?.invalidate(); raycastTimer = nil
     }
 
     func resetSession() {
@@ -142,6 +219,10 @@ final class ARFacadeCaptureManager: NSObject, ObservableObject {
         guard !isBusy else { throw CaptureError.busy }
         isBusy = true
         defer { isBusy = false }
+
+        if !cameraControlsLocked {
+            lockCameraControlsForFacadeCapture()
+        }
 
         // NB: NON usiamo `captureHighResolutionFrame` perché su iPhone Pro+ Apple può
         // dirottarci verso il teleobiettivo (più pixel ma campo visivo stretto = "zoom 2x").
@@ -192,6 +273,8 @@ final class ARFacadeCaptureManager: NSObject, ObservableObject {
             distanceFromLastCaptureM = 0
         }
         lastCaptureWorldPos = camPos
+        lastCaptureOrientation = simd_quatf(camera.transform)
+        rotationFromLastCaptureDeg = 0
         // Reset dei campioni: parte da zero dopo ogni cattura.
         distanceSamples.removeAll()
         distanceFromLastCaptureSmoothedM = 0
@@ -258,6 +341,111 @@ final class ARFacadeCaptureManager: NSObject, ObservableObject {
             @unknown default: return "limited.unknown"
             }
         @unknown default: return "unknown"
+        }
+    }
+
+    // MARK: - Camera controls
+
+    /// Sblocca i controlli camera → torna in auto (live metering) così l'operatore
+    /// può ri-puntare la luce e ribloccare.
+    func unlockCameraControls() {
+        guard let device = preferredCaptureDevice() else { return }
+        do {
+            try device.lockForConfiguration()
+            defer { device.unlockForConfiguration() }
+            if device.isExposureModeSupported(.continuousAutoExposure) {
+                device.exposureMode = .continuousAutoExposure
+            }
+            if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
+                device.whiteBalanceMode = .continuousAutoWhiteBalance
+            }
+            if device.isFocusModeSupported(.continuousAutoFocus) {
+                device.focusMode = .continuousAutoFocus
+            }
+            cameraControlsLocked = false
+            cameraControlsStatus = "camera.auto"
+        } catch {
+            print("[ARFacadeCapture] unlock failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Applica la compensazione EV all'esposizione automatica (live, anche da
+    /// sbloccato). Clampata al range supportato dal device.
+    func applyExposureBias() {
+        guard let device = preferredCaptureDevice() else { return }
+        do {
+            try device.lockForConfiguration()
+            defer { device.unlockForConfiguration() }
+            let ev = min(max(exposureBiasEV, device.minExposureTargetBias),
+                         device.maxExposureTargetBias)
+            device.setExposureTargetBias(ev, completionHandler: nil)
+        } catch {
+            print("[ARFacadeCapture] exposure bias failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func preferredCaptureDevice() -> AVCaptureDevice? {
+        AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
+            ?? AVCaptureDevice.default(.builtInTripleCamera, for: .video, position: .back)
+            ?? AVCaptureDevice.default(.builtInDualWideCamera, for: .video, position: .back)
+            ?? AVCaptureDevice.default(for: .video)
+    }
+
+    /// Blocca esposizione, bilanciamento del bianco e focus sul valore corrente.
+    /// ARKit possiede la sessione camera: su alcuni device iOS può rifiutare una
+    /// parte del lock, quindi lo trattiamo come best-effort e mostriamo lo stato.
+    func lockCameraControlsForFacadeCapture() {
+        guard let device = preferredCaptureDevice() else {
+            cameraControlsLocked = false
+            cameraControlsStatus = "camera.unavailable"
+            return
+        }
+
+        do {
+            try device.lockForConfiguration()
+            defer { device.unlockForConfiguration() }
+
+            // Otturatore veloce anti-mosso: imposto un'esposizione CUSTOM con
+            // durata limitata (≤ facadeMaxShutterDuration) e ISO che compensa per
+            // mantenere la luminosità corrente. Fallback su .locked se non supportato.
+            if device.isExposureModeSupported(.custom) {
+                let minD = device.activeFormat.minExposureDuration
+                let maxD = device.activeFormat.maxExposureDuration
+                // durata target = otturatore scelto dall'operatore, clampato al device
+                var dur = CMTimeMinimum(shutterSpeed.duration, maxD)
+                dur = CMTimeMaximum(dur, minD)
+                // ISO brightness-preserving: ISO_new = ISO_cur * (durata_cur / durata_target)
+                // poi modulato dalla compensazione EV scelta: ×2^EV.
+                let curSec = CMTimeGetSeconds(device.exposureDuration)
+                let tgtSec = CMTimeGetSeconds(dur)
+                var iso = device.iso
+                if curSec > 0, tgtSec > 0 {
+                    iso = device.iso * Float(curSec / tgtSec)
+                }
+                iso *= powf(2, exposureBiasEV)
+                iso = min(max(iso, device.activeFormat.minISO), device.activeFormat.maxISO)
+                device.setExposureModeCustom(duration: dur, iso: iso, completionHandler: nil)
+                print("[ARFacadeCapture] custom exposure: \(CMTimeGetSeconds(dur))s ISO \(iso) EV \(exposureBiasEV)")
+            } else if device.isExposureModeSupported(.locked) {
+                device.exposureMode = .locked
+            }
+            if device.isWhiteBalanceModeSupported(.locked) {
+                device.whiteBalanceMode = .locked
+            }
+            if device.isFocusModeSupported(.locked) {
+                device.focusMode = .locked
+            }
+            if device.isSubjectAreaChangeMonitoringEnabled {
+                device.isSubjectAreaChangeMonitoringEnabled = false
+            }
+
+            cameraControlsLocked = true
+            cameraControlsStatus = "camera.locked"
+            print("[ARFacadeCapture] camera controls locked: exposure=\(device.exposureMode.rawValue) wb=\(device.whiteBalanceMode.rawValue) focus=\(device.focusMode.rawValue)")
+        } catch {
+            cameraControlsLocked = false
+            cameraControlsStatus = "camera.lockFailed"
+            print("[ARFacadeCapture] camera controls lock failed: \(error.localizedDescription)")
         }
     }
 
@@ -411,6 +599,13 @@ final class ARFacadeCaptureManager: NSObject, ObservableObject {
             // un singolo picco non rende il chip verde — serve baseline stabile.
             let conservative = distanceSamples.min() ?? d
             distanceFromLastCaptureSmoothedM = min(avg, conservative)
+
+            // Rotazione angolare rispetto all'ultima cattura (per il trigger Auto).
+            if let lastQ = lastCaptureOrientation {
+                let curQ = simd_quatf(frame.camera.transform)
+                let dotq = min(abs(simd_dot(lastQ.vector, curQ.vector)), 1)
+                rotationFromLastCaptureDeg = 2 * acos(dotq) * 180 / .pi
+            }
         }
     }
 }
@@ -422,6 +617,34 @@ extension ARFacadeCaptureManager: ARSessionDelegate {
     nonisolated func session(_ session: ARSession, cameraDidChangeTrackingState camera: ARCamera) {
         Task { @MainActor in
             self.trackingState = self.trackingStateString(camera.trackingState)
+        }
+    }
+
+    /// Update live pose + roll a ogni frame ARKit. Throttle a ~10Hz per non
+    /// stressare SwiftUI redraw (l'overlay si aggiorna comunque fluido).
+    nonisolated func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        let now = CACurrentMediaTime()
+        let throttleSec: TimeInterval = 0.10
+        // Lock-free throttle: usiamo CACurrentMediaTime via static var-less hack
+        // (la closure cattura currentTimestamp via property MainActor)
+        let pose = frame.camera.transform
+        let pitchDeg = frame.camera.eulerAngles.x * 180 / .pi
+        let rollDeg = frame.camera.eulerAngles.z * 180 / .pi
+        let yawRad = frame.camera.eulerAngles.y
+        // FOV verticale dalla intrinsics: fy = intrinsics.columns.1.y, h = image height.
+        // tan(FOV_v / 2) = h / (2 * fy)  →  FOV_v = 2 * atan(h / (2 * fy))
+        let fy = frame.camera.intrinsics.columns.1.y
+        let h = Float(frame.camera.imageResolution.height)
+        let fovVDeg = 2 * atan(h / (2 * fy)) * 180 / .pi
+        Task { @MainActor in
+            if (now - self.lastPoseUpdateAt) >= throttleSec {
+                self.lastPoseUpdateAt = now
+                self.currentPose = pose
+                self.currentPitchDeg = pitchDeg
+                self.currentRollDeg = rollDeg
+                self.currentYawRad = yawRad
+                self.currentVerticalFOVDeg = fovVDeg
+            }
         }
     }
 

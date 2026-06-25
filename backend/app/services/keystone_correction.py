@@ -101,6 +101,40 @@ def _R_from_transform(
     return R, used_wall_normal
 
 
+def _roll_deg_from_transform(camera_transform_col_major) -> float:
+    """Angolo di roll del telefono = inclinazione di "world-up" nel piano
+    immagine, in gradi. Positivo = phone inclinato a sinistra (world-up va
+    verso destra dell'immagine)."""
+    T = np.array(camera_transform_col_major, dtype=np.float64).reshape(4, 4, order="F")
+    R = T[:3, :3]
+    up_cam = R.T @ np.array([0.0, 1.0, 0.0])
+    # Image plane: x right, y down. world-up direction in image = (up_cam.x, -up_cam.y).
+    # Angle from "image-top" (which is direction (0,-1) in image coords) =
+    #   atan2(image_x, -image_y) = atan2(up_cam.x, up_cam.y)
+    return float(math.degrees(math.atan2(up_cam[0], up_cam[1])))
+
+
+def _rotate_image_around_center(img: np.ndarray, deg: float) -> tuple[np.ndarray, np.ndarray]:
+    """Ruota img di `deg` gradi (CCW positivo) attorno al centro immagine,
+    espandendo il canvas per non perdere pixel. Restituisce (rotated, M_3x3)
+    dove M_3x3 è la homography 3x3 equivalente all'affine usata."""
+    h, w = img.shape[:2]
+    cx, cy = w / 2.0, h / 2.0
+    M2 = cv2.getRotationMatrix2D((cx, cy), deg, 1.0)
+    cos_a, sin_a = abs(M2[0, 0]), abs(M2[0, 1])
+    new_w = int(math.ceil(h * sin_a + w * cos_a))
+    new_h = int(math.ceil(h * cos_a + w * sin_a))
+    # Adatta la traslazione per centrare l'immagine ruotata nel nuovo canvas
+    M2[0, 2] += (new_w / 2.0) - cx
+    M2[1, 2] += (new_h / 2.0) - cy
+    rotated = cv2.warpAffine(img, M2, (new_w, new_h),
+                              flags=cv2.INTER_LINEAR,
+                              borderMode=cv2.BORDER_CONSTANT,
+                              borderValue=(0, 0, 0))
+    M3 = np.vstack([M2, [0.0, 0.0, 1.0]])
+    return rotated, M3
+
+
 def keystone_correct(
     img: np.ndarray,
     intrinsics: list[float] | tuple[float, ...],
@@ -109,6 +143,7 @@ def keystone_correct(
     wall_normal_world: Optional[list[float] | tuple[float, ...]] = None,
     metadata_image_size: Optional[tuple[int, int]] = None,
     max_output_dim: int = 6000,
+    decompose_roll: bool = False,
 ) -> tuple[np.ndarray, KeystoneInfo]:
     """Restituisce (immagine_raddrizzata, info).
 
@@ -123,7 +158,6 @@ def keystone_correct(
           .right + jpegData → portrait), ruotiamo il buffer 90° CW per allinearsi.
     """
     K = _intrinsics_K(intrinsics)
-    R, used_wall_normal = _R_from_transform(camera_transform, wall_normal_world)
 
     # Pre-rotate auto-detect: se il buffer non combacia con (image_width, image_height)
     # secondo metadata, ruotiamo CW (fix iOS UIImage .right baked-in).
@@ -134,6 +168,35 @@ def keystone_correct(
         if (buf_w, buf_h) != (meta_w, meta_h) and (buf_h, buf_w) == (meta_w, meta_h):
             img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
             pre_rotated = True
+
+    # Opzionale: decomponi roll dal pitch+yaw. Step 1: ruota in 2D l'immagine per
+    # rimuovere il roll del telefono → output assi-allineato con la gravità.
+    # Step 2: applica keystone con un transform "ripulito" dalla rotazione
+    # attorno all'asse Z della camera. Risultato matematicamente equivalente al
+    # single-pass ma con bbox finale più "naturale" (no parallelogrammi tilted
+    # a pitch estremi).
+    if decompose_roll:
+        roll_deg = _roll_deg_from_transform(camera_transform)
+        if abs(roll_deg) > 0.5:
+            img, _ = _rotate_image_around_center(img, -roll_deg)
+            # Aggiorna K coi nuovi cx, cy dovuti all'espansione canvas
+            h_new, w_new = img.shape[:2]
+            K = K.copy()
+            K[0, 2] = w_new / 2.0   # cx → centro del nuovo canvas
+            K[1, 2] = h_new / 2.0   # cy
+            # Aggiorna camera_transform per togliere il roll: post-moltiplica
+            # R_cam2world per R_z(+roll_rad) (rotazione attorno all'asse Z camera).
+            roll_rad = math.radians(roll_deg)
+            c, s = math.cos(roll_rad), math.sin(roll_rad)
+            R_z_cam = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]], dtype=np.float64)
+            T_old = np.array(camera_transform, dtype=np.float64).reshape(4, 4, order="F")
+            R_old = T_old[:3, :3]
+            R_new = R_old @ R_z_cam
+            T_new = T_old.copy()
+            T_new[:3, :3] = R_new
+            camera_transform = T_new.flatten(order="F").tolist()
+
+    R, used_wall_normal = _R_from_transform(camera_transform, wall_normal_world)
 
     h, w = img.shape[:2]
     Kinv = np.linalg.inv(K)

@@ -49,6 +49,7 @@ class ProcessRequest(BaseModel):
 
 class ProcessResult(BaseModel):
     stitched_url: Optional[str] = None
+    composite_url: Optional[str] = None
     rectified_url: Optional[str] = None
     facade_polygon: Optional[list[tuple[float, float]]] = None
     vanishing_points: Optional[list[tuple[float, float]]] = None
@@ -104,6 +105,116 @@ class KeystonePhotoResult(BaseModel):
 
 class KeystoneSessionResult(BaseModel):
     photos: list[KeystonePhotoResult] = []
+    warnings: list[str] = []
+
+
+# ─── Composite operativo per 4-tap finale ──────────────────────────────────
+
+class StripCompositeRequest(BaseModel):
+    """Crea un composite operativo della facciata da foto keystone-corrected.
+
+    Il risultato serve solo come immagine completa/leggibile su cui l'utente
+    tappa i 4 angoli del piano facciata. La correzione metrica vera avviene
+    dopo con /rectify-panorama + /scale.
+    """
+    order_indices: Optional[list[int]] = Field(
+        default=None,
+        description="Se presente usa solo questi order_index, utile per una singola colonna/sweep."
+    )
+    overlap_ratio: float = Field(default=0.45, ge=0.15, le=0.80)
+    crop_width_ratio: float = Field(default=0.80, ge=0.30, le=1.00)
+    crop_height_ratio: float = Field(default=1.00, ge=0.30, le=1.00)
+    decompose_roll: bool = Field(
+        default=False,
+        description="Se true rimuove prima il roll in 2D, poi applica la keystone pitch/yaw."
+    )
+    post_pitch_roll: bool = Field(
+        default=False,
+        description="Se true applica prima la keystone pitch e poi ruota l'immagine di +roll."
+    )
+    post_horizontal_roll: bool = Field(
+        default=False,
+        description="Se true rifinisce il roll usando linee orizzontali/verticali rilevate sull'immagine."
+    )
+    scale_alignment: bool = Field(
+        default=False,
+        description="Se true allinea le fasce con scala+rotazione+traslazione invece che sola traslazione."
+    )
+    blend_mode: Literal["feather", "cut", "graphcut"] = Field(
+        default="feather",
+        description="'feather' fonde; 'cut' taglia netto; 'graphcut' cerca seam e usa multiband."
+    )
+    output_name: str = Field(default="composite.jpg")
+
+
+class StripPlacementModel(BaseModel):
+    order_index: int
+    x_offset: int
+    y_offset: int
+    width: int
+    height: int
+    match_response: float
+    match_method: str
+    dx: float
+    dy: float
+    scale: float = 1.0
+
+
+class StripCompositeResult(BaseModel):
+    composite_url: str
+    output_size: tuple[int, int]
+    placements: list[StripPlacementModel]
+    warnings: list[str] = []
+
+
+class ColumnCompositeRequest(BaseModel):
+    """Rileva automaticamente le colonne/sweep e genera un composite per ognuna."""
+    pitch_reset_deg: float = Field(default=20.0, ge=5.0, le=60.0)
+    lateral_reset_m: float = Field(default=1.25, ge=0.10, le=10.0)
+    overlap_ratio: float = Field(default=0.30, ge=0.15, le=0.80)
+    crop_width_ratio: float = Field(default=0.80, ge=0.30, le=1.00)
+    crop_height_ratio: float = Field(default=1.00, ge=0.30, le=1.00)
+    decompose_roll: bool = Field(
+        default=False,
+        description="Legacy: rimuove prima il roll in 2D, poi applica la keystone."
+    )
+    post_pitch_roll: bool = Field(
+        default=True,
+        description="Per le colonne: prima pitch/keystone verticale, poi +roll col segno reale."
+    )
+    post_horizontal_roll: bool = Field(
+        default=True,
+        description="Per le colonne: rifinisce il roll con linee della facciata, prima del compositing."
+    )
+    scale_alignment: bool = Field(
+        default=True,
+        description="Per le colonne: allineamento locale con scala+traslazione controllata."
+    )
+    blend_mode: Literal["feather", "cut", "graphcut"] = Field(
+        default="cut",
+        description="Per le colonne: 'graphcut' è più simile a Photoshop ma più costoso."
+    )
+    min_photos_per_column: int = Field(default=2, ge=1, le=20)
+
+
+class ColumnGroupModel(BaseModel):
+    column_index: int
+    order_indices: list[int]
+    reason: str
+
+
+class ColumnCompositeModel(BaseModel):
+    column_index: int
+    order_indices: list[int]
+    composite_url: str
+    output_size: tuple[int, int]
+    placements: list[StripPlacementModel]
+    warnings: list[str] = []
+
+
+class ColumnCompositeResult(BaseModel):
+    columns: list[ColumnCompositeModel]
+    groups: list[ColumnGroupModel]
     warnings: list[str] = []
 
 
@@ -168,6 +279,152 @@ class OrthorectifySessionResult(BaseModel):
     wall_plane: WallPlaneModel
     photos: list[OrthorectifyPhotoResult] = []
     composite_url: Optional[str] = None
+    warnings: list[str] = []
+
+
+class FacadePlaneModel(BaseModel):
+    """Piano di facciata rilevato automaticamente (triangolazione + RANSAC).
+
+    Stesso frame del piano 4-tap: `c` punto sul piano, `n` normale verso le
+    camere, `up` gravità proiettata sul piano, `right` = up × n, `bounds` =
+    [u_min, u_max, v_min, v_max] in metri lungo right/up rispetto a `c`."""
+    c: tuple[float, float, float]
+    n: tuple[float, float, float]
+    up: tuple[float, float, float]
+    right: tuple[float, float, float]
+    bounds: tuple[float, float, float, float]
+    n_inliers: int
+    rms_cm: float
+    area_m2: float
+
+
+class FacadePlanesResult(BaseModel):
+    """Risultato del rilevamento automatico piani: lista ordinata per n_inliers
+    (il primo è la facciata principale) + statistiche della triangolazione."""
+    planes: list[FacadePlaneModel] = []
+    stats: dict = {}
+    warnings: list[str] = []
+
+
+# ─── Geometria 3D semi-automatica (estrusione poligoni) ───────────────────
+
+class ExtrudePolygonRequest(BaseModel):
+    """Un poligono disegnato dall'utente sull'ortofoto (px, convenzione v22):
+    il backend campiona la nuvola dentro il poligono e ne stima la profondità."""
+    poly_px: list[list[float]] = Field(..., min_length=3,
+        description="Vertici [x,y] in pixel ortofoto (almeno 3)")
+    ppm: float = Field(default=110.0, gt=0, description="Pixel per metro dell'ortofoto")
+
+
+class ExtrudePolygonResult(BaseModel):
+    """Profondità robusta della regione + classificazione e confidenza.
+
+    `tipo`: estruso (sporge) | rientrato (incassa) | filo.
+    `confidence`: alta | media | bassa | nessuna.
+    `needs_user_depth`=True quando i punti sono troppo pochi: l'utente deve
+    inserire la profondità a mano."""
+    depth_m: float
+    depth_mad_cm: float
+    n_points: int
+    confidence: str
+    tipo: str
+    needs_user_depth: bool
+
+
+class SectionBin(BaseModel):
+    """Un campione del profilo di sezione orizzontale: w mediano a quota u."""
+    u_m: float
+    w_m: float
+    n: int
+
+
+class HorizontalSectionResult(BaseModel):
+    """Profilo (u, w) di una fascia di quota: supporto visivo dell'editor."""
+    v_quota_m: float
+    band_m: float
+    profilo: list[SectionBin] = []
+
+
+class PrismRequest(BaseModel):
+    """Un prisma da costruire: poligono + profondità (eventualmente corretta
+    a mano dall'utente) + tipo/nome."""
+    poly_px: list[list[float]] = Field(..., min_length=3)
+    depth_m: float = 0.0
+    tipo: Optional[str] = None
+    nome: str = "regione"
+
+
+class FacadeModelRequest(BaseModel):
+    """Lista di prismi da assemblare nel modello a scatole della facciata."""
+    prisms: list[PrismRequest] = Field(..., min_length=1)
+    ppm: float = Field(default=110.0, gt=0)
+
+
+class FacadeModelResult(BaseModel):
+    """Modello costruito: JSON editabile + URL dell'OBJ salvato su storage."""
+    n_vertices: int
+    n_faces: int
+    n_prisms: int
+    model_json: dict
+    model_url: Optional[str] = None
+    obj_url: Optional[str] = None
+
+
+class MeshFileInfo(BaseModel):
+    """Un file della mesh su storage (l'OBJ + eventuali MTL/PNG texture)."""
+    name: str
+    url: str
+    size_bytes: int
+
+
+class MeshUploadResult(BaseModel):
+    """Esito dell'upload mesh dal Mac (Object Capture) verso il backend."""
+    session_id: str
+    files: list[MeshFileInfo] = []
+
+
+class MeshInfoResult(BaseModel):
+    """Mesh disponibile per la sessione: file + URL firmati per il download."""
+    session_id: str
+    main_obj: Optional[MeshFileInfo] = None
+    files: list[MeshFileInfo] = []
+
+
+class ZonaMarcataModel(BaseModel):
+    """Singola zona marcata dall'operatore sull'ortofoto (schema concordato
+    con l'editor iOS — i campi/rawValue NON vanno cambiati).
+
+    tipo: esclusa | da_rifare | misurabile | nota | lineare.
+    Per tipo="lineare" punti_px è una polilinea APERTA: area_m2=0 e
+    perimetro_m è la lunghezza della linea in metri.
+    """
+    nome: str
+    tipo: str
+    visibile: bool = True
+    colore: Optional[str] = None
+    punti_px: list[list[float]]
+    area_m2: float = 0.0
+    perimetro_m: float = 0.0
+
+
+class MarcaturaZoneDocument(BaseModel):
+    """Documento JSON completo prodotto dall'editor di marcatura iOS:
+    {"versione":1,"ppm":110,"larghezza_px":...,"altezza_px":...,"zone":[...]}
+    """
+    versione: int = 1
+    ppm: float
+    larghezza_px: int
+    altezza_px: int
+    zone: list[ZonaMarcataModel] = []
+
+
+class ZoneMarkupResult(BaseModel):
+    """Risposta all'upload della marcatura: totali ricalcolati server-side."""
+    session_id: str
+    zone_count: int
+    area_m2_per_tipo: dict[str, float] = {}
+    lunghezza_m_per_tipo: dict[str, float] = {}
+    markup_url: Optional[str] = None
     warnings: list[str] = []
 
 

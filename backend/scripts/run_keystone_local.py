@@ -83,6 +83,9 @@ def main(arg: str) -> None:
             camera_transform=cam_transform,
             wall_normal_world=session_wall_normal,
             metadata_image_size=(int(m["image_width"]), int(m["image_height"])),
+            # decompose_roll lasciato OFF: l'approccio "roll prima, pitch dopo"
+            # non risolve il problema reale (rotation-only homography degenera
+            # a pitch > 45°). La fix vera è l'ortorettifica sul piano del muro.
         )
         cv2.imwrite(str(rect_path), rectified, [cv2.IMWRITE_JPEG_QUALITY, 88])
         euler = m.get("euler_angles") or [0.0, 0.0, 0.0]

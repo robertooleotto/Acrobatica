@@ -19,9 +19,26 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from ..models import (
     ARMetadata,
+    ColumnCompositeModel,
+    ColumnCompositeRequest,
+    ColumnCompositeResult,
+    ColumnGroupModel,
     CreateSessionResponse,
+    ExtrudePolygonRequest,
+    ExtrudePolygonResult,
+    FacadeModelRequest,
+    FacadeModelResult,
+    FacadePlaneModel,
+    FacadePlanesResult,
+    HorizontalSectionResult,
+    SectionBin,
     KeystonePhotoResult,
     KeystoneSessionResult,
+    MarcaturaZoneDocument,
+    MeshFileInfo,
+    MeshInfoResult,
+    MeshUploadResult,
+    ZoneMarkupResult,
     OrthorectifyPhotoResult,
     OrthorectifySessionResult,
     ProcessRequest,
@@ -31,6 +48,9 @@ from ..models import (
     SessionState,
     SetScaleRequest,
     SetScaleResult,
+    StripCompositeRequest,
+    StripCompositeResult,
+    StripPlacementModel,
     TriangulateRequest,
     TriangulateResult,
     UploadPhotoResponse,
@@ -171,6 +191,10 @@ def get_result(session_id: str):
         result_dict["stitched_url"] = storage_service.signed_url(
             storage_service.out_path(session_id, "stitched.jpg")
         )
+    if result_dict.get("composite_url"):
+        result_dict["composite_url"] = storage_service.signed_url(
+            storage_service.out_path(session_id, "composite.jpg")
+        )
     if result_dict.get("rectified_url"):
         result_dict["rectified_url"] = storage_service.signed_url(
             storage_service.out_path(session_id, "rectified.jpg")
@@ -308,6 +332,201 @@ def keystone_session(session_id: str):
     return KeystoneSessionResult(photos=out, warnings=warnings)
 
 
+@router.post("/{session_id}/strip-composite", response_model=StripCompositeResult)
+def create_strip_composite(session_id: str, req: StripCompositeRequest | None = None):
+    """Produce il composite operativo usato dal flow principale:
+
+    foto originali -> keystone verticale -> fasce centrali -> blending per
+    traslazione. Non è una ortofoto metrica; è la base visuale su cui fare
+    POST /rectify-panorama con source="composite".
+    """
+    from ..services.strip_composite_service import compose_vertical_strips
+
+    req = req or StripCompositeRequest()
+
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        raise HTTPException(404, "Sessione non trovata")
+    photos = sorted(session_store.list_photos(session_id), key=lambda p: int(p["order_index"]))
+    if not photos:
+        raise HTTPException(400, "Nessuna foto nella sessione")
+
+    if req.order_indices:
+        wanted = set(int(i) for i in req.order_indices)
+        photos = [p for p in photos if int(p["order_index"]) in wanted]
+        if not photos:
+            raise HTTPException(400, "Nessuna foto corrisponde a order_indices")
+
+    images: list[np.ndarray] = []
+    metadata: list[dict] = []
+    warnings: list[str] = []
+    for p in photos:
+        order = int(p["order_index"])
+        try:
+            raw = storage_service.download_bytes(p["storage_path"])
+        except Exception as e:
+            warnings.append(f"foto {order}: download fallito ({e})")
+            continue
+        img = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            warnings.append(f"foto {order}: decode fallito")
+            continue
+        m = dict(p["metadata"])
+        m["order_index"] = order
+        images.append(img)
+        metadata.append(m)
+
+    if not images:
+        raise HTTPException(400, "Nessuna foto decodificabile")
+
+    try:
+        comp = compose_vertical_strips(
+            images,
+            metadata,
+            overlap_ratio=req.overlap_ratio,
+            crop_width_ratio=req.crop_width_ratio,
+            crop_height_ratio=req.crop_height_ratio,
+            decompose_roll=req.decompose_roll,
+            post_pitch_roll=req.post_pitch_roll,
+            post_horizontal_roll=req.post_horizontal_roll,
+            scale_alignment=req.scale_alignment,
+            blend_mode=req.blend_mode,
+        )
+    except Exception as e:
+        raise HTTPException(422, f"Composite fallito: {e}")
+
+    ok, buf = cv2.imencode(".jpg", comp.composite, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    if not ok:
+        raise HTTPException(500, "Encode composite fallito")
+
+    safe_name = Path(req.output_name).name or "composite.jpg"
+    if not safe_name.lower().endswith((".jpg", ".jpeg")):
+        safe_name = f"{safe_name}.jpg"
+    remote = storage_service.out_path(session_id, safe_name)
+    storage_service.upload_bytes(remote, buf.tobytes(), "image/jpeg")
+
+    # Mantieni sempre anche il nome canonico che /rectify-panorama usa con source="composite".
+    if safe_name != "composite.jpg":
+        storage_service.upload_bytes(storage_service.out_path(session_id, "composite.jpg"), buf.tobytes(), "image/jpeg")
+
+    existing = sess.get("result") or {}
+    existing["composite_url"] = storage_service.signed_url(storage_service.out_path(session_id, "composite.jpg"))
+    existing["strip_composite"] = {
+        "output_name": safe_name,
+        "output_size": comp.canvas_size,
+        "placements": [p.__dict__ for p in comp.placements],
+        "warnings": warnings + comp.warnings,
+    }
+    session_store.update_session(session_id, {"result": existing})
+
+    return StripCompositeResult(
+        composite_url=storage_service.signed_url(remote, expires_in_sec=3600),
+        output_size=comp.canvas_size,
+        placements=[StripPlacementModel(**p.__dict__) for p in comp.placements],
+        warnings=warnings + comp.warnings,
+    )
+
+
+@router.post("/{session_id}/column-composites", response_model=ColumnCompositeResult)
+def create_column_composites(session_id: str, req: ColumnCompositeRequest | None = None):
+    """Rileva le colonne/sweep e produce un composite verticale per ognuna.
+
+    Parte sempre dalle foto originali salvate su Supabase. Ogni foto viene
+    prima raddrizzata con la stessa keystone verticale già usata da Claude.
+    """
+    from ..services.strip_composite_service import compose_column_groups
+
+    req = req or ColumnCompositeRequest()
+
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        raise HTTPException(404, "Sessione non trovata")
+    photos = sorted(session_store.list_photos(session_id), key=lambda p: int(p["order_index"]))
+    if not photos:
+        raise HTTPException(400, "Nessuna foto nella sessione")
+
+    images: list[np.ndarray] = []
+    metadata: list[dict] = []
+    warnings: list[str] = []
+    for p in photos:
+        order = int(p["order_index"])
+        try:
+            raw = storage_service.download_bytes(p["storage_path"])
+        except Exception as e:
+            warnings.append(f"foto {order}: download fallito ({e})")
+            continue
+        img = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            warnings.append(f"foto {order}: decode fallito")
+            continue
+        m = dict(p["metadata"])
+        m["order_index"] = order
+        images.append(img)
+        metadata.append(m)
+
+    if not images:
+        raise HTTPException(400, "Nessuna foto decodificabile")
+
+    try:
+        grouped = compose_column_groups(
+            images,
+            metadata,
+            pitch_reset_deg=req.pitch_reset_deg,
+            lateral_reset_m=req.lateral_reset_m,
+            overlap_ratio=req.overlap_ratio,
+            crop_width_ratio=req.crop_width_ratio,
+            crop_height_ratio=req.crop_height_ratio,
+            min_photos_per_column=req.min_photos_per_column,
+            decompose_roll=req.decompose_roll,
+            post_pitch_roll=req.post_pitch_roll,
+            post_horizontal_roll=req.post_horizontal_roll,
+            scale_alignment=req.scale_alignment,
+            blend_mode=req.blend_mode,
+        )
+    except Exception as e:
+        raise HTTPException(422, f"Composite colonne fallito: {e}")
+
+    out_columns: list[ColumnCompositeModel] = []
+    for col in grouped.columns:
+        ok, buf = cv2.imencode(".jpg", col.composite, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        if not ok:
+            warnings.append(f"colonna {col.column_index}: encode fallito")
+            continue
+        remote = storage_service.out_path(session_id, f"column_{col.column_index:02d}_composite.jpg")
+        storage_service.upload_bytes(remote, buf.tobytes(), "image/jpeg")
+        out_columns.append(ColumnCompositeModel(
+            column_index=col.column_index,
+            order_indices=col.order_indices,
+            composite_url=storage_service.signed_url(remote, expires_in_sec=3600),
+            output_size=col.canvas_size,
+            placements=[StripPlacementModel(**p.__dict__) for p in col.placements],
+            warnings=col.warnings,
+        ))
+
+    existing = sess.get("result") or {}
+    existing["column_composites"] = {
+        "groups": [g.__dict__ for g in grouped.groups],
+        "columns": [
+            {
+                "column_index": c.column_index,
+                "order_indices": c.order_indices,
+                "output_size": c.output_size,
+                "placements": [p.model_dump() for p in c.placements],
+                "warnings": c.warnings,
+            }
+            for c in out_columns
+        ],
+        "warnings": warnings + grouped.warnings,
+    }
+    session_store.update_session(session_id, {"result": existing})
+
+    return ColumnCompositeResult(
+        columns=out_columns,
+        groups=[ColumnGroupModel(**g.__dict__) for g in grouped.groups],
+        warnings=warnings + grouped.warnings,
+    )
+
+
 @router.post("/{session_id}/triangulate", response_model=TriangulateResult)
 def triangulate_corners(session_id: str, req: TriangulateRequest):
     """Riceve 4 angoli, ognuno con >=2 tap su foto diverse, triangola in 3D e
@@ -403,6 +622,79 @@ def compute_wall_plane(session_id: str, req: TriangulateRequest):
     session_store.update_session(session_id, {"result": existing})
 
     return WallPlaneModel(**plane.to_dict())
+
+
+@router.get("/{session_id}/planes", response_model=FacadePlanesResult)
+def detect_session_planes(session_id: str, step: int = 1, max_planes: int = 5):
+    """Rileva AUTOMATICAMENTE i piani di facciata della sessione (sostituisce
+    il flusso manuale 4-tap): triangolazione fotografica dalle pose ARKit +
+    RANSAC multi-piano di piani quasi verticali, con filtro muro-fantasma
+    (riflessi nei vetri) e dedup. Il primo piano per n_inliers è la facciata
+    principale.
+
+    Operazione pesante (SIFT su tutte le foto): minuti, non secondi. `step`
+    usa una foto ogni `step` per un risultato più rapido/grossolano.
+    """
+    from ..services.facade_planes import detect_facade_planes
+
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        raise HTTPException(404, "Sessione non trovata")
+    photos = sorted(session_store.list_photos(session_id), key=lambda p: int(p["order_index"]))
+    if len(photos) < 2:
+        raise HTTPException(400, "Servono almeno 2 foto con posa ARKit")
+
+    warnings: list[str] = []
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        entries: list[dict] = []
+        for p in photos:
+            order = int(p["order_index"])
+            try:
+                raw = storage_service.download_bytes(p["storage_path"])
+            except Exception as e:
+                warnings.append(f"foto {order}: download fallito ({e})")
+                continue
+            local = td_path / Path(p["storage_path"]).name
+            local.write_bytes(raw)
+            entries.append({
+                "storage_path": p["storage_path"],
+                "local_path": str(local),
+                "metadata": p["metadata"],
+            })
+        if len(entries) < 2:
+            raise HTTPException(400, "Nessuna foto scaricabile per la triangolazione")
+        try:
+            res, cloud = detect_facade_planes(td_path, entries, step=step,
+                                              max_planes=max_planes, return_cloud=True)
+        except Exception as e:
+            raise HTTPException(422, f"Rilevamento piani fallito: {e}")
+
+    # Persisti la nuvola su storage: serve a /zone-proposals senza ritriangolare.
+    try:
+        import io
+        buf_npz = io.BytesIO()
+        np.savez_compressed(buf_npz, points=cloud.points, n_obs=cloud.n_obs,
+                            rms=cloud.rms_px, camera_centers=cloud.camera_centers)
+        storage_service.upload_bytes(
+            storage_service.out_path(session_id, "cloud.npz"),
+            buf_npz.getvalue(), "application/octet-stream")
+    except Exception as e:
+        warnings.append(f"salvataggio nuvola fallito ({e}): /zone-proposals non disponibile")
+
+    if not res["planes"]:
+        warnings.append("Nessun piano quasi-verticale trovato: nuvola troppo povera?")
+
+    # Persisti in result.facade_planes per riuso (es. /orthorectify automatico).
+    existing = sess.get("result") or {}
+    existing["facade_planes"] = res
+    session_store.update_session(session_id, {"result": existing})
+
+    return FacadePlanesResult(
+        planes=[FacadePlaneModel(**pl) for pl in res["planes"]],
+        stats=res["stats"],
+        warnings=warnings,
+    )
 
 
 @router.post("/{session_id}/orthorectify", response_model=OrthorectifySessionResult)
@@ -541,6 +833,330 @@ def rectify_panorama(session_id: str, req: RectifyPanoramaRequest):
         output_size=info.output_size,
         homography_3x3=info.homography_3x3,
     )
+
+
+# ─── Mesh 3D (Object Capture dal Mac → backend → iPad) ──────────────────────
+
+_MESH_CONTENT_TYPES = {
+    ".obj": "model/obj",
+    ".mtl": "model/mtl",
+    ".usdz": "model/vnd.usdz+zip",
+    ".ply": "application/octet-stream",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+}
+
+
+def _mesh_remote(session_id: str, name: str) -> str:
+    # Sotto-cartella dedicata, nome sanificato (niente path traversal).
+    return storage_service.out_path(session_id, f"mesh/{Path(name).name}")
+
+
+@router.put("/{session_id}/mesh", response_model=MeshUploadResult)
+async def upload_mesh(session_id: str, files: list[UploadFile] = File(...)):
+    """Riceve la mesh di Object Capture dal Mac (OBJ + eventuali MTL/PNG texture).
+
+    PUT idempotente: sovrascrive i file con lo stesso nome. Il primo .obj
+    caricato diventa la mesh principale servita all'app. Lo script Mac da
+    `backend/photogrammetry/objectcapture/` farà questa POST dopo usdz2obj.
+    """
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        raise HTTPException(404, "Sessione non trovata")
+    if not files:
+        raise HTTPException(400, "Nessun file mesh caricato")
+
+    infos: list[MeshFileInfo] = []
+    manifest: list[dict] = []
+    main_obj: str | None = None
+    for f in files:
+        name = Path(f.filename or "mesh").name
+        ext = Path(name).suffix.lower()
+        if ext not in _MESH_CONTENT_TYPES:
+            raise HTTPException(400, f"Estensione mesh non supportata: '{name}'")
+        data = await f.read()
+        remote = _mesh_remote(session_id, name)
+        storage_service.upload_bytes(remote, data, _MESH_CONTENT_TYPES[ext])
+        manifest.append({"name": name, "size": len(data)})
+        if ext == ".obj" and main_obj is None:
+            main_obj = name
+        infos.append(MeshFileInfo(
+            name=name,
+            url=storage_service.signed_url(remote, expires_in_sec=3600),
+            size_bytes=len(data),
+        ))
+
+    existing = sess.get("result") or {}
+    existing["mesh"] = {"files": manifest, "main_obj": main_obj}
+    session_store.update_session(session_id, {"result": existing})
+
+    return MeshUploadResult(session_id=session_id, files=infos)
+
+
+@router.get("/{session_id}/mesh", response_model=MeshInfoResult)
+def get_mesh(session_id: str):
+    """Restituisce gli URL firmati della mesh per il download su iPad."""
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        raise HTTPException(404, "Sessione non trovata")
+    mesh = (sess.get("result") or {}).get("mesh")
+    if not mesh or not mesh.get("files"):
+        raise HTTPException(404, "Nessuna mesh caricata per questa sessione")
+
+    files: list[MeshFileInfo] = []
+    main: MeshFileInfo | None = None
+    for entry in mesh["files"]:
+        name = entry["name"] if isinstance(entry, dict) else entry
+        size = int(entry.get("size", 0)) if isinstance(entry, dict) else 0
+        remote = _mesh_remote(session_id, name)
+        info = MeshFileInfo(
+            name=name,
+            url=storage_service.signed_url(remote, expires_in_sec=3600),
+            size_bytes=size,
+        )
+        files.append(info)
+        if name == mesh.get("main_obj"):
+            main = info
+    return MeshInfoResult(session_id=session_id, main_obj=main, files=files)
+
+
+# ─── Pre-marcatura automatica: zone fuori-piano proposte ────────────────────
+
+@router.get("/{session_id}/zone-proposals", response_model=MarcaturaZoneDocument)
+def get_zone_proposals(
+    session_id: str,
+    ppm: float = 110.0,
+    soglia_m: float = 0.15,
+    solo_sporgenze: bool = True,
+):
+    """Propone zone "Esclusa" dai punti fuori-piano (balconi, aggetti > soglia).
+
+    Prerequisito: GET /planes già eseguito (salva nuvola `out/cloud.npz` e
+    piani in `result.facade_planes`). Le coordinate pixel sono nello spazio
+    dell'ortofoto derivata dal piano principale (convenzione v22: origine in
+    alto a sinistra, x=(u−u_min)·ppm, y=(v_max−v)·ppm) — l'editor iOS deve
+    verificarle contro le dimensioni dell'immagine che mostra.
+    """
+    import io
+    from ..services.zone_proposals import proponi_zone
+
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        raise HTTPException(404, "Sessione non trovata")
+    res = sess.get("result") or {}
+    fp = res.get("facade_planes") or {}
+    planes = fp.get("planes") or []
+    if not planes:
+        raise HTTPException(409, "Nessun piano rilevato: chiama prima GET /planes")
+    try:
+        raw = storage_service.download_bytes(storage_service.out_path(session_id, "cloud.npz"))
+    except Exception:
+        raise HTTPException(409, "Nuvola non trovata: riesegui GET /planes (la salva su storage)")
+    npz = np.load(io.BytesIO(raw))
+    points = npz["points"]
+
+    try:
+        return proponi_zone(points, planes[0], ppm=ppm, soglia_m=soglia_m,
+                            solo_sporgenze=solo_sporgenze)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+# ─── Geometria 3D semi-automatica (estrusione poligoni utente) ──────────────
+# Filosofia: la nuvola fotografica è rada → l'utente disegna i poligoni delle
+# regioni (torretta, loggia, nicchia) sull'ortofoto; il backend campiona la
+# nuvola dentro ogni poligono e ne ricava la PROFONDITÀ robusta. Geometria
+# 100% fotografica: niente mesh/Object Capture/Umeyama.
+
+def _load_session_cloud(session_id: str) -> np.ndarray:
+    """Carica la nuvola `out/cloud.npz` salvata da GET /planes, o 409."""
+    import io
+    try:
+        raw = storage_service.download_bytes(
+            storage_service.out_path(session_id, "cloud.npz"))
+    except Exception:
+        raise HTTPException(409, "Nuvola non trovata: esegui prima /planes")
+    return np.load(io.BytesIO(raw))["points"]
+
+
+def _main_plane(sess: dict) -> dict:
+    """Piano principale (più popolato) salvato in result.facade_planes, o 409."""
+    res = sess.get("result") or {}
+    planes = (res.get("facade_planes") or {}).get("planes") or []
+    if not planes:
+        raise HTTPException(409, "Nessun piano rilevato: esegui prima /planes")
+    return planes[0]
+
+
+@router.post("/{session_id}/extrude", response_model=ExtrudePolygonResult)
+def extrude_polygon_endpoint(session_id: str, req: ExtrudePolygonRequest):
+    """Profondità robusta della regione racchiusa dal poligono disegnato.
+
+    Campiona la nuvola (out/cloud.npz, salvata da /planes) dentro il poligono
+    e stima la profondità w con mediana + MAD, scartando outlier (riflessi nei
+    vetri). Se i punti sono troppo pochi ritorna needs_user_depth=True.
+    """
+    from ..services.facade_geometry import extrude_polygon
+
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        raise HTTPException(404, "Sessione non trovata")
+    plane = _main_plane(sess)
+    points = _load_session_cloud(session_id)
+    try:
+        out = extrude_polygon(req.poly_px, points, plane, ppm=req.ppm)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return ExtrudePolygonResult(**out)
+
+
+@router.get("/{session_id}/section", response_model=HorizontalSectionResult)
+def horizontal_section_endpoint(
+    session_id: str,
+    quota: float,
+    band: float = 0.5,
+):
+    """Profilo orizzontale (u, w mediano) di una fascia di quota [quota±band/2].
+
+    Strumento di supporto per l'editor: mostra dove il muro avanza (torretta) o
+    rientra (loggia) lungo l'asse orizzontale del piano. `quota` e `band` sono
+    in metri lungo l'asse up del piano, rispetto al centro `c`.
+    """
+    from ..services.facade_geometry import horizontal_section
+
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        raise HTTPException(404, "Sessione non trovata")
+    plane = _main_plane(sess)
+    points = _load_session_cloud(session_id)
+    try:
+        profilo = horizontal_section(points, plane, v_quota=quota, band=band)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return HorizontalSectionResult(
+        v_quota_m=quota, band_m=band,
+        profilo=[SectionBin(**b) for b in profilo],
+    )
+
+
+@router.post("/{session_id}/facade-model", response_model=FacadeModelResult)
+def build_facade_model_endpoint(session_id: str, req: FacadeModelRequest):
+    """Costruisce il modello a scatole (piano + prismi estrusi con spallette).
+
+    Salva out/facade_model.json + out/facade_model.obj su storage e ritorna il
+    JSON editabile + gli URL. Il piano principale viene letto da
+    result.facade_planes (esegui prima /planes).
+    """
+    from ..services.facade_geometry import build_facade_model
+
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        raise HTTPException(404, "Sessione non trovata")
+    plane = _main_plane(sess)
+
+    prisms = [p.model_dump() for p in req.prisms]
+    try:
+        built = build_facade_model(plane, prisms, ppm=req.ppm)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    model_json = built["model_json"]
+    obj_text = built["obj_text"]
+
+    model_url = obj_url = None
+    try:
+        json_remote = storage_service.out_path(session_id, "facade_model.json")
+        storage_service.upload_bytes(
+            json_remote,
+            json.dumps(model_json, ensure_ascii=False, indent=2).encode("utf-8"),
+            "application/json")
+        obj_remote = storage_service.out_path(session_id, "facade_model.obj")
+        storage_service.upload_bytes(obj_remote, obj_text.encode("utf-8"),
+                                     "text/plain")
+        model_url = storage_service.signed_url(json_remote, expires_in_sec=3600)
+        obj_url = storage_service.signed_url(obj_remote, expires_in_sec=3600)
+    except Exception:
+        pass  # in assenza di storage ritorniamo comunque il JSON inline
+
+    existing = sess.get("result") or {}
+    existing["facade_model"] = {
+        "n_vertices": model_json["n_vertices"],
+        "n_faces": model_json["n_faces"],
+        "n_prisms": len(model_json["prisms"]),
+    }
+    session_store.update_session(session_id, {"result": existing})
+
+    return FacadeModelResult(
+        n_vertices=model_json["n_vertices"],
+        n_faces=model_json["n_faces"],
+        n_prisms=len(model_json["prisms"]),
+        model_json=model_json,
+        model_url=model_url,
+        obj_url=obj_url,
+    )
+
+
+# ─── Marcatura zone (upload dall'editor iOS) ────────────────────────────────
+
+@router.put("/{session_id}/zone-markup", response_model=ZoneMarkupResult)
+def upload_zone_markup(session_id: str, doc: MarcaturaZoneDocument):
+    """Riceve il documento di marcatura zone dall'editor iOS, ricalcola le
+    metriche server-side (punti_px + ppm sono la fonte di verità), salva il
+    JSON su storage e i totali in `result.zone_markup`.
+
+    PUT idempotente: ogni upload sostituisce la marcatura precedente della
+    sessione (l'editor salva l'intero documento, non i delta).
+    """
+    from ..services import zone_markup
+
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        raise HTTPException(404, "Sessione non trovata")
+
+    errori = zone_markup.valida_documento(doc)
+    if errori:
+        raise HTTPException(422, "Marcatura non valida: " + "; ".join(errori))
+
+    warnings = zone_markup.ricalcola_metriche(doc)
+    aree, lunghezze = zone_markup.totali_per_tipo(doc.zone)
+
+    payload = json.dumps(doc.model_dump(), ensure_ascii=False, indent=2).encode("utf-8")
+    remote = storage_service.out_path(session_id, "zone_markup.json")
+    storage_service.upload_bytes(remote, payload, "application/json")
+
+    existing = sess.get("result") or {}
+    existing["zone_markup"] = {
+        "zone_count": len(doc.zone),
+        "ppm": doc.ppm,
+        "area_m2_per_tipo": aree,
+        "lunghezza_m_per_tipo": lunghezze,
+        "storage_path": remote,
+    }
+    session_store.update_session(session_id, {"result": existing})
+
+    return ZoneMarkupResult(
+        session_id=session_id,
+        zone_count=len(doc.zone),
+        area_m2_per_tipo=aree,
+        lunghezza_m_per_tipo=lunghezze,
+        markup_url=storage_service.signed_url(remote, expires_in_sec=3600),
+        warnings=warnings,
+    )
+
+
+@router.get("/{session_id}/zone-markup", response_model=MarcaturaZoneDocument)
+def get_zone_markup(session_id: str):
+    """Restituisce l'ultimo documento di marcatura salvato per la sessione."""
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        raise HTTPException(404, "Sessione non trovata")
+    remote = storage_service.out_path(session_id, "zone_markup.json")
+    try:
+        raw = storage_service.download_bytes(remote)
+    except Exception:
+        raise HTTPException(404, "Nessuna marcatura salvata per questa sessione")
+    return MarcaturaZoneDocument.model_validate_json(raw)
 
 
 # ─── Scala metrica (2 tap + distanza nota sul rectified_facade) ─────────────
