@@ -12,13 +12,22 @@ Foto + pose ARKit: `backend/data/fixtures/6cdcb8ff/` (`photos/`, `photos.json`).
 
 ## Stadi
 
-### 0. (RIMANDATO) Calcolo Object Capture → `model.usdz`
+### 0. Calcolo Object Capture → `model.usdz` ✅ (bridge remoto)
 Gira su **Mac Apple Silicon** (`PhotogrammetrySession`, dettaglio `.raw` per geometria
-densa). Tool e runbook: `HelloPhotogrammetry.swift`, `README.md`. Il "ponte" col Mac
-che esegue il calcolo è **fuori scope per ora**. Input alla pipeline = l'`usdz`.
+densa). Tool: `HelloPhotogrammetry.swift`; runbook: `README.md`. Il "ponte" col Mac
+remoto è automatizzato da **`run_oc_remote.sh`** (upload foto → compila+esegue OC →
+scarica `<sessione>/oc/model_<detail>.usdz`):
+```bash
+./run_oc_remote.sh --session ~/Documents/acrobatica_mesh/sess_XXXX --host admin@<IP> --detail raw
+```
 
 Promemoria detail level: `.full` NON aumenta i triangoli (dettaglio in displacement
 map); per geometria densa serve **`.raw`** (~793k tri, 2 pagine texture 8K).
+
+> **Stadi 1+2 consolidati** in `usdz_to_assets.py` (un comando → OBJ+UV+texture, GLB,
+> manifest): `python usdz_to_assets.py --session <dir> --detail raw`. Richiede il venv
+> `.venv` (usd-core/numpy/pillow). NB: l'usdz OC **non contiene camere** → le pose sono
+> quelle **ARKit** (da `photos.json`), allineate alla mesh nello stadio 4.
 
 ### 1. `usdz` → `GLB` (visualizzazione web texturizzata) ✅
 ```bash

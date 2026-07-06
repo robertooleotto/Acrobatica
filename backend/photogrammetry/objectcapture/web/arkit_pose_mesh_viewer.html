@@ -1,0 +1,698 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ARKit pose + mesh viewer</title>
+<style>
+  html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    background: #17191c;
+    color: #e8eaed;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  #panel {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    z-index: 10;
+    width: 286px;
+    max-height: calc(100vh - 24px);
+    overflow: auto;
+    box-sizing: border-box;
+    padding: 12px;
+    border: 1px solid #3a3f45;
+    border-radius: 8px;
+    background: rgba(24, 27, 31, 0.92);
+    box-shadow: 0 12px 38px rgba(0, 0, 0, 0.34);
+  }
+  h1 {
+    margin: 0 0 8px;
+    font-size: 15px;
+    font-weight: 650;
+  }
+  label {
+    display: block;
+    margin-top: 9px;
+    color: #bdc1c6;
+    font-size: 12px;
+  }
+  select, button, input[type="range"] {
+    width: 100%;
+    box-sizing: border-box;
+  }
+  select, button {
+    margin-top: 4px;
+    min-height: 32px;
+    border: 1px solid #4a5058;
+    border-radius: 6px;
+    background: #252930;
+    color: #f1f3f4;
+    font-size: 13px;
+  }
+  button {
+    cursor: pointer;
+  }
+  button.on {
+    border-color: #4f8cff;
+    background: #2d5fb8;
+  }
+  .row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .note, #stats {
+    margin-top: 10px;
+    color: #bdc1c6;
+    font-size: 12px;
+    line-height: 1.35;
+  }
+  #stats {
+    color: #d6d9de;
+  }
+  #error {
+    color: #ffb4a9;
+    white-space: pre-wrap;
+  }
+</style>
+<div id="panel">
+  <h1>ARKit pose + mesh</h1>
+  <label for="fixture">Sessione</label>
+  <select id="fixture">
+    <option value="6cdcb8ff">6cdcb8ff</option>
+    <option value="1553ab3c">1553ab3c</option>
+    <option value="53f1b49d">53f1b49d</option>
+    <option value="a8b096e3">a8b096e3</option>
+    <option value="90730b38">90730b38</option>
+    <option value="8878cfb9">8878cfb9</option>
+    <option value="f604436f">f604436f</option>
+  </select>
+  <label for="poseSource">Pose</label>
+  <select id="poseSource">
+    <option value="oc">Object Capture native</option>
+    <option value="arkit">ARKit raw</option>
+  </select>
+  <label for="stride">Mostra una posa ogni <span id="strideValue">10</span></label>
+  <input id="stride" type="range" min="1" max="40" value="10">
+  <label for="photo">Foto selezionata</label>
+  <select id="photo"></select>
+  <div class="row">
+    <button id="reload">Ricarica</button>
+    <button id="fit">Inquadra</button>
+  </div>
+  <div class="row">
+    <button id="planes">Piani foto</button>
+    <button id="wire" class="on">Wire mesh</button>
+  </div>
+  <button id="align" class="on">Allinea vista</button>
+  <div id="facadeDistanceControls">
+    <label for="facadeDistance">Distanza facciata stimata <span id="facadeDistanceValue">6.0</span> m</label>
+    <input id="facadeDistance" type="range" min="2" max="20" step="0.5" value="6">
+  </div>
+  <label for="shiftY">Offset Y proiezione <span id="shiftYValue">79</span> px</label>
+  <input id="shiftY" type="range" min="-160" max="160" step="1" value="79">
+  <label for="focalScale">Scala focale <span id="focalScaleValue">1.018</span></label>
+  <input id="focalScale" type="range" min="0.95" max="1.08" step="0.001" value="1.018">
+  <button id="project">Proietta foto selezionata sulla mesh</button>
+  <button id="cameraView">Vista dalla camera selezionata</button>
+  <div id="stats"></div>
+  <div class="note">
+    Per 6cdcb8ff, model_nobbox.obj va letto con le pose Object Capture native. ARKit raw e' solo confronto: non condivide il frame della mesh.
+  </div>
+  <div id="error"></div>
+</div>
+<script type="importmap">
+  {"imports":{"three":"https://unpkg.com/three@0.165.0/build/three.module.js","three/addons/":"https://unpkg.com/three@0.165.0/examples/jsm/"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+
+const root = new URL('../../../..', location.href).pathname.replace(/\/$/, '');
+const meshPath = `${root}/ios/Acrobatica/Resources/facciata_demo.obj`;
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x17191c);
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.01, 200);
+camera.position.set(0, 1.6, 5);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x34383f, 2.1));
+const grid = new THREE.GridHelper(8, 16, 0x4b5563, 0x2f343b);
+scene.add(grid);
+const axes = new THREE.AxesHelper(0.7);
+scene.add(axes);
+
+const meshMat = new THREE.MeshStandardMaterial({
+  color: 0x9aa4ad,
+  roughness: 0.7,
+  metalness: 0.0,
+  side: THREE.DoubleSide,
+  transparent: true,
+  opacity: 0.72,
+});
+const wireMat = new THREE.MeshBasicMaterial({
+  color: 0x65d18b,
+  wireframe: true,
+  transparent: true,
+  opacity: 0.42,
+});
+let meshGroup;
+let meshObjects = [];
+let meshLocalBox = new THREE.Box3();
+let sessionGeometryGroup = new THREE.Group();
+let sessionGeometryFixture = null;
+let poseGroup = new THREE.Group();
+let planeGroup = new THREE.Group();
+scene.add(sessionGeometryGroup, poseGroup, planeGroup);
+let photos = [];
+let arkitPhotos = [];
+let selectedPhoto = null;
+let projectionTexture = null;
+let alignView = true;
+let projectionCalibration = { shiftX: 0, shiftY: 79, focalScale: 1.018 };
+let poseDisplay = {
+  center: new THREE.Vector3(),
+  scale: 1,
+  meshCenter: new THREE.Vector3(),
+  meshScale: 1,
+  meshRotation: new THREE.Quaternion(),
+  meshPlaneCenter: new THREE.Vector3(),
+};
+
+const el = {
+  fixture: document.getElementById('fixture'),
+  poseSource: document.getElementById('poseSource'),
+  stride: document.getElementById('stride'),
+  strideValue: document.getElementById('strideValue'),
+  facadeDistance: document.getElementById('facadeDistance'),
+  facadeDistanceValue: document.getElementById('facadeDistanceValue'),
+  facadeDistanceControls: document.getElementById('facadeDistanceControls'),
+  shiftY: document.getElementById('shiftY'),
+  shiftYValue: document.getElementById('shiftYValue'),
+  focalScale: document.getElementById('focalScale'),
+  focalScaleValue: document.getElementById('focalScaleValue'),
+  photo: document.getElementById('photo'),
+  reload: document.getElementById('reload'),
+  fit: document.getElementById('fit'),
+  planes: document.getElementById('planes'),
+  wire: document.getElementById('wire'),
+  align: document.getElementById('align'),
+  project: document.getElementById('project'),
+  cameraView: document.getElementById('cameraView'),
+  stats: document.getElementById('stats'),
+  error: document.getElementById('error'),
+};
+
+function poseMatrix(item) {
+  if (item.poseMatrix) return item.poseMatrix.clone();
+  return new THREE.Matrix4().fromArray(item.metadata.camera_transform);
+}
+
+function cameraCenter(item) {
+  const m = poseMatrix(item);
+  return new THREE.Vector3().setFromMatrixPosition(m);
+}
+
+function cameraForward(item) {
+  const m = poseMatrix(item);
+  const forward = new THREE.Vector3(0, 0, -1).transformDirection(m);
+  return forward.normalize();
+}
+
+function cameraUp(item) {
+  return new THREE.Vector3(0, 1, 0).transformDirection(poseMatrix(item)).normalize();
+}
+
+function displayPoseMatrix(item) {
+  const raw = poseMatrix(item);
+  if (!alignView) return raw;
+  computeDisplayTransforms();
+  const s = poseDisplay.scale;
+  const display = new THREE.Matrix4().makeScale(s, s, s);
+  display.setPosition(poseDisplay.center.clone().multiplyScalar(-s));
+  return display.multiply(raw);
+}
+
+function imageInfo(item) {
+  if (item.metadata?.camera_intrinsics) {
+    const [fx, , , , fy, , cx, cy] = item.metadata.camera_intrinsics;
+    return { fx, fy, cx, cy, w: item.metadata.image_width, h: item.metadata.image_height };
+  }
+  const [fx, fy, cx, cy] = item.intrinsics_fx_fy_cx_cy;
+  return { fx, fy, cx, cy, w: item.image_width, h: item.image_height };
+}
+
+function matrixFromOcPose(pose) {
+  const [qw, qx, qy, qz] = pose.rotation_wxyz;
+  const q = new THREE.Quaternion(qx, qy, qz, qw);
+  const t = new THREE.Vector3(...pose.translation);
+  return new THREE.Matrix4().compose(t, q, new THREE.Vector3(1, 1, 1));
+}
+
+function meanVector(points) {
+  const out = new THREE.Vector3();
+  for (const point of points) out.add(point);
+  return points.length ? out.multiplyScalar(1 / points.length) : out;
+}
+
+function principalHorizontalDirection(points) {
+  const c = meanVector(points);
+  let xx = 0, xz = 0, zz = 0;
+  for (const p of points) {
+    const x = p.x - c.x;
+    const z = p.z - c.z;
+    xx += x * x;
+    xz += x * z;
+    zz += z * z;
+  }
+  const theta = 0.5 * Math.atan2(2 * xz, xx - zz);
+  const dir = new THREE.Vector3(Math.cos(theta), 0, Math.sin(theta));
+  return dir.lengthSq() > 1e-8 ? dir.normalize() : new THREE.Vector3(1, 0, 0);
+}
+
+function estimateFacadeFrame() {
+  const centers = photos.map(cameraCenter);
+  const center = meanVector(centers);
+  const normal = new THREE.Vector3();
+  for (const item of photos) normal.add(cameraForward(item));
+  normal.y = 0;
+  if (normal.lengthSq() < 1e-8) normal.set(0, 0, -1);
+  normal.normalize();
+
+  let tangent = principalHorizontalDirection(centers);
+  tangent.addScaledVector(normal, -tangent.dot(normal));
+  if (tangent.lengthSq() < 1e-8) tangent.crossVectors(new THREE.Vector3(0, 1, 0), normal);
+  tangent.normalize();
+  const up = new THREE.Vector3(0, 1, 0);
+  const correctedNormal = new THREE.Vector3().crossVectors(tangent, up).normalize();
+  if (correctedNormal.dot(normal) < 0) correctedNormal.multiplyScalar(-1);
+
+  const rotationMatrix = new THREE.Matrix4().makeBasis(tangent, up, correctedNormal);
+  const distance = Number(el.facadeDistance.value);
+  const meshHeight = 8;
+  const planeCenter = center.clone().addScaledVector(correctedNormal, distance);
+  planeCenter.y = center.y + meshHeight * 0.42;
+  return { planeCenter, rotation: new THREE.Quaternion().setFromRotationMatrix(rotationMatrix), meshHeight };
+}
+
+function clearGroup(group) {
+  for (const child of [...group.children]) {
+    child.traverse?.((obj) => {
+      obj.geometry?.dispose?.();
+      if (Array.isArray(obj.material)) obj.material.forEach((m) => m.dispose?.());
+      else obj.material?.dispose?.();
+    });
+    group.remove(child);
+  }
+}
+
+function makeFrustum(item, index) {
+  const { fx, fy, cx, cy, w, h } = imageInfo(item);
+  const depth = 0.22;
+  const corners = [
+    new THREE.Vector3((0 - cx) / fx * depth, (0 - cy) / fy * depth, -depth),
+    new THREE.Vector3((w - cx) / fx * depth, (0 - cy) / fy * depth, -depth),
+    new THREE.Vector3((w - cx) / fx * depth, (h - cy) / fy * depth, -depth),
+    new THREE.Vector3((0 - cx) / fx * depth, (h - cy) / fy * depth, -depth),
+  ];
+  const pts = [new THREE.Vector3(), ...corners, corners[0], new THREE.Vector3(), corners[1], new THREE.Vector3(), corners[2], new THREE.Vector3(), corners[3]];
+  const geo = new THREE.BufferGeometry().setFromPoints(pts);
+  const color = item === selectedPhoto ? 0xffd166 : new THREE.Color().setHSL((index * 0.071) % 1, 0.78, 0.58);
+  const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color }));
+  line.applyMatrix4(poseMatrix(item));
+  return line;
+}
+
+async function makeImagePlane(item) {
+  const { fx, fy, cx, cy, w, h } = imageInfo(item);
+  const depth = 0.35;
+  const width = w / fx * depth;
+  const height = h / fy * depth;
+  const url = `${root}/backend/data/fixtures/${el.fixture.value}/${item.storage_path}`;
+  const tex = await new THREE.TextureLoader().loadAsync(url);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const mat = new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide, transparent: true, opacity: 0.72 });
+  const plane = new THREE.Mesh(new THREE.PlaneGeometry(width, height), mat);
+  plane.position.set(((w / 2) - cx) / fx * depth, -(((h / 2) - cy) / fy * depth), -depth);
+  plane.applyMatrix4(poseMatrix(item));
+  return plane;
+}
+
+function setMeshMaterial(material) {
+  for (const obj of meshObjects) obj.material = material;
+  sessionGeometryGroup.traverse((obj) => {
+    if (obj.isMesh) obj.material = material;
+  });
+}
+
+function clearSessionGeometry() {
+  for (const child of [...sessionGeometryGroup.children]) {
+    child.geometry?.dispose?.();
+    if (Array.isArray(child.material)) child.material.forEach((m) => m.dispose?.());
+    else child.material?.dispose?.();
+    sessionGeometryGroup.remove(child);
+  }
+  sessionGeometryFixture = null;
+}
+
+async function loadSessionGeometry(fixture) {
+  if (fixture !== '6cdcb8ff') {
+    clearSessionGeometry();
+    if (meshGroup) meshGroup.visible = true;
+    return false;
+  }
+  if (sessionGeometryFixture === fixture && sessionGeometryGroup.children.length > 0) {
+    if (meshGroup) meshGroup.visible = false;
+    return true;
+  }
+  clearSessionGeometry();
+  const group = await new OBJLoader().loadAsync(`${root}/backend/data/fixtures/6cdcb8ff/out/oc_mesh/model_nobbox.obj`);
+  group.traverse((obj) => {
+    if (!obj.isMesh) return;
+    obj.geometry.computeVertexNormals();
+    obj.material = el.wire.classList.contains('on') ? wireMat : meshMat;
+  });
+  sessionGeometryGroup.add(group);
+  sessionGeometryFixture = fixture;
+  if (meshGroup) meshGroup.visible = false;
+  return true;
+}
+
+async function loadMesh() {
+  if (meshGroup) return;
+  meshGroup = await new OBJLoader().loadAsync(meshPath);
+  meshObjects = [];
+  meshGroup.traverse((obj) => {
+    if (!obj.isMesh) return;
+    obj.geometry.computeVertexNormals();
+    obj.material = wireMat;
+    meshObjects.push(obj);
+  });
+  scene.add(meshGroup);
+  meshGroup.updateMatrixWorld(true);
+  meshLocalBox = new THREE.Box3().setFromObject(meshGroup);
+}
+
+function updateDisplayTransforms() {
+  if (!meshGroup) return;
+  if (!alignView) {
+    poseGroup.position.set(0, 0, 0);
+    planeGroup.position.set(0, 0, 0);
+    sessionGeometryGroup.position.set(0, 0, 0);
+    poseGroup.scale.setScalar(1);
+    planeGroup.scale.setScalar(1);
+    sessionGeometryGroup.scale.setScalar(1);
+    meshGroup.position.set(0, 0, 0);
+    meshGroup.quaternion.identity();
+    meshGroup.scale.setScalar(1);
+    return;
+  }
+  poseGroup.position.copy(poseDisplay.center).multiplyScalar(-poseDisplay.scale);
+  planeGroup.position.copy(poseGroup.position);
+  sessionGeometryGroup.position.copy(poseGroup.position);
+  poseGroup.scale.setScalar(poseDisplay.scale);
+  planeGroup.scale.setScalar(poseDisplay.scale);
+  sessionGeometryGroup.scale.setScalar(poseDisplay.scale);
+
+  if (!meshGroup.visible) return;
+
+  const displayPlaneCenter = poseDisplay.meshPlaneCenter.clone()
+    .sub(poseDisplay.center)
+    .multiplyScalar(poseDisplay.scale);
+  const displayMeshScale = poseDisplay.meshScale * poseDisplay.scale;
+  const localCenterOffset = poseDisplay.meshCenter.clone()
+    .multiplyScalar(displayMeshScale)
+    .applyQuaternion(poseDisplay.meshRotation);
+  meshGroup.quaternion.copy(poseDisplay.meshRotation);
+  meshGroup.scale.setScalar(displayMeshScale);
+  meshGroup.position.copy(displayPlaneCenter).sub(localCenterOffset);
+}
+
+function computeDisplayTransforms() {
+  const poseBox = new THREE.Box3();
+  for (const item of photos) poseBox.expandByPoint(cameraCenter(item));
+  const meshBox = meshLocalBox.clone();
+  if (poseBox.isEmpty() || meshBox.isEmpty()) return;
+
+  const poseSize = poseBox.getSize(new THREE.Vector3());
+  poseDisplay.center = poseBox.getCenter(new THREE.Vector3());
+
+  const poseHorizontal = Math.max(poseSize.x, poseSize.z, 1);
+  poseDisplay.scale = 8 / poseHorizontal;
+  if (sessionGeometryGroup.children.length > 0) {
+    updateDisplayTransforms();
+    return;
+  }
+  const meshSize = meshBox.getSize(new THREE.Vector3());
+  poseDisplay.meshCenter = meshBox.getCenter(new THREE.Vector3());
+  const facadeFrame = estimateFacadeFrame();
+  poseDisplay.meshScale = facadeFrame.meshHeight / Math.max(meshSize.y, 0.001);
+  poseDisplay.meshRotation.copy(facadeFrame.rotation);
+  poseDisplay.meshPlaneCenter.copy(facadeFrame.planeCenter);
+  updateDisplayTransforms();
+}
+
+function fitScene() {
+  updateDisplayTransforms();
+  const box = new THREE.Box3();
+  if (meshGroup?.visible) box.expandByObject(meshGroup);
+  if (sessionGeometryGroup.children.length) box.expandByObject(sessionGeometryGroup);
+  if (poseGroup.children.length) box.expandByObject(poseGroup);
+  if (box.isEmpty()) return;
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  const radius = Math.max(size.x, size.y, size.z, 1) * 0.58;
+  camera.near = Math.max(radius / 1000, 0.001);
+  camera.far = radius * 80;
+  camera.position.copy(center).add(new THREE.Vector3(radius * 1.7, radius * 1.0, radius * 2.0));
+  controls.target.copy(center);
+  camera.updateProjectionMatrix();
+  controls.update();
+}
+
+function rebuildPoseLines() {
+  clearGroup(poseGroup);
+  const stride = Number(el.stride.value);
+  photos.forEach((item, index) => {
+    if (index % stride === 0 || item === selectedPhoto) poseGroup.add(makeFrustum(item, index));
+  });
+}
+
+async function rebuildPlanes() {
+  clearGroup(planeGroup);
+  if (!el.planes.classList.contains('on')) return;
+  const stride = Math.max(Number(el.stride.value), 8);
+  const visible = photos.filter((item, index) => index % stride === 0 || item === selectedPhoto).slice(0, 40);
+  for (const item of visible) planeGroup.add(await makeImagePlane(item));
+}
+
+async function loadFixture() {
+  el.error.textContent = '';
+  clearGroup(poseGroup);
+  clearGroup(planeGroup);
+  setMeshMaterial(el.wire.classList.contains('on') ? wireMat : meshMat);
+  const hasSessionGeometry = await loadSessionGeometry(el.fixture.value);
+  const response = await fetch(`${root}/backend/data/fixtures/${el.fixture.value}/photos.json`);
+  arkitPhotos = (await response.json()).filter((p) => p.metadata?.camera_transform && p.metadata?.camera_intrinsics);
+  arkitPhotos.sort((a, b) => a.order_index - b.order_index);
+  const canUseOc = el.fixture.value === '6cdcb8ff';
+  el.poseSource.disabled = !canUseOc;
+  if (!canUseOc) el.poseSource.value = 'arkit';
+  el.facadeDistanceControls.style.display = canUseOc && el.poseSource.value === 'oc' ? 'none' : 'block';
+  if (canUseOc && el.poseSource.value === 'oc') {
+    const ocResponse = await fetch(`${root}/backend/data/fixtures/6cdcb8ff/out/oc_mesh/oc_poses_nobbox.json`);
+    const oc = await ocResponse.json();
+    photos = Object.keys(oc).sort((a, b) => Number(a) - Number(b)).map((key) => {
+      const p = oc[key];
+      const orderIndex = Number(key);
+      const arkit = arkitPhotos.find((photo) => photo.order_index === orderIndex);
+      return {
+        order_index: orderIndex,
+        storage_path: `photos/${String(orderIndex).padStart(4, '0')}.jpg`,
+        image_width: arkit?.metadata?.image_width || 1920,
+        image_height: arkit?.metadata?.image_height || 1440,
+        intrinsics_fx_fy_cx_cy: p.intrinsics_fx_fy_cx_cy,
+        poseMatrix: matrixFromOcPose(p),
+      };
+    });
+  } else {
+    photos = arkitPhotos;
+  }
+  projectionCalibration = { shiftX: 0, shiftY: 0, focalScale: 1 };
+  if (canUseOc && el.poseSource.value === 'oc') {
+    try {
+      const calibResponse = await fetch(`${root}/backend/data/fixtures/6cdcb8ff/out/oc_mesh/projection_calibration.json`);
+      const calib = await calibResponse.json();
+      projectionCalibration = calib['0090'] || projectionCalibration;
+    } catch (_) {
+      projectionCalibration = { shiftX: 0, shiftY: 79, focalScale: 1.018 };
+    }
+  }
+  el.shiftY.value = String(projectionCalibration.shiftY || 0);
+  el.shiftYValue.textContent = String(projectionCalibration.shiftY || 0);
+  el.focalScale.value = String(projectionCalibration.focalScale || 1);
+  el.focalScaleValue.textContent = Number(projectionCalibration.focalScale || 1).toFixed(3);
+  selectedPhoto = photos[Math.floor(photos.length / 2)] || photos[0] || null;
+  el.photo.innerHTML = '';
+  for (const p of photos) {
+    const info = imageInfo(p);
+    const option = document.createElement('option');
+    option.value = String(p.order_index);
+    option.textContent = `${String(p.order_index).padStart(4, '0')}  ${info.w}x${info.h}`;
+    el.photo.appendChild(option);
+  }
+  if (selectedPhoto) el.photo.value = String(selectedPhoto.order_index);
+  const first = imageInfo(photos[0] || {});
+  const poseBox = new THREE.Box3();
+  for (const item of photos) poseBox.expandByPoint(cameraCenter(item));
+  const poseSize = poseBox.getSize(new THREE.Vector3());
+  const geometryName = hasSessionGeometry ? 'model_nobbox.obj' : 'facciata_demo.obj';
+  const poseName = el.poseSource.value === 'oc' && canUseOc ? 'Object Capture native' : 'ARKit raw';
+  el.stats.textContent = `${photos.length} pose ${poseName}, foto ${first?.w || '-'}x${first?.h || '-'}. Traiettoria: ${poseSize.x.toFixed(1)} x ${poseSize.y.toFixed(1)} x ${poseSize.z.toFixed(1)}. Geometria: ${geometryName}. Calibrazione: shiftY ${projectionCalibration.shiftY || 0}px, focale x${Number(projectionCalibration.focalScale || 1).toFixed(3)}.`;
+  rebuildPoseLines();
+  await rebuildPlanes();
+  computeDisplayTransforms();
+  fitScene();
+}
+
+async function projectSelectedPhoto() {
+  if (!selectedPhoto) return;
+  if (projectionTexture) projectionTexture.dispose();
+  const url = `${root}/backend/data/fixtures/${el.fixture.value}/${selectedPhoto.storage_path}`;
+  projectionTexture = await new THREE.TextureLoader().loadAsync(url);
+  projectionTexture.colorSpace = THREE.SRGBColorSpace;
+  projectionTexture.flipY = true;
+  const m = displayPoseMatrix(selectedPhoto);
+  const inv = m.clone().invert();
+  const { fx, fy, cx, cy, w, h } = imageInfo(selectedPhoto);
+  const shiftY = Number(el.shiftY.value);
+  const focalScale = Number(el.focalScale.value);
+  const mat = new THREE.ShaderMaterial({
+    side: THREE.DoubleSide,
+    uniforms: {
+      photo: { value: projectionTexture },
+      invCam: { value: inv },
+      intr: { value: new THREE.Vector4(fx, fy, cx, cy) },
+      imageSize: { value: new THREE.Vector2(w, h) },
+      shift: { value: new THREE.Vector2(projectionCalibration.shiftX || 0, shiftY) },
+      focalScale: { value: focalScale },
+    },
+    vertexShader: `
+      varying vec3 vWorld;
+      void main() {
+        vec4 world = modelMatrix * vec4(position, 1.0);
+        vWorld = world.xyz;
+        gl_Position = projectionMatrix * viewMatrix * world;
+      }
+    `,
+    fragmentShader: `
+      precision highp float;
+      uniform sampler2D photo;
+      uniform mat4 invCam;
+      uniform vec4 intr;
+      uniform vec2 imageSize;
+      uniform vec2 shift;
+      uniform float focalScale;
+      varying vec3 vWorld;
+      void main() {
+        vec4 pc4 = invCam * vec4(vWorld, 1.0);
+        vec3 pc = pc4.xyz / pc4.w;
+        float z = -pc.z;
+        if (z <= 0.01) { gl_FragColor = vec4(0.18, 0.20, 0.23, 1.0); return; }
+        float u = (intr.x * focalScale) * pc.x / z + intr.z + shift.x;
+        float v = (intr.y * focalScale) * pc.y / z + intr.w + shift.y;
+        vec2 uv = vec2(u / imageSize.x, v / imageSize.y);
+        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+          gl_FragColor = vec4(0.18, 0.20, 0.23, 1.0);
+          return;
+        }
+        gl_FragColor = texture2D(photo, uv);
+      }
+    `,
+  });
+  setMeshMaterial(mat);
+  el.wire.classList.remove('on');
+}
+
+function viewFromSelectedCamera() {
+  if (!selectedPhoto) return;
+  const { fy, h, w } = imageInfo(selectedPhoto);
+  let center = cameraCenter(selectedPhoto);
+  const forward = cameraForward(selectedPhoto);
+  const up = cameraUp(selectedPhoto);
+  if (alignView) {
+    computeDisplayTransforms();
+    center = center.sub(poseDisplay.center).multiplyScalar(poseDisplay.scale);
+  }
+  camera.position.copy(center);
+  camera.up.copy(up);
+  camera.fov = THREE.MathUtils.radToDeg(2 * Math.atan(h / (2 * fy)));
+  camera.aspect = w / h;
+  camera.near = 0.001;
+  camera.far = 100;
+  camera.updateProjectionMatrix();
+  controls.target.copy(center).add(forward.multiplyScalar(2));
+  controls.update();
+}
+
+el.reload.onclick = () => loadFixture().catch((err) => el.error.textContent = String(err.stack || err));
+el.poseSource.onchange = () => loadFixture().catch((err) => el.error.textContent = String(err.stack || err));
+el.fit.onclick = fitScene;
+el.planes.onclick = async () => {
+  el.planes.classList.toggle('on');
+  await rebuildPlanes().catch((err) => el.error.textContent = String(err.stack || err));
+};
+el.wire.onclick = () => {
+  el.wire.classList.toggle('on');
+  setMeshMaterial(el.wire.classList.contains('on') ? wireMat : meshMat);
+};
+el.align.onclick = () => {
+  alignView = !alignView;
+  el.align.classList.toggle('on', alignView);
+  computeDisplayTransforms();
+  fitScene();
+};
+el.project.onclick = () => projectSelectedPhoto().catch((err) => el.error.textContent = String(err.stack || err));
+el.cameraView.onclick = viewFromSelectedCamera;
+el.stride.oninput = async () => {
+  el.strideValue.textContent = el.stride.value;
+  rebuildPoseLines();
+  await rebuildPlanes().catch((err) => el.error.textContent = String(err.stack || err));
+};
+el.facadeDistance.oninput = () => {
+  el.facadeDistanceValue.textContent = Number(el.facadeDistance.value).toFixed(1);
+  computeDisplayTransforms();
+};
+el.shiftY.oninput = () => {
+  el.shiftYValue.textContent = el.shiftY.value;
+};
+el.focalScale.oninput = () => {
+  el.focalScaleValue.textContent = Number(el.focalScale.value).toFixed(3);
+};
+el.photo.onchange = async () => {
+  selectedPhoto = photos.find((p) => String(p.order_index) === el.photo.value) || photos[0] || null;
+  rebuildPoseLines();
+  await rebuildPlanes().catch((err) => el.error.textContent = String(err.stack || err));
+};
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+await loadMesh();
+await loadFixture();
+renderer.setAnimationLoop(() => {
+  controls.update();
+  renderer.render(scene, camera);
+});
+</script>

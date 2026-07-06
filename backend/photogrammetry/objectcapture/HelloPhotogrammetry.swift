@@ -1,31 +1,35 @@
 // HelloPhotogrammetry.swift
 //
-// Object Capture CLI per Acrobatica — genera una mesh ad alta densita' dalle
-// foto della facciata su un Mac Apple Silicon potente (Mac Studio / mac2-m2pro).
+// Object Capture CLI per Acrobatica — genera mesh densa + POSE camera dalle foto
+// della facciata, in UNA sola PhotogrammetrySession (mesh e pose nello stesso
+// frame → proiezione 0px, niente Umeyama). Gira su Mac Apple Silicon (o su questo
+// Intel con Radeon: ~10 min per ~90 foto a `.full`).
 //
-// Compilazione (sul Mac affittato, Apple Silicon, macOS 13+):
+// Compilazione:
 //     swiftc -O HelloPhotogrammetry.swift -o hpg
 //
 // Uso:
 //     ./hpg <cartella_foto> <output.usdz> [detail] [sampleOrdering] [featureSensitivity]
-//   detail            = preview | reduced | medium | full | raw   (default: raw)
-//   sampleOrdering    = unordered | sequential                    (default: unordered)
+//   detail            = preview | reduced | medium | full | raw   (default: full)
+//   sampleOrdering    = unordered | sequential                    (default: sequential)
 //   featureSensitivity= normal | high                             (default: high)
 //
-// Esempio (mesh massima densita'):
-//     ./hpg ./photos ./model_raw.usdz raw unordered high
+// Output: <output.usdz>  +  <output_dir>/oc_poses.json
+//   oc_poses.json: { "<sampleIndex>": { rotation_wxyz:[w,x,y,z] (camera→world),
+//                                        translation:[x,y,z] (centro camera C),
+//                                        image:"NNNN.jpg" }, ... }
+//   Le intrinseche (fx,fy,cx,cy) NON stanno nella Pose OC: si uniscono a valle
+//   dalle pose ARKit della cattura (photos.json / camera_intrinsics).
 //
-// Note:
-// - .raw produce la geometria piu' densa e meno levigata (ideale per misurare
-//   rilievi: cornici, balcone). .full e' levigata ma comunque molto piu' densa
-//   dei 157k tri attuali.
-// - Richiede Apple Silicon. Su Intel l'API esiste ma e' limitata/instabile.
+// Config chiave (validata: proiezione 0px): ignoreBoundingBox=true,
+// isObjectMaskingEnabled=false, `.modelFile + .poses` nella stessa sessione.
 
 import Foundation
 import RealityKit
+import simd
 import os
 
-@available(macOS 13.0, *)
+@available(macOS 14.0, *)
 struct Runner {
     let inputFolder: URL
     let outputFile: URL
@@ -33,23 +37,31 @@ struct Runner {
     let sampleOrdering: PhotogrammetrySession.Configuration.SampleOrdering
     let featureSensitivity: PhotogrammetrySession.Configuration.FeatureSensitivity
 
+    var posesFile: URL {
+        outputFile.deletingLastPathComponent().appendingPathComponent("oc_poses.json")
+    }
+
     func run() async throws {
         var configuration = PhotogrammetrySession.Configuration()
         configuration.sampleOrdering = sampleOrdering
         configuration.featureSensitivity = featureSensitivity
+        configuration.ignoreBoundingBox = true        // è una SCENA, non un oggetto
+        configuration.isObjectMaskingEnabled = false
 
-        print("== Object Capture ==")
+        print("== Object Capture (mesh + pose) ==")
         print("  input:   \(inputFolder.path)")
         print("  output:  \(outputFile.path)")
-        print("  detail:  \(detail)")
-        print("  ordering:\(sampleOrdering)  sensitivity:\(featureSensitivity)")
+        print("  poses:   \(posesFile.path)")
+        print("  detail:  \(detail)  ordering:\(sampleOrdering)  sensitivity:\(featureSensitivity)")
 
         let session = try PhotogrammetrySession(input: inputFolder,
                                                 configuration: configuration)
 
-        let request = PhotogrammetrySession.Request.modelFile(url: outputFile,
-                                                              detail: detail)
-        try session.process(requests: [request])
+        let requests: [PhotogrammetrySession.Request] = [
+            .modelFile(url: outputFile, detail: detail),
+            .poses,
+        ]
+        try session.process(requests: requests)
 
         for try await output in session.outputs {
             switch output {
@@ -60,12 +72,16 @@ struct Runner {
                 print("\n[ERROR] request \(String(describing: request)): \(error)")
                 throw error
             case .requestComplete(_, let result):
-                if case .modelFile(let url) = result {
+                switch result {
+                case .modelFile(let url):
                     print("\n[OK] model written: \(url.path)")
+                case .poses(let poses):
+                    try writePoses(poses)
+                default:
+                    break
                 }
             case .requestProgress(_, let fraction):
-                let pct = Int(fraction * 100)
-                print("\r  progress: \(pct)%", terminator: "")
+                print("\r  progress: \(Int(fraction * 100))%", terminator: "")
                 fflush(stdout)
             case .inputComplete:
                 print("  input ingested, reconstructing...")
@@ -79,13 +95,35 @@ struct Runner {
                 print("  processing cancelled")
                 return
             default:
-                print("  output: \(output)")
+                break
             }
         }
     }
+
+    /// Serializza le pose OC (rotation_wxyz camera→world + translation centro C)
+    /// nel formato consumato da project_photos_to_mesh.py e dal viewer.
+    func writePoses(_ poses: PhotogrammetrySession.Poses) throws {
+        var out: [String: [String: Any]] = [:]
+        for (idx, pose) in poses.posesBySample {
+            let q = pose.rotation          // simd_quatf: real = w, imag = (x,y,z)
+            let t = pose.translation
+            var rec: [String: Any] = [
+                "rotation_wxyz": [Double(q.real), Double(q.imag.x), Double(q.imag.y), Double(q.imag.z)],
+                "translation":   [Double(t.x), Double(t.y), Double(t.z)],
+            ]
+            if let url = poses.urlsBySample[idx] {
+                rec["image"] = url.lastPathComponent
+            }
+            out[String(idx)] = rec
+        }
+        let data = try JSONSerialization.data(withJSONObject: out,
+                                              options: [.sortedKeys, .prettyPrinted])
+        try data.write(to: posesFile)
+        print("\n[OK] poses written: \(posesFile.path)  (\(out.count) camere)")
+    }
 }
 
-@available(macOS 13.0, *)
+@available(macOS 14.0, *)
 func parseDetail(_ s: String) -> PhotogrammetrySession.Request.Detail {
     switch s.lowercased() {
     case "preview": return .preview
@@ -93,23 +131,23 @@ func parseDetail(_ s: String) -> PhotogrammetrySession.Request.Detail {
     case "medium":  return .medium
     case "full":    return .full
     case "raw":     return .raw
-    default:        return .raw
+    default:        return .full
     }
 }
 
-@available(macOS 13.0, *)
+@available(macOS 14.0, *)
 func parseOrdering(_ s: String) -> PhotogrammetrySession.Configuration.SampleOrdering {
-    s.lowercased() == "sequential" ? .sequential : .unordered
+    s.lowercased() == "unordered" ? .unordered : .sequential
 }
 
-@available(macOS 13.0, *)
+@available(macOS 14.0, *)
 func parseSensitivity(_ s: String) -> PhotogrammetrySession.Configuration.FeatureSensitivity {
-    s.lowercased() == "high" ? .high : .normal
+    s.lowercased() == "normal" ? .normal : .high
 }
 
 // --- entrypoint ---
-guard #available(macOS 13.0, *) else {
-    print("Richiede macOS 13.0+ su Apple Silicon.")
+guard #available(macOS 14.0, *) else {
+    print("Richiede macOS 14.0+ (API .poses) su Apple Silicon o Mac con GPU discreta.")
     exit(1)
 }
 
@@ -122,8 +160,8 @@ guard args.count >= 3 else {
 let runner = Runner(
     inputFolder: URL(fileURLWithPath: args[1], isDirectory: true),
     outputFile: URL(fileURLWithPath: args[2]),
-    detail: parseDetail(args.count > 3 ? args[3] : "raw"),
-    sampleOrdering: parseOrdering(args.count > 4 ? args[4] : "unordered"),
+    detail: parseDetail(args.count > 3 ? args[3] : "full"),
+    sampleOrdering: parseOrdering(args.count > 4 ? args[4] : "sequential"),
     featureSensitivity: parseSensitivity(args.count > 5 ? args[5] : "high")
 )
 

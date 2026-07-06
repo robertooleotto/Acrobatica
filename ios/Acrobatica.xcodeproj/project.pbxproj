@@ -7,6 +7,13 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		E4994982EC1AD07DCA62E406 /* SplashLoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C0E9BEF88BD1F6D6E13FB8A /* SplashLoginView.swift */; };
+		AEA6F29434FC031C9750A01C /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38719F3F0ED654EEE5CEE36D /* HomeView.swift */; };
+		266F56A73987AFF91C0A4378 /* ClientiView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1891E2989C5A89651E9C7352 /* ClientiView.swift */; };
+		926234C68E7BEC01994BAFAB /* ListinoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D70B0B6E1EA01AEC9DCAE46 /* ListinoView.swift */; };
+		0B18823F33FE484E760A9354 /* ImpostazioniView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D88BF69EB1C6E671F3674235 /* ImpostazioniView.swift */; };
+		509C271570CA52A51F20C5F1 /* DSComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61F1591E7033214CB58DF1CA /* DSComponents.swift */; };
+		C69BD837294C298D0D043CA4 /* DemoSeed.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55090951851A63191759A171 /* DemoSeed.swift */; };
 		1BF4EA18F92D4771C5B00446 /* AcrobaticaModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3968BB0A647FA6697945A87 /* AcrobaticaModels.swift */; };
 		233535E38489D6F2D259C217 /* FacadeCaptureSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AAB2ADE8C35D061B5FD941E /* FacadeCaptureSession.swift */; };
 		3D39741B48AA0D8F6CAA1284 /* FrameStrip.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CDE35BF5B1B772E7F1572A3 /* FrameStrip.swift */; };
@@ -46,6 +53,13 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		5C0E9BEF88BD1F6D6E13FB8A /* SplashLoginView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplashLoginView.swift; sourceTree = "<group>"; };
+		38719F3F0ED654EEE5CEE36D /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
+		1891E2989C5A89651E9C7352 /* ClientiView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientiView.swift; sourceTree = "<group>"; };
+		4D70B0B6E1EA01AEC9DCAE46 /* ListinoView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ListinoView.swift; sourceTree = "<group>"; };
+		D88BF69EB1C6E671F3674235 /* ImpostazioniView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImpostazioniView.swift; sourceTree = "<group>"; };
+		61F1591E7033214CB58DF1CA /* DSComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DSComponents.swift; sourceTree = "<group>"; };
+		55090951851A63191759A171 /* DemoSeed.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoSeed.swift; sourceTree = "<group>"; };
 		1445107498B1254682E63404 /* CapturedFacadePhoto.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapturedFacadePhoto.swift; sourceTree = "<group>"; };
 		2CDE35BF5B1B772E7F1572A3 /* FrameStrip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameStrip.swift; sourceTree = "<group>"; };
 		49928F98B55B057264EDD010 /* BackendAPIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackendAPIClient.swift; sourceTree = "<group>"; };
@@ -134,6 +148,7 @@
 				FA72429905ECAB4F881366B9 /* PitchLadderOverlay.swift */,
 				D80C56BDFB1904F88745BAA2 /* ShutterButton.swift */,
 				5B20DCB9C5930C96C5D83562 /* SmartGhostOverlay.swift */,
+				61F1591E7033214CB58DF1CA /* DSComponents.swift */,
 			);
 			path = Components;
 			sourceTree = "<group>";
@@ -178,6 +193,11 @@
 				57FEA8EBFAA241D57DF68DA8 /* RectifyFacadeView.swift */,
 				6A8E376261B27EA74B81C490 /* RisultatoPanoramaView.swift */,
 				F4EB3402A0E87FE94AC35FEC /* TapWallPlaneView.swift */,
+				5C0E9BEF88BD1F6D6E13FB8A /* SplashLoginView.swift */,
+				38719F3F0ED654EEE5CEE36D /* HomeView.swift */,
+				1891E2989C5A89651E9C7352 /* ClientiView.swift */,
+				4D70B0B6E1EA01AEC9DCAE46 /* ListinoView.swift */,
+				D88BF69EB1C6E671F3674235 /* ImpostazioniView.swift */,
 			);
 			path = Screens;
 			sourceTree = "<group>";
@@ -199,6 +219,7 @@
 				4AAB2ADE8C35D061B5FD941E /* FacadeCaptureSession.swift */,
 				AB12C3D4E5F6071829304150 /* ZonaFacciata.swift */,
 				AB12C3D4E5F6071829304180 /* EditableMesh.swift */,
+				55090951851A63191759A171 /* DemoSeed.swift */,
 			);
 			path = Models;
 			sourceTree = "<group>";
@@ -309,6 +330,13 @@
 				913420FC6B940221A9650E59 /* SmartGhostOverlay.swift in Sources */,
 				7173DDC306E4219F39ECB625 /* TapWallPlaneView.swift in Sources */,
 				8CCCCE939DF41BBA325A945D /* Theme.swift in Sources */,
+				E4994982EC1AD07DCA62E406 /* SplashLoginView.swift in Sources */,
+				AEA6F29434FC031C9750A01C /* HomeView.swift in Sources */,
+				266F56A73987AFF91C0A4378 /* ClientiView.swift in Sources */,
+				926234C68E7BEC01994BAFAB /* ListinoView.swift in Sources */,
+				0B18823F33FE484E760A9354 /* ImpostazioniView.swift in Sources */,
+				509C271570CA52A51F20C5F1 /* DSComponents.swift in Sources */,
+				C69BD837294C298D0D043CA4 /* DemoSeed.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

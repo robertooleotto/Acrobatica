@@ -8,11 +8,21 @@ import UIKit
 ///   POST /facade-sessions/{id}/photos
 ///   POST /facade-sessions/{id}/process
 ///   GET  /facade-sessions/{id}/result
+/// URL del backend: Railway di default, override via env BACKEND_URL per test locali.
+enum AcroBackend {
+    static let baseURL: URL = {
+        if let s = ProcessInfo.processInfo.environment["BACKEND_URL"],
+           let u = URL(string: s) { return u }
+        return URL(string: "https://acrobatica-production.up.railway.app")!
+    }()
+}
+
 actor BackendAPIClient {
 
     /// Backend deployato su Railway (servizio `Acrobatica`, project Railway omonimo).
-    /// Storage e DB su Supabase. Niente Mac acceso necessario.
-    var baseURL: URL = URL(string: "https://acrobatica-production.up.railway.app")!
+    /// Storage e DB su Supabase. Override per test locale via env BACKEND_URL
+    /// (es. SIMCTL_CHILD_BACKEND_URL=http://localhost:8000).
+    var baseURL: URL = AcroBackend.baseURL
 
     static let shared = BackendAPIClient()
 
@@ -465,7 +475,7 @@ final class BackgroundUploader: NSObject, ObservableObject {
     /// (settato dall'AppDelegate in `handleEventsForBackgroundURLSession`).
     var backgroundCompletionHandler: (() -> Void)?
 
-    private let baseURL = URL(string: "https://acrobatica-production.up.railway.app")!
+    private let baseURL = AcroBackend.baseURL
     private let maxRetry = 5
     private var responseData: [Int: Data] = [:]   // per taskIdentifier
 

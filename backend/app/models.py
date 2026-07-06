@@ -23,8 +23,24 @@ class ARMetadata(BaseModel):
     wall_normal_world: Optional[list[float]] = Field(default=None, min_length=3, max_length=3)
 
 
-# Stati possibili di una sessione
-SessionStatus = Literal["capturing", "uploading", "processing", "completed", "failed"]
+# Stati possibili di una sessione — macchina a stati del flusso prodotto a 8 passi.
+# NB: la colonna `status` è testo libero su Postgres, quindi estendere è sicuro
+# (nessuna migrazione). Transizioni valide in services/session_state.py.
+SessionStatus = Literal[
+    "capturing",       # 1. l'app sta scattando le foto
+    "uploading",       # 2. foto in caricamento sul backend
+    "uploaded",        # 2. tutte le foto caricate → pronte per il calcolo mesh
+    "queued_oc",       # 3. in coda per il calcolo Object Capture (Mac cloud)
+    "computing_oc",    # 3. OC in esecuzione sul Mac
+    "mesh_ready",      # 4. mesh calcolata e disponibile sui server
+    "cleaning",        # 6. l'utente sta pulendo la mesh sul device
+    "clean_uploaded",  # 6. mesh pulita ricaricata (in standby)
+    "planes_ready",    # 7. piani puliti determinati e mostrati
+    "mapping",         # 8. proiezione foto→piani (bake) in corso
+    "completed",       # 8. facciata stesa pronta
+    "failed",          # errore in un qualunque stadio
+    "processing",      # (legacy) vecchia pipeline 2D stitching/keystone
+]
 
 
 class Opening(BaseModel):
@@ -437,3 +453,23 @@ class UploadPhotoResponse(BaseModel):
     session_id: str
     order_index: int
     photos_count: int
+
+
+# ─── Worker Object Capture (opzione A: Mac dedicato che consuma la coda) ─────
+
+class OcJobPhoto(BaseModel):
+    """Una foto del job: URL firmato per il download + intrinseci ARKit (da
+    unire alle pose OC, che non le contengono)."""
+    order_index: int
+    url: str
+    camera_intrinsics: list[float] = Field(default_factory=list, description="K col-major 9 float")
+
+
+class OcJobResponse(BaseModel):
+    """Job assegnato al worker OC. `session_id` None = coda vuota (niente lavoro)."""
+    session_id: Optional[str] = None
+    photos: list[OcJobPhoto] = []
+
+
+class FailRequest(BaseModel):
+    reason: Optional[str] = None

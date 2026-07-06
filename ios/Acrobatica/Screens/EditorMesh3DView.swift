@@ -47,6 +47,10 @@ struct EditorMesh3DView: View {
                 .presentationDetents([.medium, .large])
                 .ignoresSafeArea()
         }
+        .sheet(isPresented: $model.mostraProfilo) {
+            ProfiloRilievoSheet(model: model)
+                .presentationDetents([.medium, .large])
+        }
     }
 
     private var barraSuperiore: some View {
@@ -257,10 +261,86 @@ struct EditorMesh3DView: View {
                 if model.strumento == .box { barraBox }
                 if model.strumento == .facce { barraPiani }
                 if model.strumento == .assi { barraAssiManuali }
+                if model.strumento == .allinea { barraAllinea }
             }
             .padding(.vertical, 8)
             .background(EditorTheme.panel)
             .overlay(Rectangle().fill(EditorTheme.hair).frame(height: 1), alignment: .top)
+        }
+    }
+
+    private var barraAllinea: some View {
+        VStack(spacing: 8) {
+            // riga A — selezione: modo + tipo elemento
+            HStack(spacing: 6) {
+                ForEach([ModoSelezione.tocco, .rettangolo, .lazo]) { m in
+                    Button { model.modoSelezione = m } label: {
+                        Label(m == .tocco ? "Puntatore" : m.etichetta, systemImage: m == .tocco ? "hand.point.up.left" : m.icona)
+                            .font(Theme.Typo.caption(11, .semibold))
+                            .foregroundStyle(model.modoSelezione == m ? .white : EditorTheme.testo)
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(model.modoSelezione == m ? EditorTheme.accento : EditorTheme.panelAlt,
+                                        in: RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+                Divider().frame(height: 18)
+                ForEach(ElementoTipo.allCases) { t in
+                    Button { model.tipoElemento = t; model.deselezionaAllinea() } label: {
+                        Label(t.etichetta, systemImage: t.icona)
+                            .font(Theme.Typo.caption(11, .semibold))
+                            .foregroundStyle(model.tipoElemento == t ? .white : EditorTheme.testo)
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(model.tipoElemento == t ? EditorTheme.accento : EditorTheme.panelAlt,
+                                        in: RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+                Spacer()
+                Text("\(model.numElementiSel) sel").font(Theme.Typo.mono(10)).foregroundStyle(EditorTheme.testoMuto)
+                Button { model.deselezionaAllinea() } label: {
+                    Image(systemName: "xmark.circle").foregroundStyle(EditorTheme.testoMuto)
+                }
+            }
+            // riga B — assi di allineamento + azione
+            HStack(spacing: 6) {
+                Picker("", selection: $model.rifAssiAllinea) {
+                    ForEach(AssiRiferimento.allCases) { Text($0.etichetta).tag($0) }
+                }.pickerStyle(.segmented).frame(width: 150)
+                let nomi = model.rifAssiAllinea == .mondo ? ["X", "Y", "Z"] : ["Oriz", "Vert", "Prof"]
+                assiToggle(nomi[0], isOn: $model.allineaAsse0)
+                assiToggle(nomi[1], isOn: $model.allineaAsse1)
+                assiToggle(nomi[2], isOn: $model.allineaAsse2)
+                Spacer()
+                Button { model.spostaAllinea.toggle() } label: {
+                    Label("Sposta", systemImage: "arrow.up.and.down.and.arrow.left.and.right")
+                        .font(Theme.Typo.caption(11, .semibold))
+                        .foregroundStyle(model.spostaAllinea ? .white : EditorTheme.testo)
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .background(model.spostaAllinea ? EditorTheme.accento : EditorTheme.panelAlt,
+                                    in: RoundedRectangle(cornerRadius: 8))
+                }
+                .disabled(model.numElementiSel == 0).opacity(model.numElementiSel == 0 ? 0.5 : 1)
+                Button { model.attendoSorgenteAllinea.toggle() } label: {
+                    Label(model.attendoSorgenteAllinea ? "Tocca il sorgente…" : "Allinea",
+                          systemImage: "scope")
+                        .font(Theme.Typo.caption(12, .bold))
+                        .padding(.horizontal, 12).padding(.vertical, 7)
+                        .background(model.attendoSorgenteAllinea ? Color.orange
+                                    : Color(red: 0.18, green: 0.70, blue: 0.44), in: RoundedRectangle(cornerRadius: 8))
+                        .foregroundStyle(.white)
+                }
+                .disabled(model.numElementiSel == 0).opacity(model.numElementiSel == 0 ? 0.5 : 1)
+            }
+        }
+        .padding(.horizontal, 12)
+    }
+
+    private func assiToggle(_ nome: String, isOn: Binding<Bool>) -> some View {
+        Button { isOn.wrappedValue.toggle() } label: {
+            Text(nome).font(Theme.Typo.caption(11, .bold))
+                .foregroundStyle(isOn.wrappedValue ? .white : EditorTheme.testo)
+                .frame(width: 46).padding(.vertical, 6)
+                .background(isOn.wrappedValue ? EditorTheme.accento : EditorTheme.panelAlt,
+                            in: RoundedRectangle(cornerRadius: 8))
         }
     }
 
@@ -314,9 +394,27 @@ struct EditorMesh3DView: View {
                 }
             } else {
                 // FASE 2: tracciamento nel pannello 2D
+                // riga A — regole angoli: sensibilità + snap on/off
+                HStack(spacing: 8) {
+                    Image(systemName: "angle").font(.system(size: 12)).foregroundStyle(EditorTheme.testoMuto)
+                    Text("Angoli").font(Theme.Typo.caption(10)).foregroundStyle(EditorTheme.testoMuto)
+                    Slider(value: $model.sensibilitaAngoli, in: 0...1).tint(EditorTheme.accento)
+                        .frame(maxWidth: 160)
+                    Text("pochi").font(Theme.Typo.caption(9)).foregroundStyle(EditorTheme.testoMuto)
+                    Button { model.snapPerimetroAttivo.toggle() } label: {
+                        Label("Snap", systemImage: model.snapPerimetroAttivo ? "scope" : "scope")
+                            .font(Theme.Typo.caption(11, .semibold))
+                            .foregroundStyle(model.snapPerimetroAttivo ? .white : EditorTheme.testo)
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(model.snapPerimetroAttivo ? EditorTheme.accento : EditorTheme.panelAlt,
+                                        in: RoundedRectangle(cornerRadius: 8))
+                    }
+                    Spacer()
+                }
+                // riga B — azioni: chiudi, auto, anelli, estrudi
                 HStack(spacing: 8) {
                     Button { model.perimetroTraccia = false } label: {
-                        Label("Sposta sezione", systemImage: "arrow.up.and.down")
+                        Label("Sposta", systemImage: "arrow.up.and.down")
                             .font(Theme.Typo.caption(11, .semibold)).foregroundStyle(EditorTheme.testo)
                             .padding(.horizontal, 10).padding(.vertical, 6)
                             .background(EditorTheme.panelAlt, in: RoundedRectangle(cornerRadius: 8))
@@ -330,10 +428,28 @@ struct EditorMesh3DView: View {
                                         in: RoundedRectangle(cornerRadius: 8))
                     }
                     Button { model.autoPerimetro() } label: {
-                        Label("Auto angoli", systemImage: "wand.and.stars")
+                        Label("Auto", systemImage: "wand.and.stars")
                             .font(Theme.Typo.caption(11, .semibold)).foregroundStyle(EditorTheme.testo)
                             .padding(.horizontal, 10).padding(.vertical, 6)
                             .background(EditorTheme.panelAlt, in: RoundedRectangle(cornerRadius: 8))
+                    }
+                    // anelli a più quote → piani inclinati
+                    Button { model.salvaAnelloPerimetro() } label: {
+                        Label("Salva anello", systemImage: "square.stack.3d.down.right")
+                            .font(Theme.Typo.caption(11, .semibold)).foregroundStyle(EditorTheme.testo)
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(EditorTheme.panelAlt, in: RoundedRectangle(cornerRadius: 8))
+                    }
+                    .disabled(model.numPuntiPerimetro < 2).opacity(model.numPuntiPerimetro < 2 ? 0.4 : 1)
+                    if model.numAnelliPerimetro > 0 {
+                        Button { model.copiaUltimoAnelloAllaQuota() } label: {
+                            Label("Copia qui", systemImage: "doc.on.doc")
+                                .font(Theme.Typo.caption(11, .semibold)).foregroundStyle(EditorTheme.testo)
+                                .padding(.horizontal, 10).padding(.vertical, 6)
+                                .background(EditorTheme.panelAlt, in: RoundedRectangle(cornerRadius: 8))
+                        }
+                        Text("anelli: \(model.numAnelliPerimetro)").font(Theme.Typo.mono(10))
+                            .foregroundStyle(EditorTheme.accento)
                     }
                     Spacer()
                     Button { model.annullaUltimoPuntoPerimetro() } label: {
@@ -341,14 +457,16 @@ struct EditorMesh3DView: View {
                             .font(Theme.Typo.caption(11, .semibold)).foregroundStyle(EditorTheme.testo)
                     }
                     .disabled(model.numPuntiPerimetro == 0).opacity(model.numPuntiPerimetro == 0 ? 0.4 : 1)
-                    Button { model.estrudiPerimetro() } label: {
-                        Label("Estrudi (\(model.numPuntiPerimetro))", systemImage: "square.stack.3d.up.fill")
+                    Button { model.estrudiPerimetroInclinato() } label: {
+                        Label(model.numAnelliPerimetro > 0 ? "Estrudi inclinato" : "Estrudi (\(model.numPuntiPerimetro))",
+                              systemImage: "square.stack.3d.up.fill")
                             .font(Theme.Typo.caption(12, .bold))
                             .padding(.horizontal, 10).padding(.vertical, 6)
                             .background(Color(red: 0.18, green: 0.70, blue: 0.44), in: RoundedRectangle(cornerRadius: 8))
                             .foregroundStyle(.white)
                     }
-                    .disabled(model.numPuntiPerimetro < 2).opacity(model.numPuntiPerimetro < 2 ? 0.5 : 1)
+                    .disabled(model.numPuntiPerimetro < 2 && model.numAnelliPerimetro < 2)
+                    .opacity((model.numPuntiPerimetro < 2 && model.numAnelliPerimetro < 2) ? 0.5 : 1)
                     Button { model.esciPerimetro() } label: {
                         Image(systemName: "xmark.circle").foregroundStyle(EditorTheme.testoMuto)
                     }
@@ -405,11 +523,36 @@ struct EditorMesh3DView: View {
                         .background(model.asseMovimentoPoligono == .libero ? EditorTheme.panelAlt : EditorTheme.accento,
                                     in: RoundedRectangle(cornerRadius: 8))
                 }
+                Button { model.mostraProfilo = true } label: {
+                    Label("Profilo", systemImage: "slider.horizontal.3")
+                        .font(Theme.Typo.caption(11, .semibold)).foregroundStyle(EditorTheme.testo)
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .background(EditorTheme.panelAlt, in: RoundedRectangle(cornerRadius: 8))
+                }
+                Menu {
+                    ForEach(AutoBCSPreset.allCases) { preset in
+                        Button(preset.etichetta) { model.applicaPresetAutoBCS(preset) }
+                    }
+                } label: {
+                    Label(model.autoBCSPreset.etichetta, systemImage: "dial.medium")
+                        .font(Theme.Typo.caption(11, .semibold))
+                        .foregroundStyle(model.autoBCSPreset == .standard ? EditorTheme.testo : .white)
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .background(model.autoBCSPreset == .standard ? EditorTheme.panelAlt : EditorTheme.accento,
+                                    in: RoundedRectangle(cornerRadius: 8))
+                }
                 Button { Task { await model.segmentaTuttoAutomatico() } } label: {
                     Label(model.segmentando ? "Rilevo…" : "Auto piani", systemImage: "wand.and.stars")
                         .font(Theme.Typo.caption(11, .semibold)).foregroundStyle(.white)
                         .padding(.horizontal, 10).padding(.vertical, 6)
                         .background(Color(red: 0.18, green: 0.70, blue: 0.44), in: RoundedRectangle(cornerRadius: 8))
+                }
+                .disabled(model.numTriangoli == 0 || model.segmentando)
+                Button { Task { await model.segmentaPianiBCS() } } label: {
+                    Label("Auto BCS", systemImage: "square.grid.3x3")
+                        .font(Theme.Typo.caption(11, .semibold)).foregroundStyle(EditorTheme.testo)
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .background(EditorTheme.panelAlt, in: RoundedRectangle(cornerRadius: 8))
                 }
                 .disabled(model.numTriangoli == 0 || model.segmentando)
                 Button { model.avviaPerimetro() } label: {
@@ -1005,7 +1148,7 @@ private struct SceneKitContainer: UIViewRepresentable {
     func updateUIView(_ v: SCNView, context: Context) {
         // In .seleziona/.box/.facce il pan è nostro: spegni la camera.
         let panNostro = model.strumento == .seleziona || model.strumento == .box
-            || model.strumento == .facce || model.strumento == .assi
+            || model.strumento == .facce || model.strumento == .assi || model.strumento == .allinea
         v.allowsCameraControl = !panNostro
         context.coordinator.pan?.isEnabled = panNostro
         context.coordinator.pinch?.isEnabled = true
@@ -1278,6 +1421,42 @@ private struct SceneKitContainer: UIViewRepresentable {
                 }
                 return
             }
+            if model.strumento == .allinea {
+                // Fase "scegli sorgente": il prossimo tap definisce il punto sorgente.
+                if model.attendoSorgenteAllinea {
+                    if let m = maniglia(sotto: pt, in: v), !m.edge,
+                       let p = model.posizioneVertice(faccia: m.faccia, k: m.k) {
+                        model.allineaConSorgente(p)
+                    } else {
+                        let hits = v.hitTest(pt, options: [.searchMode: SCNHitTestSearchMode.closest.rawValue])
+                        if let h = hits.first(where: { $0.node === model.contentNode }) {
+                            let w = h.worldCoordinates
+                            model.allineaConSorgente(SIMD3<Float>(w.x, w.y, w.z))
+                        }
+                    }
+                    return
+                }
+                // Selezione sub-elemento secondo il tipo attivo.
+                switch model.tipoElemento {
+                case .vertice:
+                    if let m = maniglia(sotto: pt, in: v), !m.edge { model.toggleVerticeAllinea(faccia: m.faccia, k: m.k) }
+                case .spigolo:
+                    if let m = maniglia(sotto: pt, in: v), m.edge { model.toggleSpigoloAllinea(faccia: m.faccia, k: m.k) }
+                case .faccia:
+                    let tutti = v.hitTest(pt, options: [.searchMode: SCNHitTestSearchMode.all.rawValue])
+                    for hh in tutti {
+                        if let nm = hh.node.name, nm.hasPrefix("piano:"), let id = Int(nm.dropFirst("piano:".count)) {
+                            model.toggleFacciaAllinea(id); return
+                        }
+                    }
+                    let hits = v.hitTest(pt, options: [.searchMode: SCNHitTestSearchMode.closest.rawValue])
+                    if let h = hits.first(where: { $0.node === model.contentNode }),
+                       let g = model.facce.first(where: { $0.triangoli.contains(h.faceIndex) }) {
+                        model.toggleFacciaAllinea(g.id)
+                    }
+                }
+                return
+            }
             // Facce + attesa punto zero: il tap fissa il punto zero sul muro.
             if model.strumento == .facce && model.attendePuntoZero {
                 let hits = v.hitTest(pt, options: [.searchMode: SCNHitTestSearchMode.closest.rawValue])
@@ -1403,11 +1582,82 @@ private struct SceneKitContainer: UIViewRepresentable {
             }
         }
 
+        private var panStartAllinea: CGPoint?
+        private var spostaPianoP: SIMD3<Float>?
+        private var spostaPianoN: SIMD3<Float>?
+        private var spostaLastWorld: SIMD3<Float>?
+
+        /// Selezione a rettangolo dei sub-elementi (vertici/spigoli/facce) per Allinea.
+        @MainActor private func handlePanAllinea(_ g: UIPanGestureRecognizer, in v: SCNView) {
+            if model.attendoSorgenteAllinea { return }   // in attesa sorgente: usa il tap
+            let p = g.location(in: v)
+            // Modalità SPOSTA: trascina per traslare la selezione (vincolata agli assi).
+            if model.spostaAllinea && model.numElementiSel > 0 {
+                switch g.state {
+                case .began:
+                    guard let c = model.centroideSelezioneAllinea(), let pov = v.pointOfView else { return }
+                    let col = pov.simdWorldTransform.columns.2
+                    let fwd = -simd_normalize(SIMD3<Float>(col.x, col.y, col.z))
+                    spostaPianoP = c; spostaPianoN = fwd
+                    spostaLastWorld = puntoSulPiano(p, p: c, n: fwd, in: v)
+                    model.iniziaSpostamentoAllinea()
+                case .changed:
+                    guard let pp = spostaPianoP, let nn = spostaPianoN, let last = spostaLastWorld,
+                          let w = puntoSulPiano(p, p: pp, n: nn, in: v) else { return }
+                    let step = model.vincolaDeltaAllinea(w - last)
+                    spostaLastWorld = w
+                    model.spostaSelezioneAllinea(delta: step)
+                case .ended, .cancelled:
+                    spostaPianoP = nil; spostaPianoN = nil; spostaLastWorld = nil
+                default: break
+                }
+                return
+            }
+            switch g.state {
+            case .began:
+                panStartAllinea = p
+                lassoLayer?.isHidden = false
+            case .changed:
+                guard let s = panStartAllinea else { return }
+                let rect = CGRect(x: min(s.x, p.x), y: min(s.y, p.y), width: abs(p.x - s.x), height: abs(p.y - s.y))
+                lassoLayer?.path = CGPath(rect: rect, transform: nil)
+            case .ended, .cancelled:
+                lassoLayer?.isHidden = true
+                lassoLayer?.path = nil
+                defer { panStartAllinea = nil }
+                guard let s = panStartAllinea else { return }
+                let rect = CGRect(x: min(s.x, p.x), y: min(s.y, p.y), width: abs(p.x - s.x), height: abs(p.y - s.y))
+                guard rect.width > 4, rect.height > 4 else { return }   // tap: lascialo al tap handler
+                func proj(_ q: SIMD3<Float>) -> CGPoint {
+                    let pr = v.projectPoint(SCNVector3(q.x, q.y, q.z)); return CGPoint(x: CGFloat(pr.x), y: CGFloat(pr.y))
+                }
+                var vert: [ElemId] = [], spig: [ElemId] = [], facc: [Int] = []
+                for f in model.facce {
+                    guard let poly = f.poligono, !poly.isEmpty else { continue }
+                    switch model.tipoElemento {
+                    case .vertice:
+                        for k in poly.indices where rect.contains(proj(poly[k])) { vert.append(ElemId(faccia: f.id, k: k)) }
+                    case .spigolo:
+                        for k in poly.indices {
+                            let a = proj(poly[k]), b = proj(poly[(k + 1) % poly.count])
+                            if rect.contains(a) && rect.contains(b) { spig.append(ElemId(faccia: f.id, k: k)) }
+                        }
+                    case .faccia:
+                        let c = poly.reduce(SIMD3<Float>(0,0,0), +) / Float(poly.count)
+                        if rect.contains(proj(c)) { facc.append(f.id) }
+                    }
+                }
+                model.aggiungiSelezioneAllinea(vertici: vert, spigoli: spig, facce: facc)
+            default: break
+            }
+        }
+
         @MainActor @objc func handlePan(_ g: UIPanGestureRecognizer) {
             guard let v = view else { return }
             if model.strumento == .box { handlePanBox(g, in: v); return }
             if model.strumento == .facce { handlePanFacce(g, in: v); return }
             if model.strumento == .assi { handlePanAssi(g, in: v); return }
+            if model.strumento == .allinea { handlePanAllinea(g, in: v); return }
             let p = g.location(in: v)
             switch g.state {
             case .began:
@@ -1790,6 +2040,8 @@ private struct MultipianoJSON: Codable {
 struct PerimetroDisegno {
     var segmenti: [(CGPoint, CGPoint)] = []
     var punti: [CGPoint] = []
+    var angoli: [CGPoint] = []   // spigoli del profilo = bersagli di snap
+    var anelli: [[CGPoint]] = []   // anelli già salvati ad altre quote (riferimento)
     var spline: [CGPoint] = []
     var bounds: CGRect = .zero
 }
@@ -1797,9 +2049,72 @@ struct PerimetroDisegno {
 /// Pannello 2D top-down della sezione: mostra il bordo (ciano) e lo ricalca a
 /// linea/spline (giallo). Tap = aggiunge un punto. Disaccoppiato dalla camera 3D
 /// (la sezione di una facciata è una curva piana: niente "sparizione" di geometria).
+/// Mini-wizard del profilo di rilievo: poche domande → imposta le tolleranze
+/// (che restano modificabili sotto). Per-sessione.
+private struct ProfiloRilievoSheet: View {
+    @ObservedObject var model: Mesh3DModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Tipologia edificio") {
+                    Picker("Tipologia", selection: $model.profTipologia) {
+                        ForEach(TipologiaEdificio.allCases) { Text($0.etichetta).tag($0) }
+                    }.pickerStyle(.segmented)
+                    Text("Imposta le tolleranze qui sotto. Cambiandole manualmente passi a “Custom”.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Section("Cosa tenere / ignorare") {
+                    Toggle("Tieni sporgenze (torrette, bovindi)", isOn: bind(\.profTieniSporgenze))
+                    Toggle("Ignora balconi e cornici", isOn: bind(\.profIgnoraBalconi))
+                }
+                Section("Tolleranze") {
+                    sliderRow("Profondità min. sporgenza", value: bind(\.profProfonditaSporgenzaM),
+                              range: 0.1...1.0, unit: "m")
+                    sliderRow("Tolleranza muro complanare", value: bind(\.profTolMergeM),
+                              range: 0.02...0.30, unit: "m")
+                    VStack(alignment: .leading) {
+                        HStack { Text("Sensibilità (più piani)"); Spacer()
+                            Text(String(format: "%.0f%%", model.profSensibilita * 100)).foregroundStyle(.secondary) }
+                        Slider(value: bind(\.profSensibilita), in: 0...1)
+                    }
+                }
+                Section {
+                    Button {
+                        dismiss()
+                        Task { await model.segmentaTuttoAutomatico() }
+                    } label: {
+                        Label("Applica e rileva", systemImage: "wand.and.stars").frame(maxWidth: .infinity)
+                    }.buttonStyle(.borderedProminent)
+                }
+            }
+            .navigationTitle("Profilo di rilievo")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Fatto") { dismiss() } } }
+        }
+    }
+
+    /// Binding che marca il profilo come Custom quando l'utente tocca una soglia.
+    private func bind<T>(_ kp: ReferenceWritableKeyPath<Mesh3DModel, T>) -> Binding<T> {
+        Binding(get: { model[keyPath: kp] },
+                set: { model[keyPath: kp] = $0; if model.profTipologia != .custom { model.profTipologia = .custom } })
+    }
+
+    private func sliderRow(_ titolo: String, value: Binding<Float>, range: ClosedRange<Float>, unit: String) -> some View {
+        VStack(alignment: .leading) {
+            HStack { Text(titolo); Spacer()
+                Text(String(format: "%.2f %@", value.wrappedValue, unit)).foregroundStyle(.secondary) }
+            Slider(value: value, in: range)
+        }
+    }
+}
+
 private struct PannelloPerimetro: View {
     @ObservedObject var model: Mesh3DModel
     @State private var dito: CGPoint? = nil   // posizione corrente del dito (per la lente)
+    @State private var preso: Int? = nil      // indice del punto in trascinamento
+    @State private var iniziato = false       // primo onChanged del gesto già gestito
 
     var body: some View {
         GeometryReader { geo in
@@ -1826,14 +2141,32 @@ private struct PannelloPerimetro: View {
                     let v = toView(m)
                     ctx.fill(Path(ellipseIn: CGRect(x: v.x - 1.5, y: v.y - 1.5, width: 3, height: 3)), with: .color(.teal))
                 }
+                // anelli già salvati ad altre quote (riferimento tenue)
+                for anello in d.anelli where anello.count >= 2 {
+                    var rp = Path(); rp.move(to: toView(anello[0]))
+                    for q in anello.dropFirst() { rp.addLine(to: toView(q)) }
+                    if model.chiudiPerimetro, anello.count >= 3 { rp.addLine(to: toView(anello[0])) }
+                    ctx.stroke(rp, with: .color(.orange.opacity(0.5)), lineWidth: 1.5)
+                    for q in anello { let v = toView(q)
+                        ctx.fill(Path(ellipseIn: CGRect(x: v.x - 3, y: v.y - 3, width: 6, height: 6)),
+                                 with: .color(.orange.opacity(0.6))) }
+                }
+                // spigoli del profilo = bersagli di snap (cerchietti vuoti ciano)
+                for a in d.angoli {
+                    let v = toView(a)
+                    ctx.stroke(Path(ellipseIn: CGRect(x: v.x - 4, y: v.y - 4, width: 8, height: 8)),
+                               with: .color(.cyan.opacity(0.9)), lineWidth: 1.5)
+                }
                 if d.spline.count >= 2 {
                     var yp = Path(); yp.move(to: toView(d.spline[0]))
                     for q in d.spline.dropFirst() { yp.addLine(to: toView(q)) }
                     ctx.stroke(yp, with: .color(.yellow), lineWidth: 2.5)
                 }
-                for q in d.punti {
+                for (i, q) in d.punti.enumerated() {
                     let v = toView(q)
-                    ctx.fill(Path(ellipseIn: CGRect(x: v.x - 5, y: v.y - 5, width: 10, height: 10)), with: .color(.yellow))
+                    let r: CGFloat = (i == preso) ? 7 : 5
+                    ctx.fill(Path(ellipseIn: CGRect(x: v.x - r, y: v.y - r, width: 2 * r, height: 2 * r)),
+                             with: .color(i == preso ? .orange : .yellow))
                 }
             }
             ZStack {
@@ -1841,11 +2174,30 @@ private struct PannelloPerimetro: View {
                 Canvas { ctx, _ in scena(ctx) }
                 .contentShape(Rectangle())
                 .gesture(DragGesture(minimumDistance: 0)
-                    .onChanged { val in dito = val.location }
+                    .onChanged { val in
+                        dito = val.location
+                        guard b.width > 0 else { return }
+                        let raggioUV = 22 / scala            // ~22 px in coordinate u,v
+                        let snapUV = 16 / scala
+                        if !iniziato {
+                            iniziato = true
+                            // se tocco vicino a un punto esistente → lo afferro per spostarlo
+                            preso = model.indicePuntoPerimetro(vicinoUV: toUV(val.location), raggioUV: raggioUV)
+                        }
+                        if let i = preso {
+                            model.muoviPuntoPerimetro(i, aUV: toUV(val.location), raggioSnapUV: snapUV)
+                        }
+                    }
                     .onEnded { val in
                         dito = nil
+                        defer { preso = nil; iniziato = false }
                         guard b.width > 0 else { return }
-                        model.toccaUV(toUV(val.location))
+                        let snapUV = 16 / scala
+                        if let i = preso {
+                            model.muoviPuntoPerimetro(i, aUV: toUV(val.location), raggioSnapUV: snapUV)
+                        } else {
+                            model.toccaUV(toUV(val.location), raggioSnapUV: snapUV)   // nuovo punto con snap
+                        }
                     })
                 // Lente d'ingrandimento sotto il dito
                 if let p = dito {
@@ -1891,6 +2243,7 @@ enum StrumentoMesh3D: String, CaseIterable, Identifiable {
     case seleziona  // lazo a mano libera per selezionare triangoli
     case facce      // pennelli colorati: assegna triangoli a facce/piani
     case assi       // due linee sulla mesh: verticale + orizzontale edificio
+    case allinea    // seleziona vertici/spigoli/facce dei piani e allineali agli assi
     case punti      // piano livello-zero: 3+ punti sul muro → piano medio
 
     var id: String { rawValue }
@@ -1901,6 +2254,7 @@ enum StrumentoMesh3D: String, CaseIterable, Identifiable {
         case .seleziona: return "lasso"
         case .facce:     return "square.stack.3d.up"
         case .assi:      return "arrow.up.and.down.and.arrow.left.and.right"
+        case .allinea:   return "arrow.up.left.and.arrow.down.right"
         case .punti:     return "square.3.layers.3d.top.filled"
         }
     }
@@ -1911,7 +2265,57 @@ enum StrumentoMesh3D: String, CaseIterable, Identifiable {
         case .seleziona: return "Seleziona"
         case .facce:     return "Piani"
         case .assi:      return "Assi"
+        case .allinea:   return "Allinea"
         case .punti:     return "Piano base"
+        }
+    }
+}
+
+/// Tipo di sub-elemento selezionabile sui piani proxy (per Allinea).
+enum ElementoTipo: String, CaseIterable, Identifiable {
+    case vertice, spigolo, faccia
+    var id: String { rawValue }
+    var etichetta: String {
+        switch self { case .vertice: return "Vertici"; case .spigolo: return "Spigoli"; case .faccia: return "Facce" }
+    }
+    var icona: String {
+        switch self { case .vertice: return "circle.grid.2x2"; case .spigolo: return "line.diagonal"; case .faccia: return "square.dashed" }
+    }
+}
+
+/// Riferimento degli assi di allineamento.
+enum AssiRiferimento: String, CaseIterable, Identifiable {
+    case edificio, mondo
+    var id: String { rawValue }
+    var etichetta: String { self == .edificio ? "Edificio" : "Mondo" }
+}
+
+/// Identità di un sub-elemento: faccia + indice (vertice o spigolo).
+struct ElemId: Hashable { let faccia: Int; let k: Int }
+
+/// Tipologia di edificio: preimposta le tolleranze del rilievo (profilo).
+enum TipologiaEdificio: String, CaseIterable, Identifiable {
+    case storico, moderno, misto, custom
+    var id: String { rawValue }
+    var etichetta: String {
+        switch self {
+        case .storico: return "Storico"
+        case .moderno: return "Moderno"
+        case .misto:   return "Misto"
+        case .custom:  return "Custom"
+        }
+    }
+}
+
+/// Preset per l'auto-proposta BCS: controlla quante facce architettoniche tenere.
+enum AutoBCSPreset: String, CaseIterable, Identifiable {
+    case pochi, standard, dettaglio
+    var id: String { rawValue }
+    var etichetta: String {
+        switch self {
+        case .pochi: return "BCS pochi"
+        case .standard: return "BCS standard"
+        case .dettaglio: return "BCS dettaglio"
         }
     }
 }
@@ -2051,9 +2455,17 @@ final class Mesh3DModel: ObservableObject {
     @Published var perimetroTraccia = false   // false = posiziona sezione su 3D; true = traccia 2D
     @Published var chiudiPerimetro = false { didSet { aggiornaSlice() } }   // chiusura opzionale (default aperto)
     @Published var quotaSlice: Float = 0.5 { didSet { aggiornaSlice() } }
+    /// Sensibilità del rilevamento angoli (0 = solo gli spigoli principali,
+    /// 1 = anche i piccoli risvolti). Pilota eps semplificazione + lunghezza min muro.
+    @Published var sensibilitaAngoli: Float = 0.5 { didSet { if modoPerimetro { aggiornaSlice() } } }
+    /// Snap dei punti agli spigoli del profilo (disattivabile).
+    @Published var snapPerimetroAttivo = true
     @Published private(set) var numPuntiPerimetro = 0
+    @Published private(set) var numAnelliPerimetro = 0
     private var puntiPerimetro: [SIMD3<Float>] = []
+    private var anelliPerimetro: [[SIMD3<Float>]] = []   // anelli salvati a quote diverse
     private var ultimaSezione: [(SIMD3<Float>, SIMD3<Float>)] = []   // segmenti per l'auto-angoli
+    private var angoliSlice: [SIMD3<Float>] = []   // spigoli del profilo (bersagli di snap)
     private var sliceS0: Float = 0   // quota assoluta del piano di slice (lungo su)
     private var prevMostraMesh = true   // ripristino visibilità mesh uscendo dal perimetro
     private var perimE1 = SIMD3<Float>(1, 0, 0)   // base orizzontale 2D del piano di slice
@@ -2077,6 +2489,83 @@ final class Mesh3DModel: ObservableObject {
     /// Multi-selezione: insieme dei piani selezionati (oltre a quello attivo).
     @Published var facceSelezionate: Set<Int> = []
     @Published var multiSelezione = false
+    // MARK: Allinea — selezione sub-elementi dei piani + assi
+    @Published var tipoElemento: ElementoTipo = .vertice
+    @Published var rifAssiAllinea: AssiRiferimento = .edificio
+    @Published var allineaAsse0 = false   // r (edificio) / X (mondo)
+    @Published var allineaAsse1 = true    // u (edificio) / Y (mondo) — verticale di default
+    @Published var allineaAsse2 = false   // n (edificio) / Z (mondo)
+    @Published var attendoSorgenteAllinea = false
+    @Published var spostaAllinea = false   // drag = sposta la selezione (invece di selezionare a rettangolo)
+    @Published private(set) var numElementiSel = 0
+    // MARK: Profilo di rilievo — vincoli/tolleranze per Auto piani (per-sessione)
+    @Published var profTipologia: TipologiaEdificio = .storico { didSet { applicaPresetProfilo() } }
+    @Published var profTieniSporgenze = true     // torrette/bovindi a qualsiasi quota
+    @Published var profIgnoraBalconi = true      // scarta solette/aggetti orizzontali locali
+    @Published var profTolMergeM: Float = 0.08   // m: offset max per fondere muri complanari
+    @Published var profProfonditaSporgenzaM: Float = 0.30  // m: oltre = sporgenza strutturale separata
+    @Published var profSensibilita: Float = 0.5  // 0..1: più alto = tieni anche piani piccoli
+    @Published var mostraProfilo = false         // sheet del wizard
+    @Published var autoBCSPreset: AutoBCSPreset = .standard
+    @Published var bcsBinMetri: Float = 0.10
+    @Published var bcsAngTolGradi: Float = 15
+    @Published var bcsMinAreaFacciata: Float = 2.0
+    @Published var bcsMinAreaSpalletta: Float = 0.7
+    @Published var bcsMaxFacciate: Int = 7
+    @Published var bcsMaxSpallette: Int = 10
+
+    /// Soglia area "facciata principale" (frazione dell'area massima), dal profilo.
+    var sogliaAreaPrincipale: Float { 0.28 - 0.18 * profSensibilita }   // 0.28 → 0.10
+    /// Soglia altezza "facciata principale" (frazione altezza edificio), dal profilo.
+    var sogliaAltezzaPrincipale: Float { 0.30 - 0.18 * profSensibilita } // 0.30 → 0.12
+
+    /// Applica i default di tolleranza in base alla tipologia (non tocca Custom).
+    func applicaPresetProfilo() {
+        switch profTipologia {
+        case .storico:
+            profTieniSporgenze = true; profIgnoraBalconi = true
+            profTolMergeM = 0.08; profProfonditaSporgenzaM = 0.30; profSensibilita = 0.55
+        case .moderno:
+            profTieniSporgenze = true; profIgnoraBalconi = true
+            profTolMergeM = 0.05; profProfonditaSporgenzaM = 0.25; profSensibilita = 0.45
+        case .misto:
+            profTieniSporgenze = true; profIgnoraBalconi = true
+            profTolMergeM = 0.07; profProfonditaSporgenzaM = 0.28; profSensibilita = 0.50
+        case .custom:
+            break   // lascia i valori correnti
+        }
+    }
+
+    func applicaPresetAutoBCS(_ preset: AutoBCSPreset) {
+        autoBCSPreset = preset
+        switch preset {
+        case .pochi:
+            bcsBinMetri = 0.12
+            bcsAngTolGradi = 13
+            bcsMinAreaFacciata = 3.5
+            bcsMinAreaSpalletta = 1.2
+            bcsMaxFacciate = 5
+            bcsMaxSpallette = 6
+        case .standard:
+            bcsBinMetri = 0.10
+            bcsAngTolGradi = 15
+            bcsMinAreaFacciata = 2.0
+            bcsMinAreaSpalletta = 0.7
+            bcsMaxFacciate = 7
+            bcsMaxSpallette = 10
+        case .dettaglio:
+            bcsBinMetri = 0.08
+            bcsAngTolGradi = 18
+            bcsMinAreaFacciata = 1.0
+            bcsMinAreaSpalletta = 0.35
+            bcsMaxFacciate = 10
+            bcsMaxSpallette = 16
+        }
+        cursoreInfo = "\(preset.etichetta): preset applicato"
+    }
+    private var selVertici: Set<ElemId> = []
+    private var selSpigoli: Set<ElemId> = []   // k = indice vertice iniziale dello spigolo
+    private var selFacceAllinea: Set<Int> = []
     @Published var asseMovimentoPoligono: AsseMovimentoPoligono = .libero
     private var manigliaPoligonoAttiva: ManigliaPoligonoAttiva?
     @Published var pianiGenerati = 0
@@ -3259,6 +3748,7 @@ final class Mesh3DModel: ObservableObject {
         stimaGravitaDaMuri()           // "su" dai muri verticali → rettangoli dritti
         classificaPerGravita()
         tieniFacciatePrincipali()
+        applicaFiltriProfilo()         // balconi/sporgenze secondo il profilo di rilievo
         generaPoligoniTutti()
         facciaAttivaId = facce.first?.id
         pianiGenerati = facce.count
@@ -3270,11 +3760,97 @@ final class Mesh3DModel: ObservableObject {
         segmentando = false
     }
 
+    /// Auto-proposta architettonica vincolata agli assi edificio/manuali:
+    /// istogrammi di area su Z (facciate/torrette) e X (spallette), quad puliti.
+    @MainActor
+    func segmentaPianiBCS() async {
+        guard !segmentando, !mesh.triangles.isEmpty else { return }
+        segmentando = true
+        cursoreInfo = "Auto BCS: istogrammi assi…"
+        registraUndo()
+        // Assi dalla navigazione (gravità + fronte): aderenti alla facciata. La PCA
+        // sulle posizioni dà bene la normale ma ruota il "su" → la scarto.
+        calcolaAssiNavigazione()
+        let assi = assiNav
+        let m = mesh
+        let binMetri = bcsBinMetri
+        let angTolGradi = bcsAngTolGradi
+        let minAreaFacciata = bcsMinAreaFacciata
+        let minAreaSpalletta = bcsMinAreaSpalletta
+        let maxFacciate = bcsMaxFacciate
+        let maxSpallette = bcsMaxSpallette
+        await Task.yield()
+        let piani = await Task.detached(priority: .userInitiated) {
+            m.segmentaPianiBCS(assi: (right: assi.r, up: assi.u, front: assi.n),
+                               binMetri: binMetri,
+                               angTolGradi: angTolGradi,
+                               minAreaFacciata: minAreaFacciata,
+                               minAreaSpalletta: minAreaSpalletta,
+                               maxFacciate: maxFacciate,
+                               maxSpallette: maxSpallette,
+                               percLo: 5,
+                               percHi: 95)
+        }.value
+
+        facce.removeAll()
+        facceSelezionate.removeAll()
+        facciaAttivaId = nil
+        for p in piani {
+            let colore = FacciaProxy.palette[facce.count % FacciaProxy.palette.count]
+            let prefisso = p.tipo == .spalletta ? "Spalletta" : "Facciata"
+            var f = FacciaProxy(id: prossimoIdFaccia, nome: "\(prefisso) \(prossimoIdFaccia)", colore: colore)
+            prossimoIdFaccia += 1
+            f.tipo = p.tipo
+            f.pianoPunto = p.punto
+            f.pianoNormale = p.normale
+            f.poligono = p.corners
+            facce.append(f)
+        }
+        facciaAttivaId = facce.first?.id
+        pianiGenerati = facce.count
+        mostraProxy = true
+        mostraPiani = true
+        ridisegnaFacce()
+        ridisegnaPiani()
+        let spallette = facce.filter { $0.tipo == .spalletta }.count
+        let facciate = facce.count - spallette
+        cursoreInfo = "Auto BCS: \(facciate) facciate, \(spallette) spallette"
+        segmentando = false
+    }
+
     /// #14 — Unisce facce COMPLANARI e CONNESSE (stesso muro spezzato dalle
     /// finestre o segnato con più tratti). Due torrette complanari ma staccate
     /// NON si fondono (test `adiacenti`).
+    /// Filtri finali dal profilo di rilievo: scarta i balconi (solette orizzontali
+    /// locali a mezza altezza) e, se richiesto, le sporgenze (torrette/bovindi).
+    private func applicaFiltriProfilo() {
+        if !profTieniSporgenze {
+            facce.removeAll { $0.tipo == .torretta || $0.tipo == .spalletta }
+        }
+        guard profIgnoraBalconi, !facce.isEmpty else { return }
+        let su = simd_normalize(gravitaSu)
+        let (lo, hi) = mesh.aabb
+        let quotaLo = simd_dot(lo, su), quotaHi = simd_dot(hi, su)
+        let H = max(quotaHi - quotaLo, estensioneMesh * 0.2)
+        let totale = mesh.areaTriangoli(Set(mesh.triangles.indices))
+        facce.removeAll { f in
+            guard f.tipo == .orizzontale, !f.triangoli.isEmpty else { return false }
+            let a = mesh.areaTriangoli(f.triangoli)
+            var qmin = Float.greatestFiniteMagnitude, qmax = -qmin
+            for ti in f.triangoli {
+                let q = simd_dot(mesh.centroid(mesh.triangles[ti]), su)
+                qmin = min(qmin, q); qmax = max(qmax, q)
+            }
+            let nearTop = qmax > quotaHi - H * 0.18      // tetto/gronda → tieni
+            let nearBottom = qmin < quotaLo + H * 0.08   // terreno → lo gestisce già il keep
+            let piccola = a < totale * 0.05
+            return piccola && !nearTop && !nearBottom     // soletta locale a mezza altezza = balcone/cornice
+        }
+    }
+
     private func mergeComplanariConnessi() {
-        let tolOffset = estensioneMesh * 0.01   // ~1% del lato
+        // Offset max dal profilo (in metri, mesh metrica): la torretta a +1 m NON si fonde.
+        let tolOffset = max(profTolMergeM, estensioneMesh * 0.002)
         var unito = true
         while unito {
             unito = false
@@ -3492,8 +4068,8 @@ final class Mesh3DModel: ObservableObject {
 
         let principaliIds = Set(m.filter {
             $0.verticale &&
-            $0.area >= max(maxArea * 0.18, totale * 0.006) &&
-            $0.altezza >= altezzaMesh * 0.20 &&
+            $0.area >= max(maxArea * sogliaAreaPrincipale, totale * 0.006) &&
+            $0.altezza >= altezzaMesh * sogliaAltezzaPrincipale &&
             $0.fill >= 0.035
         }
         .sorted { $0.area > $1.area }
@@ -3638,6 +4214,174 @@ final class Mesh3DModel: ObservableObject {
 
     /// Poligono corrente della faccia (per catturare l'origine del trascinamento).
     func poligonoDi(_ id: Int) -> [SIMD3<Float>]? { facce.first(where: { $0.id == id })?.poligono }
+
+    // MARK: - Allinea: selezione sub-elementi + allineamento agli assi
+
+    /// Posizione 3D del vertice k del poligono della faccia.
+    func posizioneVertice(faccia id: Int, k: Int) -> SIMD3<Float>? {
+        guard let p = facce.first(where: { $0.id == id })?.poligono, k >= 0, k < p.count else { return nil }
+        return p[k]
+    }
+
+    private func aggiornaNumElementi() {
+        numElementiSel = selVertici.count + selSpigoli.count + selFacceAllinea.count
+    }
+
+    func toggleVerticeAllinea(faccia: Int, k: Int) {
+        let e = ElemId(faccia: faccia, k: k)
+        if selVertici.contains(e) { selVertici.remove(e) } else { selVertici.insert(e) }
+        aggiornaNumElementi(); ridisegnaPiani()
+    }
+    func toggleSpigoloAllinea(faccia: Int, k: Int) {
+        let e = ElemId(faccia: faccia, k: k)
+        if selSpigoli.contains(e) { selSpigoli.remove(e) } else { selSpigoli.insert(e) }
+        aggiornaNumElementi(); ridisegnaPiani()
+    }
+    func toggleFacciaAllinea(_ id: Int) {
+        if selFacceAllinea.contains(id) { selFacceAllinea.remove(id) } else { selFacceAllinea.insert(id) }
+        aggiornaNumElementi(); ridisegnaPiani()
+    }
+    func deselezionaAllinea() {
+        selVertici.removeAll(); selSpigoli.removeAll(); selFacceAllinea.removeAll()
+        attendoSorgenteAllinea = false
+        aggiornaNumElementi(); ridisegnaPiani()
+    }
+    /// Aggiunge alla selezione (da rettangolo/lazo) senza azzerare l'esistente.
+    func aggiungiSelezioneAllinea(vertici: [ElemId], spigoli: [ElemId], facce ids: [Int]) {
+        selVertici.formUnion(vertici); selSpigoli.formUnion(spigoli); selFacceAllinea.formUnion(ids)
+        aggiornaNumElementi(); ridisegnaPiani()
+    }
+
+    /// True se quel vertice è coinvolto dalla selezione corrente (per evidenziarlo).
+    func verticeEvidenziato(faccia: Int, k: Int) -> Bool {
+        if selVertici.contains(ElemId(faccia: faccia, k: k)) { return true }
+        if selFacceAllinea.contains(faccia) { return true }
+        if let poly = facce.first(where: { $0.id == faccia })?.poligono {
+            for e in selSpigoli where e.faccia == faccia {
+                if e.k == k || (e.k + 1) % poly.count == k { return true }
+            }
+        }
+        return false
+    }
+    func spigoloEvidenziato(faccia: Int, k: Int) -> Bool { selSpigoli.contains(ElemId(faccia: faccia, k: k)) }
+    func facciaAllineaSelezionata(_ id: Int) -> Bool { selFacceAllinea.contains(id) }
+
+    /// I tre assi di allineamento (ortonormali) secondo il riferimento scelto.
+    private func assiAllinea() -> (SIMD3<Float>, SIMD3<Float>, SIMD3<Float>) {
+        switch rifAssiAllinea {
+        case .mondo:    return (SIMD3(1,0,0), SIMD3(0,1,0), SIMD3(0,0,1))
+        case .edificio: return (simd_normalize(assiNav.r), simd_normalize(assiNav.u), simd_normalize(assiNav.n))
+        }
+    }
+
+    /// Vertici (faccia,k) coinvolti dalla selezione corrente, espandendo spigoli e facce.
+    private func verticiCoinvolti() -> Set<ElemId> {
+        var out = selVertici
+        for e in selSpigoli {
+            guard let poly = facce.first(where: { $0.id == e.faccia })?.poligono, !poly.isEmpty else { continue }
+            out.insert(ElemId(faccia: e.faccia, k: e.k))
+            out.insert(ElemId(faccia: e.faccia, k: (e.k + 1) % poly.count))
+        }
+        for id in selFacceAllinea {
+            guard let poly = facce.first(where: { $0.id == id })?.poligono else { continue }
+            for k in poly.indices { out.insert(ElemId(faccia: id, k: k)) }
+        }
+        return out
+    }
+
+    /// Allinea i vertici selezionati al PUNTO SORGENTE `p`: per ogni asse attivo,
+    /// la coordinata lungo quell'asse viene posta uguale a quella del sorgente
+    /// (copia-coordinata). Gli assi non attivi restano invariati.
+    func allineaConSorgente(_ p: SIMD3<Float>) {
+        let coinvolti = verticiCoinvolti()
+        guard !coinvolti.isEmpty else { attendoSorgenteAllinea = false; return }
+        let (e0, e1, e2) = assiAllinea()
+        var assi: [SIMD3<Float>] = []
+        if allineaAsse0 { assi.append(e0) }
+        if allineaAsse1 { assi.append(e1) }
+        if allineaAsse2 { assi.append(e2) }
+        guard !assi.isEmpty else { attendoSorgenteAllinea = false; return }
+        registraUndo()
+        // raggruppa per faccia
+        var perFaccia: [Int: [Int]] = [:]
+        for e in coinvolti { perFaccia[e.faccia, default: []].append(e.k) }
+        for (id, ks) in perFaccia {
+            guard let i = facce.firstIndex(where: { $0.id == id }), var poly = facce[i].poligono else { continue }
+            for k in ks where k >= 0 && k < poly.count {
+                var v = poly[k]
+                for e in assi { v += (simd_dot(p, e) - simd_dot(v, e)) * e }   // coord asse = sorgente
+                poly[k] = v
+            }
+            facce[i].poligono = poly
+            // ricalcola piano (Newell) per coerenza con poligono spostato
+            if poly.count >= 3 {
+                var nrm = SIMD3<Float>(0,0,0)
+                for j in poly.indices {
+                    let a = poly[j], b = poly[(j+1) % poly.count]
+                    nrm.x += (a.y - b.y) * (a.z + b.z)
+                    nrm.y += (a.z - b.z) * (a.x + b.x)
+                    nrm.z += (a.x - b.x) * (a.y + b.y)
+                }
+                if simd_length(nrm) > 1e-6 { facce[i].pianoNormale = simd_normalize(nrm) }
+                facce[i].pianoPunto = poly.reduce(SIMD3<Float>(0,0,0), +) / Float(poly.count)
+            }
+        }
+        attendoSorgenteAllinea = false
+        ridisegnaFacce(); ridisegnaPiani()
+    }
+
+    /// Ricalcola normale (Newell) e punto del piano dopo aver spostato il poligono.
+    private func ricalcolaPianoDaPoligono(_ i: Int) {
+        guard let poly = facce[i].poligono, poly.count >= 3 else { return }
+        var nrm = SIMD3<Float>(0,0,0)
+        for j in poly.indices {
+            let a = poly[j], b = poly[(j+1) % poly.count]
+            nrm.x += (a.y - b.y) * (a.z + b.z)
+            nrm.y += (a.z - b.z) * (a.x + b.x)
+            nrm.z += (a.x - b.x) * (a.y + b.y)
+        }
+        if simd_length(nrm) > 1e-6 { facce[i].pianoNormale = simd_normalize(nrm) }
+        facce[i].pianoPunto = poly.reduce(SIMD3<Float>(0,0,0), +) / Float(poly.count)
+    }
+
+    /// Centroide 3D dei vertici coinvolti dalla selezione (per il piano di drag).
+    func centroideSelezioneAllinea() -> SIMD3<Float>? {
+        let vs = verticiCoinvolti()
+        var c = SIMD3<Float>(0,0,0); var n = 0
+        for e in vs { if let p = posizioneVertice(faccia: e.faccia, k: e.k) { c += p; n += 1 } }
+        return n > 0 ? c / Float(n) : nil
+    }
+
+    /// Vincola un delta agli assi attivi (nessuno attivo → libero nel piano vista).
+    func vincolaDeltaAllinea(_ d: SIMD3<Float>) -> SIMD3<Float> {
+        let (e0, e1, e2) = assiAllinea()
+        var assi: [SIMD3<Float>] = []
+        if allineaAsse0 { assi.append(e0) }
+        if allineaAsse1 { assi.append(e1) }
+        if allineaAsse2 { assi.append(e2) }
+        guard !assi.isEmpty else { return d }
+        var out = SIMD3<Float>(0,0,0)
+        for e in assi { out += simd_dot(d, e) * e }
+        return out
+    }
+
+    func iniziaSpostamentoAllinea() { if numElementiSel > 0 { registraUndo() } }
+
+    /// Trasla i vertici coinvolti di `delta` (incrementale durante il drag).
+    func spostaSelezioneAllinea(delta: SIMD3<Float>) {
+        guard simd_length(delta) > 0 else { return }
+        let coinvolti = verticiCoinvolti()
+        guard !coinvolti.isEmpty else { return }
+        var perFaccia: [Int: [Int]] = [:]
+        for e in coinvolti { perFaccia[e.faccia, default: []].append(e.k) }
+        for (id, ks) in perFaccia {
+            guard let i = facce.firstIndex(where: { $0.id == id }), var poly = facce[i].poligono else { continue }
+            for k in ks where k >= 0 && k < poly.count { poly[k] += delta }
+            facce[i].poligono = poly
+            ricalcolaPianoDaPoligono(i)
+        }
+        ridisegnaFacce(); ridisegnaPiani()
+    }
 
     func ciclaAsseMovimentoPoligono() {
         switch asseMovimentoPoligono {
@@ -3974,6 +4718,7 @@ final class Mesh3DModel: ObservableObject {
         perimetroTraccia = false   // si parte posizionando la sezione sul 3D
         strumento = .orbita        // pan = orbita; la mesh resta visibile
         puntiPerimetro = []; numPuntiPerimetro = 0
+        anelliPerimetro = []; numAnelliPerimetro = 0
         mostraMesh = true          // assicura la geometria visibile
         aggiornaSlice()
     }
@@ -3988,6 +4733,7 @@ final class Mesh3DModel: ObservableObject {
         perimetroTraccia = false
         strumento = .orbita
         puntiPerimetro = []; numPuntiPerimetro = 0
+        anelliPerimetro = []; numAnelliPerimetro = 0
         perimetroNode.childNodes.forEach { $0.removeFromParentNode() }
         mostraMesh = true
         // NESSUN cambio camera: resta dove l'hai lasciata → la mesh non sparisce.
@@ -4014,6 +4760,7 @@ final class Mesh3DModel: ObservableObject {
         sliceS0 = sMin + max(0, min(1, quotaSlice)) * (sMax - sMin)
         let segs = mesh.sezione(quota: sliceS0, normale: su)
         ultimaSezione = segs
+        angoliSlice = angoliDaSezione(segs)   // spigoli del profilo per lo snap
         ridisegnaPerimetro(segs)         // overlay 3D
         aggiornaDisegno2D(segs)          // pannello 2D
     }
@@ -4022,8 +4769,16 @@ final class Mesh3DModel: ObservableObject {
     /// della sezione in una polilinea ordinata, poi semplifica (Douglas-Peucker)
     /// → pochi punti sugli spigoli, già pronti per l'estrusione.
     func autoPerimetro() {
-        let segs = ultimaSezione
-        guard !segs.isEmpty else { return }
+        let semplici = angoliDaSezione(ultimaSezione)
+        guard semplici.count >= 2 else { return }
+        puntiPerimetro = semplici; numPuntiPerimetro = semplici.count
+        aggiornaSlice()
+    }
+
+    /// Concatena i segmenti della sezione in una polilinea ordinata (greedy: a
+    /// ogni passo prosegue nel verso più dritto). Base per auto-angoli e snap.
+    private func contornoOrdinato(_ segs: [(SIMD3<Float>, SIMD3<Float>)]) -> [SIMD3<Float>] {
+        guard !segs.isEmpty else { return [] }
         let eps = max(estensioneMesh * 1e-3, 1e-6)
         let inv = 1.0 / eps
         func chiave(_ p: SIMD3<Float>) -> SIMD3<Int32> {
@@ -4059,11 +4814,60 @@ final class Mesh3DModel: ObservableObject {
             prevDir = simd_normalize(pos[nxt] - pos[cur])
             path.append(nxt); cur = nxt
         }
-        let pts3 = path.map { pos[$0] }
-        let semplici = douglasPeucker(pts3, eps: estensioneMesh * 0.012)
-        guard semplici.count >= 2 else { return }
-        puntiPerimetro = semplici; numPuntiPerimetro = semplici.count
-        aggiornaSlice()
+        return path.map { pos[$0] }
+    }
+
+    /// Spigoli del profilo. Il contorno viene semplificato e poi spezzato nei
+    /// MURI (tratti dritti lunghi); lo spigolo è l'INCROCIO delle rette di due muri
+    /// consecutivi → corretto anche sugli angoli SMUSSATI/arrotondati (il punto non
+    /// finisce sullo smusso). `sensibilitaAngoli` regola quanti spigoli emergono.
+    private func angoliDaSezione(_ segs: [(SIMD3<Float>, SIMD3<Float>)]) -> [SIMD3<Float>] {
+        let pts = contornoOrdinato(segs)
+        guard pts.count >= 2 else { return pts }
+        let s = max(0, min(1, sensibilitaAngoli))
+        // sensibilità alta = più dettaglio → eps e lunghezza-min muro più piccole
+        let eps = estensioneMesh * (0.004 + (1 - s) * 0.03)
+        let minMuro = estensioneMesh * (0.02 + (1 - s) * 0.14)
+        let dp = douglasPeucker(pts, eps: eps)
+        guard dp.count >= 3 else { return dp }
+
+        // chiuso se il profilo torna su sé stesso
+        let chiuso = simd_length(dp.first! - dp.last!) < estensioneMesh * 0.02
+        var poly = dp
+        if chiuso, poly.count > 1 { poly.removeLast() }   // togli il doppione di chiusura
+        let n = poly.count
+        guard n >= 3 else { return dp }
+
+        // lati come rette in (u,v); tieni solo i MURI (lati lunghi)
+        struct Retta { let p: CGPoint; let d: CGPoint; let muro: Bool }
+        var rette: [Retta] = []
+        let nLati = chiuso ? n : n - 1
+        for i in 0..<nLati {
+            let a = uv(poly[i]), b = uv(poly[(i + 1) % n])
+            let dx = b.x - a.x, dy = b.y - a.y
+            let len = hypot(dx, dy)
+            guard len > 1e-6 else { continue }
+            rette.append(Retta(p: a, d: CGPoint(x: dx / len, y: dy / len),
+                               muro: Float(len) >= minMuro))
+        }
+        let muri = rette.filter { $0.muro }
+        // pochi muri → fallback ai vertici semplificati
+        guard muri.count >= 2 else { return dp }
+
+        func incrocio(_ r1: Retta, _ r2: Retta) -> CGPoint? {
+            let den = r1.d.x * r2.d.y - r1.d.y * r2.d.x
+            if abs(den) < 1e-6 { return nil }   // paralleli
+            let dx = r2.p.x - r1.p.x, dy = r2.p.y - r1.p.y
+            let t = (dx * r2.d.y - dy * r2.d.x) / den
+            return CGPoint(x: r1.p.x + t * r1.d.x, y: r1.p.y + t * r1.d.y)
+        }
+        var out: [SIMD3<Float>] = []
+        let m = muri.count
+        let coppie = chiuso ? m : m - 1
+        for i in 0..<coppie {
+            if let c = incrocio(muri[i], muri[(i + 1) % m]) { out.append(mondoDaUV(c)) }
+        }
+        return out.count >= 2 ? out : dp
     }
 
     private func douglasPeucker(_ pts: [SIMD3<Float>], eps: Float) -> [SIMD3<Float>] {
@@ -4090,13 +4894,58 @@ final class Mesh3DModel: ObservableObject {
         simd_normalize(gravitaSu) * sliceS0 + perimE1 * Float(p.x) + perimE2 * Float(p.y)
     }
 
-    /// Aggiunge un punto del perimetro dal pannello 2D (coord u,v).
-    func toccaUV(_ p: CGPoint) { aggiungiPuntoPerimetro(mondoDaUV(p)) }
+    /// Aggancia una coord (u,v) allo SPIGOLO del profilo più vicino entro `raggioUV`;
+    /// se nessuno è abbastanza vicino, lascia il punto dov'è. Ritorna il punto 3D.
+    private func snapUVaAngolo(_ p: CGPoint, raggioUV: CGFloat) -> SIMD3<Float> {
+        guard snapPerimetroAttivo else { return mondoDaUV(p) }   // snap disattivato
+        var best: SIMD3<Float>? = nil
+        var bestD = raggioUV
+        for a in angoliSlice {
+            let q = uv(a)
+            let d = hypot(q.x - p.x, q.y - p.y)
+            if d < bestD { bestD = d; best = a }
+        }
+        return best ?? mondoDaUV(p)
+    }
+
+    /// Indice del punto del perimetro più vicino a (u,v) entro `raggioUV`, se c'è.
+    func indicePuntoPerimetro(vicinoUV p: CGPoint, raggioUV: CGFloat) -> Int? {
+        var best: Int? = nil
+        var bestD = raggioUV
+        for (i, q) in puntiPerimetro.map({ uv($0) }).enumerated() {
+            let d = hypot(q.x - p.x, q.y - p.y)
+            if d < bestD { bestD = d; best = i }
+        }
+        return best
+    }
+
+    /// Aggiunge un punto del perimetro dal pannello 2D, agganciandolo allo spigolo
+    /// più vicino entro `raggioSnapUV`.
+    func toccaUV(_ p: CGPoint, raggioSnapUV: CGFloat = 0) {
+        aggiungiPuntoPerimetro(snapUVaAngolo(p, raggioUV: raggioSnapUV))
+    }
+
+    /// Sposta un punto già inserito (drag dal pannello 2D), con snap agli spigoli.
+    /// Usa il refresh LEGGERO: non ricalcola la sezione → trascinamento fluido.
+    func muoviPuntoPerimetro(_ i: Int, aUV p: CGPoint, raggioSnapUV: CGFloat) {
+        guard puntiPerimetro.indices.contains(i) else { return }
+        puntiPerimetro[i] = snapUVaAngolo(p, raggioUV: raggioSnapUV)
+        rinfrescaTraccia()
+    }
+
+    /// Ridisegna SOLO la traccia (2D + overlay 3D) riusando la sezione già calcolata.
+    /// Niente `mesh.sezione` → adatto al trascinamento continuo.
+    private func rinfrescaTraccia() {
+        ridisegnaPerimetro(ultimaSezione)
+        aggiornaDisegno2D(ultimaSezione)
+    }
 
     private func aggiornaDisegno2D(_ segs: [(SIMD3<Float>, SIMD3<Float>)]) {
         var d = PerimetroDisegno()
         d.segmenti = segs.map { (uv($0.0), uv($0.1)) }
         d.punti = puntiPerimetro.map { uv($0) }
+        d.angoli = angoliSlice.map { uv($0) }
+        d.anelli = anelliPerimetro.map { $0.map { uv($0) } }
         var traccia = puntiPerimetro
         if chiudiPerimetro, puntiPerimetro.count >= 3, let f = puntiPerimetro.first { traccia.append(f) }
         d.spline = traccia.map { uv($0) }   // linee rette tra i punti (campo riusato)
@@ -4115,13 +4964,13 @@ final class Mesh3DModel: ObservableObject {
     /// Aggiunge un punto del perimetro (sul piano di slice).
     func aggiungiPuntoPerimetro(_ punto: SIMD3<Float>) {
         puntiPerimetro.append(punto); numPuntiPerimetro = puntiPerimetro.count
-        aggiornaSlice()
+        rinfrescaTraccia()   // la sezione non cambia coi punti → refresh leggero
     }
 
     func annullaUltimoPuntoPerimetro() {
         guard !puntiPerimetro.isEmpty else { return }
         puntiPerimetro.removeLast(); numPuntiPerimetro = puntiPerimetro.count
-        aggiornaSlice()
+        rinfrescaTraccia()
     }
 
     /// Estrude il perimetro tracciato: ogni lato → un piano verticale di facciata
@@ -4153,6 +5002,84 @@ final class Mesh3DModel: ObservableObject {
             f.tipo = .facciata
             facce.append(f)
             fittaPianoAllaMesh(f.id)   // segui il muro reale (anche inclinato)
+        }
+        esciPerimetro()
+        pianiGenerati = facce.count
+        mostraPiani = true
+        facciaAttivaId = facce.last?.id
+        ridisegnaFacce(); ridisegnaPiani()
+    }
+
+    // MARK: Perimetro a più quote → piani inclinati
+
+    /// Salva l'anello corrente (alla sua quota) e prepara il prossimo: il nuovo
+    /// anello PARTE COPIANDO quello appena salvato, così gli spigoli corrispondono
+    /// 1:1 fra le quote. Sposta lo slider di quota e sistema i punti che cambiano.
+    func salvaAnelloPerimetro() {
+        guard puntiPerimetro.count >= 2 else { return }
+        anelliPerimetro.append(puntiPerimetro)
+        numAnelliPerimetro = anelliPerimetro.count
+        copiaUltimoAnelloAllaQuota()   // pre-carica il prossimo anello identico
+    }
+
+    /// Ricarica l'ultimo anello salvato proiettato alla quota corrente dello slice:
+    /// stessi (u,v), nuova altezza. Da usare dopo aver spostato lo slider.
+    func copiaUltimoAnelloAllaQuota() {
+        guard let ultimo = anelliPerimetro.last else { return }
+        puntiPerimetro = ultimo.map { mondoDaUV(uv($0)) }   // uv invariato, quota = sliceS0 corrente
+        numPuntiPerimetro = puntiPerimetro.count
+        rinfrescaTraccia()
+    }
+
+    /// Estrude usando TUTTI gli anelli salvati (≥2): per ogni lato costruisce un
+    /// piano che passa per gli spigoli corrispondenti alle varie quote → se gli
+    /// spigoli sono spostati fra una quota e l'altra, il piano si INCLINA da solo.
+    func estrudiPerimetroInclinato() {
+        var anelli = anelliPerimetro
+        if puntiPerimetro.count >= 2 { anelli.append(puntiPerimetro) }   // includi quello in corso
+        guard anelli.count >= 2 else { estrudiPerimetro(); return }
+        let su = simd_normalize(gravitaSu)
+        let z = SIMD3<Float>(repeating: 0)
+        func quota(_ r: [SIMD3<Float>]) -> Float { simd_dot(r.first ?? z, su) }
+        anelli.sort { quota($0) < quota($1) }
+        // dedup per quota: scarta anelli alla stessa altezza (es. il duplicato in corso)
+        let tolQ = estensioneMesh * 0.01
+        var distinti: [[SIMD3<Float>]] = []
+        for r in anelli {
+            if let last = distinti.last, abs(quota(r) - quota(last)) < tolQ { distinti[distinti.count - 1] = r }
+            else { distinti.append(r) }
+        }
+        anelli = distinti
+        guard anelli.count >= 2 else { estrudiPerimetro(); return }
+        let nPunti = anelli.map(\.count).min() ?? 0
+        guard nPunti >= 2 else { return }
+        registraUndo()
+        let nLati = chiudiPerimetro ? nPunti : nPunti - 1
+        for k in 0..<nLati {
+            let k1 = (k + 1) % nPunti
+            // bordo del lato: su lungo lo spigolo k attraverso le quote, giù lungo k1
+            var loop: [SIMD3<Float>] = []
+            for r in anelli { loop.append(r[k]) }
+            for r in anelli.reversed() { loop.append(r[k1]) }
+            guard loop.count >= 3 else { continue }
+            // normale del poligono (Newell) → robusta anche se inclinato
+            var nrm = SIMD3<Float>(0, 0, 0)
+            for i in loop.indices {
+                let a = loop[i], b = loop[(i + 1) % loop.count]
+                nrm.x += (a.y - b.y) * (a.z + b.z)
+                nrm.y += (a.z - b.z) * (a.x + b.x)
+                nrm.z += (a.x - b.x) * (a.y + b.y)
+            }
+            guard simd_length(nrm) > 1e-6 else { continue }
+            nrm = simd_normalize(nrm)
+            let colore = FacciaProxy.palette[facce.count % FacciaProxy.palette.count]
+            var f = FacciaProxy(id: prossimoIdFaccia, nome: "Facciata \(prossimoIdFaccia)", colore: colore)
+            prossimoIdFaccia += 1
+            f.poligono = loop
+            f.pianoNormale = nrm
+            f.pianoPunto = loop.reduce(SIMD3<Float>(0, 0, 0), +) / Float(loop.count)
+            f.tipo = .facciata
+            facce.append(f)
         }
         esciPerimetro()
         pianiGenerati = facce.count
@@ -4960,7 +5887,9 @@ final class Mesh3DModel: ObservableObject {
             // depth → si occludono correttamente fra loro.
             let soloPiani = !mostraMesh && !mostraTexturaOC
             let m = SCNMaterial()
-            m.diffuse.contents = f.colore.withAlphaComponent(soloPiani ? 1.0 : 0.45)
+            let faSel = strumento == .allinea && facciaAllineaSelezionata(f.id)
+            m.diffuse.contents = faSel ? UIColor.systemOrange.withAlphaComponent(0.6)
+                : f.colore.withAlphaComponent(soloPiani ? 1.0 : 0.45)
             m.isDoubleSided = true; m.lightingModel = .constant
             m.writesToDepthBuffer = soloPiani
             g.materials = [m]
@@ -4973,12 +5902,14 @@ final class Mesh3DModel: ObservableObject {
             // Maniglie (solo sul poligono editabile della faccia attiva):
             // sfere bianche = angoli (Fase C drag), cubetti arancioni = edge
             // (trascina lato / tocca per splittare).
-            if f.poligono != nil, facceAttiveSet.contains(f.id) {
+            let inAllinea = strumento == .allinea
+            if f.poligono != nil, facceAttiveSet.contains(f.id) || inAllinea {
                 let r = max(CGFloat(estensioneMesh) * 0.006, 0.006)
                 let presaR = r * 3.0
                 for (k, c) in corners.enumerated() {
                     let s = SCNSphere(radius: r); s.segmentCount = 12
-                    let sm = SCNMaterial(); sm.diffuse.contents = UIColor.white
+                    let sm = SCNMaterial()
+                    sm.diffuse.contents = (inAllinea && verticeEvidenziato(faccia: f.id, k: k)) ? UIColor.systemOrange : UIColor.white
                     sm.lightingModel = .constant
                     sm.readsFromDepthBuffer = false; sm.writesToDepthBuffer = false
                     s.materials = [sm]
@@ -4999,7 +5930,8 @@ final class Mesh3DModel: ObservableObject {
                     let a = pts3[k], b = pts3[(k + 1) % pts3.count]
                     let mid = (a + b) * 0.5
                     let box = SCNBox(width: r * 1.8, height: r * 1.8, length: r * 0.8, chamferRadius: r * 0.25)
-                    let bm = SCNMaterial(); bm.diffuse.contents = UIColor(EditorTheme.accento)
+                    let bm = SCNMaterial()
+                    bm.diffuse.contents = (inAllinea && spigoloEvidenziato(faccia: f.id, k: k)) ? UIColor.systemOrange : UIColor(EditorTheme.accento)
                     bm.lightingModel = .constant
                     bm.readsFromDepthBuffer = false; bm.writesToDepthBuffer = false
                     box.materials = [bm]

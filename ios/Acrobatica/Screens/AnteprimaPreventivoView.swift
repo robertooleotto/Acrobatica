@@ -6,6 +6,7 @@ struct AnteprimaPreventivoView: View {
     @ObservedObject var preventivo: Preventivo
     @State private var showPDF = false
     @State private var showFirma = false
+    @State private var showListino = false
 
     var body: some View {
         ScrollView {
@@ -24,6 +25,14 @@ struct AnteprimaPreventivoView: View {
         .navigationBarTitleDisplayMode(.inline)
         .navigationDestination(isPresented: $showPDF) { PDFPreventivoView(preventivo: preventivo) }
         .navigationDestination(isPresented: $showFirma) { FirmaClienteView(preventivo: preventivo) }
+        .sheet(isPresented: $showListino) {
+            ListinoView(selectionMode: true) { voci in
+                for v in voci {
+                    preventivo.voci.append(VoceLavoro(descrizione: v.descrizione, quantita: 1,
+                                                      unita: v.unita, prezzoUnitario: v.prezzoUnitario))
+                }
+            }
+        }
     }
 
     private var header: some View {
@@ -49,9 +58,13 @@ struct AnteprimaPreventivoView: View {
 
     private var vociSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
+            HStack(spacing: 14) {
                 Text("Voci di lavoro").font(Theme.Typo.title(15)).foregroundStyle(Theme.navy)
                 Spacer()
+                Button { showListino = true } label: {
+                    Label("Da listino", systemImage: "list.bullet.rectangle")
+                        .font(Theme.Typo.caption(12, .semibold)).foregroundColor(Theme.navy)
+                }
                 Button {
                     preventivo.voci.append(VoceLavoro(descrizione: "Nuova voce"))
                 } label: {

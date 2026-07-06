@@ -16,3 +16,4 @@ ios/Pods/
 
 # Local Supabase session dumps for offline testing
 backend/data/fixtures/
+exports/

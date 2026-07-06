@@ -53,6 +53,7 @@ struct ProjectedPatch {
     let geometry: SCNGeometry
     let vertices: [SIMD3<Float>]
     let indices: [UInt32]
+    var texcoords: [SIMD2<Float>] = []
 }
 
 struct BCSPlaneFile: Decodable {
@@ -79,17 +80,23 @@ final class ViewerModel: ObservableObject {
     @Published var showProjectedPhoto = false
     @Published var projectMultiplePhotos = false
     @Published var projectionCrop: Double = 0.9
-    @Published var projectionMaxPhotos: Double = 12
+    @Published var projectionMaxPhotos: Double = 60
     @Published var projectionFacingThreshold: Double = 0.34
     @Published var projectionMinCoverage: Double = 0.002
     @Published var occlusionEnabled = false
     @Published var showPhotoBorders = true
     @Published var showUncoveredCells = true
+    @Published var showObliqueCells = false
+    @Published var obliqueAngleDegrees: Double = 60
     @Published var photoConsensusEnabled = true
     @Published var excludedShotIDs = Set<Int>()
-    @Published var continuityBonus: Double = 0.15
+    @Published var continuityBonus: Double = 0.2
+    @Published var edgeCleanupStrength: Double = 0.5
     @Published var fillHolesEnabled = true
     @Published var lastResortFillEnabled = true
+    @Published var bakeResolutionMM: Double = 8
+    @Published var bakeStatus = ""
+    @Published var meshScaleInfo = ""
     @Published var showPhotoPlane = true
     @Published var showOriginalTexturedMesh = false
     @Published var ocTextureOpacity: Double = 0.72
@@ -124,6 +131,22 @@ final class ViewerModel: ObservableObject {
     private var occlusionTesterCache: OcclusionTester?
     private var occlusionMeshURL: URL?
     private var photoSampleCache: [Int: (width: Int, height: Int, rgba: [UInt8])] = [:]
+    private var photoFullCache: [Int: (width: Int, height: Int, rgba: [UInt8])] = [:]
+    private var nsImageCache: [Int: NSImage] = [:]
+
+    // --- editor piani ---
+    @Published var editPlanesMode = false
+    @Published var editPlaneIndex = 0
+    @Published var editPlaneCount = 0
+    @Published var editSensitivity: Double = 1.0
+    @Published var editStepCM: Double = 5
+    @Published var liveEditProjection = true
+    private var liveDragging = false
+    private let editHandlesNode = SCNNode()
+    var editablePlanes: [[SIMD3<Float>]] = []
+    private var activeHandleKind = -1
+    private var editSelectedKind = -1
+    private var activeAxis = -1
 
     init() {
         scene.rootNode.addChildNode(rootNode)
@@ -134,6 +157,7 @@ final class ViewerModel: ObservableObject {
         rootNode.addChildNode(projectedPhotoNode)
         rootNode.addChildNode(camerasNode)
         rootNode.addChildNode(photoPlaneNode)
+        rootNode.addChildNode(editHandlesNode)
 
         cameraNode.camera = SCNCamera()
         cameraNode.camera?.zNear = 0.001
@@ -184,10 +208,59 @@ final class ViewerModel: ObservableObject {
     }
 
     func chooseMesh() {
-        if let url = openFile(allowed: ["obj", "usdz", "dae", "scn"]) {
-            meshURL = url
-            reload()
+        guard let url = openFile(allowed: ["obj", "usdz", "dae", "scn"]) else { return }
+        var useURL = url
+        // auto-scala la mesh caricata sul frame delle pose (bbox di model_nobbox):
+        // il retopo è in scala metrica (~6× più grande) e altrimenti non allinea.
+        if url.pathExtension.lowercased() == "obj",
+           let target = try? Self.parseOBJ(originalOCMesh),
+           let loaded = try? Self.parseOBJ(url) {
+            let td = Self.bboxDiagonal(target), ld = Self.bboxDiagonal(loaded)
+            if ld > 1e-6 {
+                let factor = td / ld
+                if abs(factor - 1) > 0.03, let scaled = try? Self.writeScaledOBJ(from: url, factor: factor) {
+                    useURL = scaled
+                    meshScaleInfo = String(format: "auto-scala ×%.3f", factor)
+                } else {
+                    meshScaleInfo = ""
+                }
+            }
         }
+        meshURL = useURL
+        // la mesh caricata fa da occlusore/riferimento di sé stessa:
+        // essenziale per proiettare sulla geometria 3D vera senza attraversare gli aggetti.
+        referenceMeshURL = useURL
+        occlusionTesterCache = nil
+        showReferenceMesh = false
+        reload()
+    }
+
+    private static func bboxDiagonal(_ mesh: SimpleOBJMesh) -> Float {
+        guard let first = mesh.vertices.first else { return 0 }
+        var mn = first, mx = first
+        for v in mesh.vertices { mn = simd_min(mn, v); mx = simd_max(mx, v) }
+        return simd_length(mx - mn)
+    }
+
+    private static func writeScaledOBJ(from url: URL, factor: Float) throws -> URL {
+        let text = try String(contentsOf: url)
+        var out = ""
+        out.reserveCapacity(text.count)
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            if line.hasPrefix("v ") {
+                let p = line.split(separator: " ")
+                if p.count >= 4, let x = Float(p[1]), let y = Float(p[2]), let z = Float(p[3]) {
+                    out += "v \(x * factor) \(y * factor) \(z * factor)\n"
+                    continue
+                }
+            }
+            out += line
+            out += "\n"
+        }
+        let dst = FileManager.default.temporaryDirectory
+            .appendingPathComponent("scaled_\(url.deletingPathExtension().lastPathComponent).obj")
+        try out.write(to: dst, atomically: true, encoding: .utf8)
+        return dst
     }
 
     func useOriginalOCMesh() {
@@ -372,7 +445,7 @@ final class ViewerModel: ObservableObject {
             let crop = min(max(projectionCrop, 0.2), 1.0)
 
             if projectMultiplePhotos {
-                let tester = occlusionTesterIfNeeded()
+                let tester = liveDragging ? nil : occlusionTesterIfNeeded()
                 let activeShots = shots.filter { !excludedShotIDs.contains($0.id) }
                 let result = Self.buildMosaic(
                     mesh: mesh,
@@ -380,13 +453,16 @@ final class ViewerModel: ObservableObject {
                     cropFraction: crop,
                     minSurfaceFacing: Float(min(max(projectionFacingThreshold, 0.0), 0.99)),
                     maxPerBucket: max(Int(projectionMaxPhotos), 1),
-                    minAreaFraction: Float(max(projectionMinCoverage, 0)),
-                    continuityBonus: Float(min(max(continuityBonus, 0), 1)),
-                    fillHoles: fillHolesEnabled,
-                    lastResortFill: lastResortFillEnabled,
-                    occlusion: occlusionEnabled ? tester : nil,
+                    minAreaFraction: liveDragging ? 0 : Float(max(projectionMinCoverage, 0)),
+                    continuityBonus: liveDragging ? 0 : Float(min(max(continuityBonus, 0), 1)),
+                    edgeCleanup: liveDragging ? 0 : Float(min(max(edgeCleanupStrength, 0), 2)),
+                    fillHoles: liveDragging ? false : fillHolesEnabled,
+                    lastResortFill: liveDragging ? false : lastResortFillEnabled,
+                    obliqueMaxFacing: (!liveDragging && showObliqueCells) ? Float(cos(obliqueAngleDegrees * .pi / 180)) : 0,
+                    occlusion: (!liveDragging && occlusionEnabled) ? tester : nil,
+                    cellSize: liveDragging ? 0.22 : 0.055,
                     orientationProbe: tester,
-                    colorSampler: photoConsensusEnabled
+                    colorSampler: (!liveDragging && photoConsensusEnabled)
                         ? { [weak self] shotID, u, v in self?.photoColor(shotID: shotID, u: u, v: v) }
                         : nil
                 )
@@ -407,6 +483,17 @@ final class ViewerModel: ObservableObject {
                     }
                     projected += 1
                 }
+                if showObliqueCells, !result.oblique.isEmpty {
+                    let geometry = Self.solidTriangleGeometry(
+                        vertices: result.oblique,
+                        color: NSColor(calibratedRed: 0.98, green: 0.60, blue: 0.05, alpha: 1.0)
+                    )
+                    geometry.firstMaterial?.transparency = 0.4
+                    geometry.firstMaterial?.writesToDepthBuffer = false
+                    let node = SCNNode(geometry: geometry)
+                    node.renderingOrder = 3
+                    projectedPhotoNode.addChildNode(node)
+                }
                 if showUncoveredCells, !result.uncovered.isEmpty {
                     let geometry = Self.solidTriangleGeometry(
                         vertices: result.uncovered,
@@ -418,7 +505,9 @@ final class ViewerModel: ObservableObject {
                 }
                 let gateDegrees = Int(acos(Double(min(max(projectionFacingThreshold, 0), 1))) * 180 / .pi)
                 let holeCount = result.uncovered.count / 3
-                status = "\(shots.count) pose · mosaico \(projected) foto (\(result.keptCount) selezionate) · gate \(gateDegrees)° · occl \(occlusionEnabled ? "on" : "off") · buchi \(holeCount)"
+                let obliqueCount = result.oblique.count / 3
+                let obliqueMsg = showObliqueCells ? " · oblique \(obliqueCount)" : ""
+                status = "\(shots.count) pose · mosaico \(projected) foto (\(result.keptCount) selezionate) · gate \(gateDegrees)° · occl \(occlusionEnabled ? "on" : "off") · buchi \(holeCount)\(obliqueMsg)"
                 return
             }
 
@@ -622,6 +711,585 @@ final class ViewerModel: ObservableObject {
             occlusionMeshURL = referenceMeshURL
         }
         return occlusionTesterCache
+    }
+
+    private func photoFullPixels(_ shotID: Int) -> (width: Int, height: Int, rgba: [UInt8])? {
+        if let cached = photoFullCache[shotID] { return cached }
+        let url = photosURL.appendingPathComponent(String(format: "%04d.jpg", shotID))
+        guard let image = NSImage(contentsOf: url),
+              let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        let w = cg.width, h = cg.height
+        var buffer = [UInt8](repeating: 0, count: w * h * 4)
+        let cs = CGColorSpaceCreateDeviceRGB()
+        let ok = buffer.withUnsafeMutableBytes { raw -> Bool in
+            guard let ctx = CGContext(data: raw.baseAddress, width: w, height: h, bitsPerComponent: 8,
+                                      bytesPerRow: w * 4, space: cs,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        guard ok else { return nil }
+        if photoFullCache.count > 60 { photoFullCache.removeAll() }
+        let entry = (w, h, buffer)
+        photoFullCache[shotID] = entry
+        return entry
+    }
+
+    // Parsa l'OBJ preservando i gruppi: per ogni piano restituisce i 4 corner (in ordine di rettangolo).
+    private static func parseOBJPlaneGroups(_ url: URL) throws -> [(name: String, corners: [SIMD3<Float>])] {
+        let text = try String(contentsOf: url)
+        var verts: [SIMD3<Float>] = []
+        var groups: [(name: String, faceVerts: [Int])] = []
+        var current = -1
+        for line in text.split(whereSeparator: \.isNewline) {
+            if line.hasPrefix("v ") {
+                let p = line.split(separator: " ")
+                if p.count >= 4, let x = Float(p[1]), let y = Float(p[2]), let z = Float(p[3]) {
+                    verts.append(SIMD3<Float>(x, y, z))
+                }
+            } else if line.hasPrefix("g ") {
+                groups.append((String(line.dropFirst(2)), []))
+                current = groups.count - 1
+            } else if line.hasPrefix("f "), current >= 0 {
+                for tok in line.split(separator: " ").dropFirst() {
+                    if let raw = tok.split(separator: "/").first, let idx = Int(raw) {
+                        groups[current].faceVerts.append(idx > 0 ? idx - 1 : verts.count + idx)
+                    }
+                }
+            }
+        }
+        return groups.compactMap { g in
+            var seen: [Int] = []
+            for v in g.faceVerts where !seen.contains(v) { seen.append(v) }
+            guard seen.count >= 4 else { return nil }
+            let corners = seen.prefix(4).map { verts[$0] }
+            return (g.name, Array(corners))
+        }
+    }
+
+    func bakeOrthophotos() {
+        bakeStatus = "Bake in corso…"
+        error = nil
+        do {
+            let planes = try Self.parseOBJPlaneGroups(meshURL)
+            guard !planes.isEmpty else { bakeStatus = "Nessun gruppo piano nell'OBJ"; return }
+            let res = Float(max(bakeResolutionMM, 1) / 1000)  // m/texel
+            let activeShots = shots.filter { !excludedShotIDs.contains($0.id) }
+            let tester = occlusionTesterIfNeeded()
+            let stamp = Self.timestamp()
+            let outDir = defaultRoot.appendingPathComponent("exports/ortho_bake_\(stamp)")
+            try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+            // trasformazione OC→metrico: i piani/pose sono in frame OC (~6× più piccolo del reale);
+            // risoluzione e aree vanno calcolate in metri, non in unità OC.
+            let metricT = try? Self.loadTransform(rowMajorJSON:
+                meshURL.deletingLastPathComponent().appendingPathComponent("oc_to_arkit_transform.json"))
+            func toMetric(_ p: SIMD3<Float>) -> SIMD3<Float> {
+                guard let m = metricT else { return p }
+                let v = m * SIMD4<Float>(p.x, p.y, p.z, 1)
+                return SIMD3<Float>(v.x, v.y, v.z)
+            }
+
+            var done = 0
+            var totalTexels = 0
+            var baked: [(name: String, w: Int, h: Int, rgba: [UInt8], area: Float, widthM: Float, heightM: Float)] = []
+            for (pi, plane) in planes.enumerated() {
+                let c = plane.corners
+                // L'ALTEZZA è lo spigolo più allineato alla verticale (gravità): l'ordine
+                // degli angoli non è coerente fra i piani (plane_3/7 ruotati 90°), quindi
+                // NON assumere sempre c3-c0. Origine = corner in basso dello spigolo verticale.
+                let mcRaw = c.map(toMetric)
+                let up = SIMD3<Float>(0, 1, 0)
+                let e1 = c[1] - c[0], e3 = c[3] - c[0]
+                let m1 = mcRaw[1] - mcRaw[0], m3 = mcRaw[3] - mcRaw[0]
+                let e3IsVertical = abs(simd_dot(simd_normalize(m3), up)) >= abs(simd_dot(simd_normalize(m1), up))
+                let vAxis = e3IsVertical ? e3 : e1     // verticale (altezza)
+                let uAxis = e3IsVertical ? e1 : e3     // orizzontale (larghezza)
+                let vAxisM = e3IsVertical ? m3 : m1
+                let uAxisM = e3IsVertical ? m1 : m3
+                let widthOC = simd_length(uAxis)
+                let heightOC = simd_length(vAxis)
+                guard widthOC > 0.01, heightOC > 0.01 else { continue }
+                let uHat = uAxis / widthOC
+                let vHat = vAxis / heightOC
+                let mc = c.map(toMetric)
+                let widthM = simd_length(uAxisM)
+                let heightM = simd_length(vAxisM)
+                guard widthM > 0.05, heightM > 0.05 else { continue }
+                let area = 0.5 * simd_length(simd_cross(mc[1] - mc[0], mc[2] - mc[0]))
+                         + 0.5 * simd_length(simd_cross(mc[2] - mc[0], mc[3] - mc[0]))
+                let px = max(min(Int((widthM / res).rounded()), 8000), 8)
+                let py = max(min(Int((heightM / res).rounded()), 8000), 8)
+
+                // mosaico solo per questo piano (2 triangoli)
+                let planeMesh = SimpleOBJMesh(
+                    vertices: c,
+                    triangles: [SIMD3<Int32>(0, 1, 2), SIMD3<Int32>(0, 2, 3)]
+                )
+                let result = Self.buildMosaic(
+                    mesh: planeMesh, shots: activeShots, cropFraction: min(max(projectionCrop, 0.2), 1.0),
+                    minSurfaceFacing: Float(min(max(projectionFacingThreshold, 0.0), 0.99)),
+                    maxPerBucket: max(Int(projectionMaxPhotos), 1),
+                    minAreaFraction: Float(max(projectionMinCoverage, 0)),
+                    continuityBonus: Float(min(max(continuityBonus, 0), 1)),
+                    edgeCleanup: Float(min(max(edgeCleanupStrength, 0), 2)),
+                    fillHoles: fillHolesEnabled, lastResortFill: lastResortFillEnabled,
+                    obliqueMaxFacing: 0,
+                    occlusion: occlusionEnabled ? tester : nil, orientationProbe: tester,
+                    colorSampler: photoConsensusEnabled ? { [weak self] id, u, v in self?.photoColor(shotID: id, u: u, v: v) } : nil
+                )
+
+                var rgba = [UInt8](repeating: 0, count: px * py * 4)
+                for (shotID, patch) in result.patches {
+                    guard let photo = photoFullPixels(shotID), patch.texcoords.count == patch.vertices.count else { continue }
+                    var t = 0
+                    while t + 2 < patch.indices.count {
+                        let ia = Int(patch.indices[t]), ib = Int(patch.indices[t + 1]), ic = Int(patch.indices[t + 2])
+                        Self.rasterizeTriangle(
+                            world: (patch.vertices[ia], patch.vertices[ib], patch.vertices[ic]),
+                            photoUV: (patch.texcoords[ia], patch.texcoords[ib], patch.texcoords[ic]),
+                            origin: c[0], uHat: uHat, vHat: vHat, widthM: widthOC, heightM: heightOC,
+                            texW: px, texH: py, photo: photo, out: &rgba
+                        )
+                        t += 3
+                    }
+                }
+
+                let safeName = plane.name.replacingOccurrences(of: " ", with: "_")
+                let pngURL = outDir.appendingPathComponent("\(safeName).png")
+                try Self.writePNG(rgba: rgba, width: px, height: py, to: pngURL)
+                try Self.writePlaneOBJ(name: safeName, corners: mc, widthM: widthM, heightM: heightM, dir: outDir)
+                baked.append((safeName, px, py, rgba, area, widthM, heightM))
+                totalTexels += px * py
+                done += 1
+                bakeStatus = "Bake \(done)/\(planes.count) · \(safeName) \(px)×\(py)"
+            }
+
+            // FOGLIO UNICO: tutti i piani stesi frontali a scala costante (packing a scaffali)
+            let gap = 16
+            let shelfMaxW = 4096
+            let order = baked.indices.sorted { baked[$0].h > baked[$1].h }
+            var placements: [(idx: Int, x: Int, y: Int)] = []
+            var cx = gap, cy = gap, rowH = 0, atlasW = gap
+            for oi in order {
+                let b = baked[oi]
+                if cx > gap, cx + b.w + gap > shelfMaxW { cx = gap; cy += rowH + gap; rowH = 0 }
+                placements.append((oi, cx, cy))
+                cx += b.w + gap
+                rowH = max(rowH, b.h)
+                atlasW = max(atlasW, cx)
+            }
+            let atlasH = cy + rowH + gap
+            if atlasW > 0, atlasH > 0, atlasW * atlasH < 200_000_000 {
+                var atlas = [UInt8](repeating: 0, count: atlasW * atlasH * 4)
+                for p in placements {
+                    let b = baked[p.idx]
+                    for row in 0..<b.h {
+                        let src = row * b.w * 4
+                        let dst = ((p.y + row) * atlasW + p.x) * 4
+                        atlas.replaceSubrange(dst..<(dst + b.w * 4), with: b.rgba[src..<(src + b.w * 4)])
+                    }
+                }
+                try Self.writePNG(rgba: atlas, width: atlasW, height: atlasH,
+                                  to: outDir.appendingPathComponent("_foglio_unico.png"))
+            }
+
+            // REPORT SUPERFICI
+            var report = "Superfici piani — bake ortografico \(Int(bakeResolutionMM)) mm/texel\n"
+            report += metricT != nil
+                ? "(aree in METRI reali via oc_to_arkit_transform, normale frontale)\n\n"
+                : "(ATTENZIONE: nessuna trasformazione metrica trovata — aree in unità OC!)\n\n"
+            var total: Float = 0
+            for b in baked {
+                let name = b.name.padding(toLength: 22, withPad: " ", startingAt: 0)
+                report += String(format: "%@ %6.2f × %6.2f m   %8.2f m²\n", name, b.widthM, b.heightM, b.area)
+                total += b.area
+            }
+            report += String(format: "\n%@ %26.2f m²\n", "TOTALE".padding(toLength: 22, withPad: " ", startingAt: 0), total)
+            try report.write(to: outDir.appendingPathComponent("_superfici.txt"), atomically: true, encoding: .utf8)
+
+            bakeStatus = String(format: "Fatto: %d piani · %.2f m² totali · exports/ortho_bake_%@", done, total, stamp)
+        } catch {
+            self.error = String(describing: error)
+            bakeStatus = "Errore bake"
+        }
+    }
+
+    // ============================ EDITOR PIANI ============================
+
+    func setEditMode(_ on: Bool) {
+        editPlanesMode = on
+        if on {
+            editablePlanes = ((try? Self.parseOBJPlaneGroups(meshURL)) ?? []).map { Array($0.corners.prefix(4)) }
+                .filter { $0.count == 4 }
+            editPlaneCount = editablePlanes.count
+            editPlaneIndex = min(editPlaneIndex, max(editPlaneCount - 1, 0))
+            refreshEditablePlanes()
+        } else {
+            editHandlesNode.childNodes.forEach { $0.removeFromParentNode() }
+            editablePlanes = []
+            editPlaneCount = 0
+            simpleMesh = nil
+            reload()
+        }
+    }
+
+    private func planeAxes(_ quad: [SIMD3<Float>]) -> (u: SIMD3<Float>, v: SIMD3<Float>, n: SIMD3<Float>) {
+        let u = simd_normalize(quad[1] - quad[0])
+        var n = simd_cross(quad[1] - quad[0], quad[3] - quad[0])
+        let nl = simd_length(n)
+        n = nl > 1e-6 ? n / nl : SIMD3<Float>(0, 0, 1)
+        let v = simd_normalize(simd_cross(n, u))
+        return (u, v, n)
+    }
+
+    private func projectedPhotoImage(_ shotID: Int) -> NSImage? {
+        if let cached = nsImageCache[shotID] { return cached }
+        let url = photosURL.appendingPathComponent(String(format: "%04d.jpg", shotID))
+        let img = NSImage(contentsOf: url)
+        nsImageCache[shotID] = img
+        return img
+    }
+
+    private func planeRenderNode(_ idx: Int) -> SCNNode {
+        let geometry = Self.quadGeometry(editablePlanes[idx])
+        let material = SCNMaterial()
+        let sel = idx == editPlaneIndex
+        material.diffuse.contents = sel
+            ? NSColor(calibratedRed: 1.0, green: 0.35, blue: 0.15, alpha: 0.28)
+            : NSColor(calibratedRed: 0.25, green: 0.6, blue: 1.0, alpha: 0.12)
+        material.lightingModel = .constant
+        material.isDoubleSided = true
+        material.transparency = sel ? 0.28 : 0.12
+        material.writesToDepthBuffer = false
+        geometry.materials = [material]
+        let node = SCNNode(geometry: geometry)
+        node.name = "R\(idx)"
+        node.renderingOrder = 5
+        return node
+    }
+
+    // Proietta le foto PER PIANO in nodi separati. Durante il drag riproietta solo il
+    // piano selezionato (coarse); il resto resta com'è → tempo reale.
+    func reprojectEditablePlanes(onlyIndex: Int?, coarse: Bool) {
+        guard editPlanesMode else { return }
+        guard showProjectedPhoto, projectMultiplePhotos else {
+            projectedPhotoNode.childNodes.forEach { $0.removeFromParentNode() }
+            return
+        }
+        let indices = onlyIndex.map { [$0] } ?? Array(editablePlanes.indices)
+        if onlyIndex == nil { projectedPhotoNode.childNodes.forEach { $0.removeFromParentNode() } }
+        let activeShots = shots.filter { !excludedShotIDs.contains($0.id) }
+        let tester = (!coarse && occlusionEnabled) ? occlusionTesterIfNeeded() : nil
+        for idx in indices where idx < editablePlanes.count {
+            projectedPhotoNode.childNode(withName: "P\(idx)", recursively: false)?.removeFromParentNode()
+            let quad = editablePlanes[idx]
+            let mesh = SimpleOBJMesh(vertices: quad, triangles: [SIMD3<Int32>(0, 1, 2), SIMD3<Int32>(0, 2, 3)])
+            let result = Self.buildMosaic(
+                mesh: mesh, shots: activeShots, cropFraction: min(max(projectionCrop, 0.2), 1.0),
+                minSurfaceFacing: Float(min(max(projectionFacingThreshold, 0.0), 0.99)),
+                maxPerBucket: max(Int(projectionMaxPhotos), 1),
+                minAreaFraction: coarse ? 0 : Float(max(projectionMinCoverage, 0)),
+                continuityBonus: coarse ? 0 : Float(min(max(continuityBonus, 0), 1)),
+                edgeCleanup: coarse ? 0 : Float(min(max(edgeCleanupStrength, 0), 2)),
+                fillHoles: coarse ? false : fillHolesEnabled,
+                lastResortFill: coarse ? false : lastResortFillEnabled,
+                obliqueMaxFacing: 0,
+                occlusion: tester,
+                cellSize: coarse ? 0.22 : 0.055,
+                colorSampler: (!coarse && photoConsensusEnabled)
+                    ? { [weak self] id, u, v in self?.photoColor(shotID: id, u: u, v: v) } : nil
+            )
+            let group = SCNNode()
+            group.name = "P\(idx)"
+            for (shotID, patch) in result.patches {
+                guard patch.geometry.elements.first?.primitiveCount ?? 0 > 0,
+                      let img = projectedPhotoImage(shotID) else { continue }
+                patch.geometry.materials = [Self.projectedPhotoMaterial(image: img)]
+                group.addChildNode(SCNNode(geometry: patch.geometry))
+            }
+            projectedPhotoNode.addChildNode(group)
+        }
+    }
+
+    // Ricostruisce render + mesh di proiezione + maniglie dai piani editabili (rebuild completo).
+    func refreshEditablePlanes(reproject: Bool = true) {
+        guard !editablePlanes.isEmpty else { return }
+        meshNode.childNodes.forEach { $0.removeFromParentNode() }
+        var verts: [SIMD3<Float>] = []
+        var tris: [SIMD3<Int32>] = []
+        for (idx, quad) in editablePlanes.enumerated() {
+            let b = Int32(verts.count)
+            verts.append(contentsOf: quad)
+            tris.append(SIMD3<Int32>(b, b + 1, b + 2))
+            tris.append(SIMD3<Int32>(b, b + 2, b + 3))
+            meshNode.addChildNode(planeRenderNode(idx))
+        }
+        simpleMesh = SimpleOBJMesh(vertices: verts, triangles: tris)
+        rebuildEditHandles()
+        rebuildCellGrid()
+        if reproject { reprojectEditablePlanes(onlyIndex: nil, coarse: false) }
+    }
+
+    // Aggiorna SOLO il render del piano selezionato (leggero, per il drag live).
+    private func updateSelectedPlaneRender() {
+        meshNode.childNode(withName: "R\(editPlaneIndex)", recursively: false)?.removeFromParentNode()
+        meshNode.addChildNode(planeRenderNode(editPlaneIndex))
+        rebuildEditHandles()
+    }
+
+    private func selectedHandlePosition() -> SIMD3<Float>? {
+        guard editPlaneIndex < editablePlanes.count, editSelectedKind >= 0 else { return nil }
+        let quad = editablePlanes[editPlaneIndex]
+        if editSelectedKind < 4 { return quad[editSelectedKind] }
+        let e = editSelectedKind - 10
+        return (quad[e] + quad[(e + 1) % 4]) / 2
+    }
+
+    private func rebuildEditHandles() {
+        editHandlesNode.childNodes.forEach { $0.removeFromParentNode() }
+        guard editPlanesMode, editPlaneIndex < editablePlanes.count else { return }
+        let quad = editablePlanes[editPlaneIndex]
+        var mn = quad[0], mx = quad[0]
+        for c in quad { mn = simd_min(mn, c); mx = simd_max(mx, c) }
+        let r = CGFloat(max(simd_length(mx - mn) * 0.02, 0.01))
+        func handle(_ pos: SIMD3<Float>, kind: Int, corner: Bool) {
+            let s = SCNSphere(radius: corner ? r : r * 0.75)
+            let m = SCNMaterial()
+            let isSel = kind == editSelectedKind
+            let base: NSColor = corner ? .systemYellow : .systemGreen
+            m.diffuse.contents = isSel ? NSColor.systemRed : base
+            m.emission.contents = isSel ? NSColor.systemRed : base
+            m.lightingModel = .constant
+            m.readsFromDepthBuffer = false
+            s.materials = [m]
+            let node = SCNNode(geometry: s)
+            node.simdPosition = pos
+            node.name = "EDIT:\(kind)"
+            node.renderingOrder = 20
+            editHandlesNode.addChildNode(node)
+        }
+        for i in 0..<4 { handle(quad[i], kind: i, corner: true) }
+        for e in 0..<4 { handle((quad[e] + quad[(e + 1) % 4]) / 2, kind: 10 + e, corner: false) }
+
+        // Gizmo a assi sulla maniglia selezionata: U(rosso) V(verde) N(blu=normale)
+        if let anchor = selectedHandlePosition() {
+            let axes = planeAxes(quad)
+            let len = Float(max(simd_length(mx - mn) * 0.22, 0.05))
+            func axis(_ dir: SIMD3<Float>, index: Int, color: NSColor) {
+                let cyl = SCNCylinder(radius: CGFloat(len) * 0.05, height: CGFloat(len))
+                let m = SCNMaterial()
+                m.diffuse.contents = color
+                m.emission.contents = color
+                m.lightingModel = .constant
+                m.readsFromDepthBuffer = false
+                cyl.materials = [m]
+                let bar = SCNNode(geometry: cyl)
+                bar.simdPosition = SIMD3<Float>(0, len / 2, 0)  // estende da anchor lungo +Y locale
+                let node = SCNNode()
+                node.simdPosition = anchor
+                node.simdOrientation = simd_quatf(from: SIMD3<Float>(0, 1, 0), to: simd_normalize(dir))
+                node.addChildNode(bar)
+                node.name = "AXIS:\(index)"
+                node.renderingOrder = 21
+                editHandlesNode.addChildNode(node)
+            }
+            axis(axes.u, index: 0, color: .systemRed)
+            axis(axes.v, index: 1, color: .systemGreen)
+            axis(axes.n, index: 2, color: .systemBlue)
+        }
+    }
+
+    func beginHandleDrag(name: String?) {
+        activeAxis = -1
+        activeHandleKind = -1
+        if let name, name.hasPrefix("AXIS:"), let a = Int(name.dropFirst(5)) {
+            activeAxis = a
+            return
+        }
+        if let name, name.hasPrefix("EDIT:"), let k = Int(name.dropFirst(5)) {
+            activeHandleKind = k
+            if k != editSelectedKind {
+                editSelectedKind = k
+                rebuildEditHandles()
+            }
+        }
+    }
+
+    private func applyDelta(_ delta: SIMD3<Float>) {
+        guard editSelectedKind >= 0, editPlaneIndex < editablePlanes.count else { return }
+        var quad = editablePlanes[editPlaneIndex]
+        if editSelectedKind < 4 {
+            quad[editSelectedKind] += delta
+        } else {
+            let e = editSelectedKind - 10
+            quad[e] += delta
+            quad[(e + 1) % 4] += delta
+        }
+        editablePlanes[editPlaneIndex] = quad
+        // SOLO il piano selezionato: render leggero + (opzionale) riproiezione veloce.
+        updateSelectedPlaneRender()
+        if liveEditProjection && showProjectedPhoto && projectMultiplePhotos {
+            reprojectEditablePlanes(onlyIndex: editPlaneIndex, coarse: true)
+        }
+    }
+
+    // Trascinamento LIBERO (nel piano) della maniglia selezionata.
+    func dragHandle(deltaX: CGFloat, deltaY: CGFloat) {
+        guard activeHandleKind >= 0, editPlaneIndex < editablePlanes.count else { return }
+        let axes = planeAxes(editablePlanes[editPlaneIndex])
+        let diag = simd_length(editablePlanes[editPlaneIndex][2] - editablePlanes[editPlaneIndex][0])
+        let s = Float(editSensitivity) * diag / 700
+        applyDelta(axes.u * Float(deltaX) * s - axes.v * Float(deltaY) * s)
+    }
+
+    // Trascinamento VINCOLATO a un asse: la view calcola già il delta world lungo l'asse.
+    func dragAlongAxis(_ worldDelta: SIMD3<Float>) {
+        guard activeAxis >= 0 else { return }
+        applyDelta(worldDelta * Float(editSensitivity))
+    }
+
+    func endHandleDrag() {
+        activeHandleKind = -1
+        activeAxis = -1
+        // qualità piena SOLO sul piano modificato; gli altri restano com'erano.
+        refreshEditablePlanes(reproject: false)
+        reprojectEditablePlanes(onlyIndex: editPlaneIndex, coarse: false)
+    }
+
+    // Sposta l'intero piano selezionato lungo la sua normale (profondità).
+    func nudgeDepth(_ sign: Float) {
+        guard editPlaneIndex < editablePlanes.count else { return }
+        let axes = planeAxes(editablePlanes[editPlaneIndex])
+        let d = axes.n * sign * Float(editStepCM / 100)
+        editablePlanes[editPlaneIndex] = editablePlanes[editPlaneIndex].map { $0 + d }
+        updateSelectedPlaneRender()
+        reprojectEditablePlanes(onlyIndex: editPlaneIndex, coarse: false)
+    }
+
+    // Rifila (sign -1) o allarga (sign +1) tutti i bordi del piano selezionato.
+    func nudgeInset(_ sign: Float) {
+        guard editPlaneIndex < editablePlanes.count else { return }
+        var quad = editablePlanes[editPlaneIndex]
+        let center = (quad[0] + quad[1] + quad[2] + quad[3]) / 4
+        let amt = sign * Float(editStepCM / 100)
+        for i in 0..<4 {
+            let dir = simd_normalize(quad[i] - center)
+            quad[i] += dir * amt
+        }
+        editablePlanes[editPlaneIndex] = quad
+        updateSelectedPlaneRender()
+        reprojectEditablePlanes(onlyIndex: editPlaneIndex, coarse: false)
+    }
+
+    func saveEditedPlanes() {
+        guard !editablePlanes.isEmpty else { return }
+        let stamp = Self.timestamp()
+        let dir = defaultRoot.appendingPathComponent("exports/planes_edit_\(stamp)")
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            var obj = "# piani BCS editati\n"
+            var vi = 1
+            for (idx, quad) in editablePlanes.enumerated() {
+                obj += "g plane_\(idx + 1)_edit\n"
+                for c in quad { obj += "v \(c.x) \(c.y) \(c.z)\n" }
+                obj += "f \(vi) \(vi + 1) \(vi + 2) \(vi + 3)\n"
+                vi += 4
+            }
+            try obj.write(to: dir.appendingPathComponent("planes_edit.obj"), atomically: true, encoding: .utf8)
+            bakeStatus = "Piani salvati in exports/planes_edit_\(stamp)"
+        } catch {
+            self.error = String(describing: error)
+        }
+    }
+
+    private static func quadGeometry(_ quad: [SIMD3<Float>]) -> SCNGeometry {
+        let vertexData = Data(bytes: quad, count: quad.count * MemoryLayout<SIMD3<Float>>.stride)
+        var indices: [UInt32] = [0, 1, 2, 0, 2, 3]
+        let indexData = Data(bytes: &indices, count: indices.count * MemoryLayout<UInt32>.stride)
+        let vs = SCNGeometrySource(data: vertexData, semantic: .vertex, vectorCount: quad.count,
+                                   usesFloatComponents: true, componentsPerVector: 3,
+                                   bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0,
+                                   dataStride: MemoryLayout<SIMD3<Float>>.stride)
+        let el = SCNGeometryElement(data: indexData, primitiveType: .triangles, primitiveCount: 2,
+                                    bytesPerIndex: MemoryLayout<UInt32>.stride)
+        return SCNGeometry(sources: [vs], elements: [el])
+    }
+
+    private static func timestamp() -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyyMMdd_HHmmss"
+        return f.string(from: Date())
+    }
+
+    private static func rasterizeTriangle(
+        world: (SIMD3<Float>, SIMD3<Float>, SIMD3<Float>),
+        photoUV: (SIMD2<Float>, SIMD2<Float>, SIMD2<Float>),
+        origin: SIMD3<Float>, uHat: SIMD3<Float>, vHat: SIMD3<Float>,
+        widthM: Float, heightM: Float, texW: Int, texH: Int,
+        photo: (width: Int, height: Int, rgba: [UInt8]), out: inout [UInt8]
+    ) {
+        func planeUV(_ p: SIMD3<Float>) -> SIMD2<Float> {
+            SIMD2<Float>(simd_dot(p - origin, uHat) / widthM, simd_dot(p - origin, vHat) / heightM)
+        }
+        // vertici in spazio texel (v=0 in basso → riga py-1)
+        let a = planeUV(world.0), b = planeUV(world.1), c = planeUV(world.2)
+        let ax = a.x * Float(texW), ay = (1 - a.y) * Float(texH)
+        let bx = b.x * Float(texW), by = (1 - b.y) * Float(texH)
+        let cx = c.x * Float(texW), cy = (1 - c.y) * Float(texH)
+        let minX = max(Int(floor(min(ax, bx, cx))), 0)
+        let maxX = min(Int(ceil(max(ax, bx, cx))), texW - 1)
+        let minY = max(Int(floor(min(ay, by, cy))), 0)
+        let maxY = min(Int(ceil(max(ay, by, cy))), texH - 1)
+        guard minX <= maxX, minY <= maxY else { return }
+        let denom = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy)
+        guard abs(denom) > 1e-6 else { return }
+        for yy in minY...maxY {
+            for xx in minX...maxX {
+                let fx = Float(xx) + 0.5, fy = Float(yy) + 0.5
+                let l0 = ((by - cy) * (fx - cx) + (cx - bx) * (fy - cy)) / denom
+                let l1 = ((cy - ay) * (fx - cx) + (ax - cx) * (fy - cy)) / denom
+                let l2 = 1 - l0 - l1
+                guard l0 >= -0.001, l1 >= -0.001, l2 >= -0.001 else { continue }
+                let uv = SIMD2<Float>(
+                    l0 * photoUV.0.x + l1 * photoUV.1.x + l2 * photoUV.2.x,
+                    l0 * photoUV.0.y + l1 * photoUV.1.y + l2 * photoUV.2.y
+                )
+                guard uv.x >= 0, uv.x <= 1, uv.y >= 0, uv.y <= 1 else { continue }
+                let sx = min(max(Int(uv.x * Float(photo.width)), 0), photo.width - 1)
+                let sy = min(max(Int(uv.y * Float(photo.height)), 0), photo.height - 1)
+                let si = (sy * photo.width + sx) * 4
+                let di = (yy * texW + xx) * 4
+                out[di] = photo.rgba[si]
+                out[di + 1] = photo.rgba[si + 1]
+                out[di + 2] = photo.rgba[si + 2]
+                out[di + 3] = 255
+            }
+        }
+    }
+
+    private static func writePNG(rgba: [UInt8], width: Int, height: Int, to url: URL) throws {
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: width * 4, bitsPerPixel: 32
+        ), let dest = rep.bitmapData else {
+            throw NSError(domain: "bake", code: 1, userInfo: [NSLocalizedDescriptionKey: "NSBitmapImageRep nil"])
+        }
+        rgba.withUnsafeBytes { dest.update(from: $0.bindMemory(to: UInt8.self).baseAddress!, count: width * height * 4) }
+        guard let data = rep.representation(using: .png, properties: [:]) else {
+            throw NSError(domain: "bake", code: 2, userInfo: [NSLocalizedDescriptionKey: "PNG encode fallita"])
+        }
+        try data.write(to: url)
+    }
+
+    private static func writePlaneOBJ(name: String, corners: [SIMD3<Float>], widthM: Float, heightM: Float, dir: URL) throws {
+        let mtl = "newmtl \(name)\nmap_Kd \(name).png\n"
+        try mtl.write(to: dir.appendingPathComponent("\(name).mtl"), atomically: true, encoding: .utf8)
+        var obj = "mtllib \(name).mtl\nusemtl \(name)\n"
+        for c in corners { obj += "v \(c.x) \(c.y) \(c.z)\n" }
+        obj += "vt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\n"
+        obj += "f 1/1 2/2 3/3\nf 1/1 3/3 4/4\n"
+        try obj.write(to: dir.appendingPathComponent("\(name).obj"), atomically: true, encoding: .utf8)
     }
 
     func rebuildProjectedPhotoClearingCache() {
@@ -1170,7 +1838,7 @@ final class ViewerModel: ObservableObject {
         )
     }
 
-    private static func buildCells(mesh: SimpleOBJMesh) -> [MosaicCell] {
+    private static func buildCells(mesh: SimpleOBJMesh, cellSize: Float = 0.055) -> [MosaicCell] {
         var cells: [MosaicCell] = []
         cells.reserveCapacity(mesh.triangles.count)
 
@@ -1187,7 +1855,7 @@ final class ViewerModel: ObservableObject {
 
         func tessellate(_ a: SIMD3<Float>, _ b: SIMD3<Float>, _ c: SIMD3<Float>) {
             let maxEdge = max(simd_length(b - a), simd_length(c - b), simd_length(a - c))
-            let steps = max(1, min(96, Int(ceil(maxEdge / 0.055))))
+            let steps = max(1, min(96, Int(ceil(maxEdge / cellSize))))
             if steps == 1 {
                 appendCell(a, b, c)
                 return
@@ -1236,14 +1904,17 @@ final class ViewerModel: ObservableObject {
         maxPerBucket: Int,
         minAreaFraction: Float,
         continuityBonus: Float,
+        edgeCleanup: Float,
         fillHoles: Bool,
         lastResortFill: Bool,
+        obliqueMaxFacing: Float,
         occlusion: OcclusionTester?,
+        cellSize: Float = 0.055,
         orientationProbe: OcclusionTester? = nil,
         colorSampler: ((Int, Float, Float) -> SIMD3<Float>?)? = nil
-    ) -> (patches: [Int: ProjectedPatch], keptCount: Int, uncovered: [SIMD3<Float>]) {
-        let cells = buildCells(mesh: mesh)
-        guard !cells.isEmpty, !shots.isEmpty else { return ([:], 0, []) }
+    ) -> (patches: [Int: ProjectedPatch], keptCount: Int, uncovered: [SIMD3<Float>], oblique: [SIMD3<Float>]) {
+        let cells = buildCells(mesh: mesh, cellSize: cellSize)
+        guard !cells.isEmpty, !shots.isEmpty else { return ([:], 0, [], []) }
 
         let crop = Float(min(max(cropFraction, 0.2), 1.0))
         let cropMin = (1 - crop) / 2
@@ -1258,16 +1929,21 @@ final class ViewerModel: ObservableObject {
         let proximityScale = max(simd_length(maxV - minV) * 0.1, 1e-3)
         let orientationAgnostic = mesh.triangles.count < 5_000
 
-        // per i piani, l'esterno lo decide la mesh: il lato con più spazio libero è la strada
+        // Orientamento dei piani: l'esterno è il lato dove stanno le CAMERE (sono tutte
+        // all'esterno dell'edificio, per definizione). Segnale robusto per spalle e winding
+        // invertito: le foto perpendicolari al piano contribuiscono ~0, quelle allineate decidono.
         var orientationSigns: [Float]?
-        if orientationAgnostic, let probe = orientationProbe {
-            let probeDistance = max(simd_length(maxV - minV) * 0.1, 0.05)
+        if orientationAgnostic {
             var signs = [Float](repeating: 1, count: cells.count)
             for i in cells.indices {
-                let n = cells[i].normal
-                let free = probe.freeDistance(from: cells[i].center, direction: n, maxDistance: probeDistance)
-                let back = probe.freeDistance(from: cells[i].center, direction: -n, maxDistance: probeDistance)
-                signs[i] = free >= back ? 1 : -1
+                var dir = SIMD3<Float>(repeating: 0)
+                let center = cells[i].center
+                for cand in candidates {
+                    let d = cand.cameraPosition - center
+                    let len = simd_length(d)
+                    if len > 1e-4 { dir += d / len }
+                }
+                signs[i] = simd_dot(cells[i].normal, dir) >= 0 ? 1 : -1
             }
             orientationSigns = signs
         }
@@ -1276,6 +1952,7 @@ final class ViewerModel: ObservableObject {
         struct PoolEntry {
             let score: Float
             let cand: Int
+            let facing: Float
             let ua: SIMD2<Float>
             let ub: SIMD2<Float>
             let uc: SIMD2<Float>
@@ -1294,7 +1971,7 @@ final class ViewerModel: ObservableObject {
                     orientationAgnostic: effectiveAgnostic,
                     outwardSign: outwardSign
                 ) {
-                    valid.append(PoolEntry(score: r.score, cand: index, ua: r.ua, ub: r.ub, uc: r.uc))
+                    valid.append(PoolEntry(score: r.score, cand: index, facing: r.facing, ua: r.ua, ub: r.ub, uc: r.uc))
                 }
             }
             valid.sort { $0.score > $1.score }
@@ -1380,8 +2057,13 @@ final class ViewerModel: ObservableObject {
             neighbors[i] = list
         }
 
+        // Etichettatura a MARGINE: una cella adotta la foto dominante fra i vicini se
+        // quella foto è "abbastanza buona" per la cella (entro `margin` dal suo massimo).
+        // Così una foto copre TUTTA la sua zona d'interesse e due candidate simili non si
+        // spartiscono la regione a metà — il confine cade solo dove una è NETTAMENTE migliore.
+        // Il risultato è insensibile al numero di foto: candidate equivalenti vengono assorbite.
         func relax(sweeps: Int) {
-            guard continuityBonus > 0 else { return }
+            let baseMargin = max(continuityBonus, 0.001)
             for _ in 0..<sweeps {
                 var changed = 0
                 for i in cells.indices {
@@ -1389,26 +2071,33 @@ final class ViewerModel: ObservableObject {
                     guard pool.count > 1 else { continue }
                     let nbs = neighbors[i]
                     guard !nbs.isEmpty else { continue }
-                    var counts: [Int: Float] = [:]
+                    var counts: [Int: Int] = [:]
                     for j in nbs {
                         let cj = chosen[Int(j)]
                         if cj >= 0 {
                             counts[pools[Int(j)][cj].cand, default: 0] += 1
                         }
                     }
-                    let denom = Float(nbs.count)
-                    var bestIndex = chosen[i]
-                    var bestScore = -Float.greatestFiniteMagnitude
+                    // margine più ampio vicino al bordo del piano (poche celle attorno)
+                    let edgeFactor = max(0, 1 - Float(nbs.count) / 8)
+                    let margin = baseMargin + edgeCleanup * edgeFactor
+                    let bestScore = pool[0].score            // pool ordinato per score desc
+                    let threshold = bestScore * (1 - margin) // "abbastanza buona"
+                    // fra le candidate accettabili (entro il margine), vince la più usata dai vicini
+                    var bestIdx = 0
+                    var bestFreq = -1
+                    var bestSc = -Float.greatestFiniteMagnitude
                     for (pi, entry) in pool.enumerated() {
-                        let fraction = (counts[entry.cand] ?? 0) / denom
-                        let score = entry.score * (1 + continuityBonus * fraction)
-                        if score > bestScore {
-                            bestScore = score
-                            bestIndex = pi
+                        guard entry.score >= threshold else { continue }
+                        let f = counts[entry.cand] ?? 0
+                        if f > bestFreq || (f == bestFreq && entry.score > bestSc) {
+                            bestFreq = f
+                            bestSc = entry.score
+                            bestIdx = pi
                         }
                     }
-                    if bestIndex != chosen[i] {
-                        chosen[i] = bestIndex
+                    if bestIdx != chosen[i] {
+                        chosen[i] = bestIdx
                         changed += 1
                     }
                 }
@@ -1416,7 +2105,7 @@ final class ViewerModel: ObservableObject {
             }
         }
 
-        relax(sweeps: 3)
+        relax(sweeps: 6)
         let baselineScore: [Float] = pools.map { $0.first?.score ?? -Float.greatestFiniteMagnitude }
 
         var bucketNormals: [SIMD3<Float>] = []
@@ -1515,7 +2204,7 @@ final class ViewerModel: ObservableObject {
                         orientationAgnostic: effectiveAgnostic,
                         outwardSign: orientationSigns?[i] ?? 1
                     ) {
-                        entries.append(PoolEntry(score: r.score, cand: index, ua: r.ua, ub: r.ub, uc: r.uc))
+                        entries.append(PoolEntry(score: r.score, cand: index, facing: r.facing, ua: r.ua, ub: r.ub, uc: r.uc))
                     }
                 }
                 entries.sort { $0.score > $1.score }
@@ -1531,7 +2220,7 @@ final class ViewerModel: ObservableObject {
                 }
             }
         }
-        relax(sweeps: 2)
+        relax(sweeps: 4)
 
         // Riempimento buchi: opera SOLO sulle celle ancora rosse, con i pool originali.
         // Le celle già assegnate sono congelate: le foto extra non possono riscriverle.
@@ -1589,25 +2278,29 @@ final class ViewerModel: ObservableObject {
                    occlusion.isOccluded(from: cells[i].center, toCamera: candidates[index].cameraPosition) {
                     return nil
                 }
-                return PoolEntry(score: r.score, cand: index, ua: r.ua, ub: r.ub, uc: r.uc)
+                return PoolEntry(score: r.score, cand: index, facing: r.facing, ua: r.ua, ub: r.ub, uc: r.uc)
             }
 
             // 1) CRESCITA DI REGIONE: la cella rossa eredita la foto dei vicini già
             //    assegnati (quella più frequente che riesce a vederla). Estende in modo
             //    COERENTE le regioni esistenti — i balconi restano di un'unica foto,
             //    deformati dalla prospettiva ma continui, invece di frammentarsi.
+            // La crescita eredita SOLO da vicini con orientamento simile (stesso piano):
+            // così un corner frontale non prende la foto della spalla/torretta ("gira l'angolo").
+            let sameOrientationDot: Float = 0.8
             var changed = true
             var sweep = 0
             while changed && sweep < 96 {
                 changed = false
                 sweep += 1
                 for i in cells.indices where chosen[i] == -1 {
+                    let ni = cells[i].normal
                     var freq: [Int: Int] = [:]
                     for j in neighbors[i] {
                         let cj = chosen[Int(j)]
-                        if cj >= 0 {
-                            freq[pools[Int(j)][cj].cand, default: 0] += 1
-                        }
+                        guard cj >= 0 else { continue }
+                        guard simd_dot(ni, cells[Int(j)].normal) > sameOrientationDot else { continue }
+                        freq[pools[Int(j)][cj].cand, default: 0] += 1
                     }
                     guard !freq.isEmpty else { continue }
                     for (cand, _) in freq.sorted(by: { $0.value > $1.value }) {
@@ -1621,8 +2314,8 @@ final class ViewerModel: ObservableObject {
                 }
             }
 
-            // 2) ISOLE senza vicini assegnati: qui non c'è regione da estendere, quindi
-            //    la migliore vista disponibile (isole piccole e rare).
+            // 2) ISOLE senza vicini di pari orientamento: nessuna regione da estendere,
+            //    prendo la migliore vista disponibile (isole piccole e rare).
             for i in cells.indices where chosen[i] == -1 {
                 var best: PoolEntry?
                 for index in candidates.indices {
@@ -1659,7 +2352,8 @@ final class ViewerModel: ObservableObject {
             return ProjectedPatch(
                 geometry: geometryFromProjected(vertices: acc.vertices, texcoords: acc.texcoords, indices: acc.indices),
                 vertices: acc.vertices,
-                indices: acc.indices
+                indices: acc.indices,
+                texcoords: acc.texcoords
             )
         }
         let uncoveredLift = proximityScale * 0.005
@@ -1668,7 +2362,18 @@ final class ViewerModel: ObservableObject {
             let offset = cells[i].normal * uncoveredLift
             uncovered.append(contentsOf: [cells[i].a + offset, cells[i].b + offset, cells[i].c + offset])
         }
-        return (patches, keep.filter { $0 }.count + fillCount, uncovered)
+        // celle geometricamente oblique: la foto assegnata le vede oltre `obliqueMaxFacing`
+        // dalla normale (texture debole per forza di cose, non per selezione).
+        var oblique: [SIMD3<Float>] = []
+        if obliqueMaxFacing > 0 {
+            let lift = proximityScale * 0.004
+            for i in cells.indices where chosen[i] >= 0 {
+                guard pools[i][chosen[i]].facing < obliqueMaxFacing else { continue }
+                let offset = cells[i].normal * lift
+                oblique.append(contentsOf: [cells[i].a + offset, cells[i].b + offset, cells[i].c + offset])
+            }
+        }
+        return (patches, keep.filter { $0 }.count + fillCount, uncovered, oblique)
     }
 
     private static func solidTriangleGeometry(vertices: [SIMD3<Float>], color: NSColor) -> SCNGeometry {
@@ -1862,7 +2567,8 @@ final class ViewerModel: ObservableObject {
         return ProjectedPatch(
             geometry: SCNGeometry(sources: [vertexSource, texcoordSource], elements: [element]),
             vertices: vertices,
-            indices: indices
+            indices: indices,
+            texcoords: texcoords
         )
     }
 }
@@ -2061,7 +2767,12 @@ struct ContentView: View {
                 scene: model.scene,
                 pointOfView: model.cameraNode,
                 cameraRevision: model.cameraRevision,
-                onClick: { point, normal in model.inspect(point: point, normal: normal) }
+                editing: model.editPlanesMode,
+                onClick: { point, normal in model.inspect(point: point, normal: normal) },
+                onHandleBegin: { name in model.beginHandleDrag(name: name) },
+                onHandleDrag: { dx, dy in model.dragHandle(deltaX: dx, deltaY: dy) },
+                onAxisDrag: { delta in model.dragAlongAxis(delta) },
+                onHandleEnd: { model.endHandleDrag() }
             )
             .background(Color.black)
         }
@@ -2104,6 +2815,11 @@ struct ContentView: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .lineLimit(3)
+            if !model.meshScaleInfo.isEmpty {
+                Text(model.meshScaleInfo)
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
 
             Button("Carica pose OC JSON") { model.choosePoses() }
             Text(model.posesURL.path)
@@ -2158,11 +2874,42 @@ struct ContentView: View {
             Toggle("Celle senza foto in rosso", isOn: $model.showUncoveredCells)
                 .onChange(of: model.showUncoveredCells) { _ in model.rebuildProjectedPhoto() }
 
+            Toggle("Evidenzia oblique (ambra)", isOn: $model.showObliqueCells)
+                .onChange(of: model.showObliqueCells) { _ in model.rebuildProjectedPhoto() }
+
+            if model.showObliqueCells {
+                HStack {
+                    Text("Oltre")
+                    Slider(value: $model.obliqueAngleDegrees, in: 40...80, step: 5)
+                    Text("\(Int(model.obliqueAngleDegrees))°")
+                        .monospacedDigit()
+                        .frame(width: 42, alignment: .trailing)
+                }
+                .onChange(of: model.obliqueAngleDegrees) { _ in model.rebuildProjectedPhoto() }
+            }
+
             Toggle("Riempi buchi (foto extra)", isOn: $model.fillHolesEnabled)
                 .onChange(of: model.fillHolesEnabled) { _ in model.rebuildProjectedPhoto() }
 
             Toggle("Riempi residui (viste oblique)", isOn: $model.lastResortFillEnabled)
                 .onChange(of: model.lastResortFillEnabled) { _ in model.rebuildProjectedPhoto() }
+
+            Divider()
+
+            Button("Esporta ortofoto piani (UV)") { model.bakeOrthophotos() }
+            HStack {
+                Text("Risoluzione")
+                Slider(value: $model.bakeResolutionMM, in: 3...20, step: 1)
+                Text("\(Int(model.bakeResolutionMM)) mm")
+                    .monospacedDigit()
+                    .frame(width: 48, alignment: .trailing)
+            }
+            if !model.bakeStatus.isEmpty {
+                Text(model.bakeStatus)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+            }
 
             Toggle("Consenso colore (scarta intrusi)", isOn: $model.photoConsensusEnabled)
                 .onChange(of: model.photoConsensusEnabled) { _ in model.rebuildProjectedPhoto() }
@@ -2220,6 +2967,55 @@ struct ContentView: View {
                     .frame(width: 42, alignment: .trailing)
             }
             .onChange(of: model.continuityBonus) { _ in model.rebuildProjectedPhoto() }
+
+            HStack {
+                Text("Bordi puliti")
+                Slider(value: $model.edgeCleanupStrength, in: 0.0...1.5, step: 0.1)
+                Text("\(Int(model.edgeCleanupStrength * 100))%")
+                    .monospacedDigit()
+                    .frame(width: 42, alignment: .trailing)
+            }
+            .onChange(of: model.edgeCleanupStrength) { _ in model.rebuildProjectedPhoto() }
+
+            Divider()
+
+            Toggle("Edita piani (maniglie)", isOn: $model.editPlanesMode)
+                .onChange(of: model.editPlanesMode) { _ in model.setEditMode(model.editPlanesMode) }
+            if model.editPlanesMode {
+                if model.editPlaneCount > 0 {
+                    Picker("Piano", selection: $model.editPlaneIndex) {
+                        ForEach(0..<model.editPlaneCount, id: \.self) { i in
+                            Text("Piano \(i + 1)").tag(i)
+                        }
+                    }
+                    .onChange(of: model.editPlaneIndex) { _ in model.refreshEditablePlanes() }
+                }
+                Toggle("Proiezione live (veloce)", isOn: $model.liveEditProjection)
+                HStack {
+                    Text("Passo")
+                    Slider(value: $model.editStepCM, in: 1...30, step: 1)
+                    Text("\(Int(model.editStepCM)) cm")
+                        .monospacedDigit().frame(width: 46, alignment: .trailing)
+                }
+                HStack {
+                    Text("Sensib.")
+                    Slider(value: $model.editSensitivity, in: 0.2...3.0, step: 0.1)
+                    Text(String(format: "%.1f", model.editSensitivity))
+                        .monospacedDigit().frame(width: 46, alignment: .trailing)
+                }
+                HStack {
+                    Text("Profondità")
+                    Button("−") { model.nudgeDepth(-1) }
+                    Button("+") { model.nudgeDepth(1) }
+                    Spacer()
+                    Text("Rifila")
+                    Button("−") { model.nudgeInset(-1) }
+                    Button("+") { model.nudgeInset(1) }
+                }
+                Button("Salva piani editati") { model.saveEditedPlanes() }
+                Text("Clicca una sfera (angolo giallo / spigolo verde) per selezionarla: appaiono gli assi U(rosso) V(verde) N(blu=normale). Trascina un asse per muovere vincolato, o trascina la sfera per movimento libero nel piano.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
 
             HStack {
                 Text("Crop centro")
@@ -2305,14 +3101,101 @@ struct ContentView: View {
     }
 }
 
+final class EditableSCNView: SCNView {
+    var onInspect: ((SIMD3<Float>, SIMD3<Float>) -> Void)?
+    var onHandleBegin: ((String?) -> Void)?
+    var onHandleDrag: ((CGFloat, CGFloat) -> Void)?
+    var onAxisDrag: ((SIMD3<Float>) -> Void)?
+    var onHandleEnd: (() -> Void)?
+    var editing = false
+    private var mode = 0  // 0 none, 1 free, 2 axis
+    private var downPoint = CGPoint.zero
+    private var lastPoint = CGPoint.zero
+    private var moved = false
+    private var axisAnchor = SIMD3<Float>(repeating: 0)
+    private var axisDir = SIMD3<Float>(0, 1, 0)
+
+    override func mouseDown(with e: NSEvent) {
+        downPoint = convert(e.locationInWindow, from: nil)
+        lastPoint = downPoint
+        moved = false
+        mode = 0
+        if editing {
+            let hits = hitTest(downPoint, options: [SCNHitTestOption.searchMode: SCNHitTestSearchMode.all.rawValue])
+            if let axis = hits.first(where: { $0.node.name?.hasPrefix("AXIS:") == true }) {
+                let t = axis.node.presentation.simdWorldTransform
+                axisAnchor = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
+                axisDir = simd_normalize(SIMD3<Float>(t.columns.1.x, t.columns.1.y, t.columns.1.z))
+                mode = 2
+                onHandleBegin?(axis.node.name)
+                return
+            }
+            if let h = hits.first(where: { $0.node.name?.hasPrefix("EDIT:") == true }) {
+                mode = 1
+                onHandleBegin?(h.node.name)
+                return
+            }
+        }
+        super.mouseDown(with: e)
+    }
+
+    override func mouseDragged(with e: NSEvent) {
+        let p = convert(e.locationInWindow, from: nil)
+        switch mode {
+        case 1:
+            onHandleDrag?(e.deltaX, e.deltaY)
+        case 2:
+            let a0 = projectPoint(SCNVector3(axisAnchor.x, axisAnchor.y, axisAnchor.z))
+            let tip = axisAnchor + axisDir
+            let a1 = projectPoint(SCNVector3(tip.x, tip.y, tip.z))
+            let sx = Float(a1.x - a0.x), sy = Float(a1.y - a0.y)
+            let slen = sqrt(sx * sx + sy * sy)
+            if slen > 0.5 {
+                let dxp = Float(p.x - lastPoint.x), dyp = Float(p.y - lastPoint.y)
+                let along = (dxp * sx + dyp * sy) / slen
+                onAxisDrag?(axisDir * (along / slen))
+            }
+            lastPoint = p
+        default:
+            moved = true
+            super.mouseDragged(with: e)
+        }
+    }
+
+    override func mouseUp(with e: NSEvent) {
+        if mode != 0 {
+            mode = 0
+            onHandleEnd?()
+            return
+        }
+        super.mouseUp(with: e)
+        guard !moved else { return }
+        let hits = hitTest(downPoint, options: [SCNHitTestOption.searchMode: SCNHitTestSearchMode.all.rawValue])
+        for hit in hits {
+            if hit.node.geometry is SCNText { continue }
+            if hit.node.name?.hasPrefix("EDIT:") == true || hit.node.name?.hasPrefix("AXIS:") == true { continue }
+            let p = hit.worldCoordinates
+            let n = hit.worldNormal
+            onInspect?(SIMD3<Float>(Float(p.x), Float(p.y), Float(p.z)),
+                       SIMD3<Float>(Float(n.x), Float(n.y), Float(n.z)))
+            return
+        }
+    }
+}
+
 struct NativeSceneView: NSViewRepresentable {
     let scene: SCNScene
     let pointOfView: SCNNode
     let cameraRevision: Int
+    let editing: Bool
     let onClick: (SIMD3<Float>, SIMD3<Float>) -> Void
+    let onHandleBegin: (String?) -> Void
+    let onHandleDrag: (CGFloat, CGFloat) -> Void
+    let onAxisDrag: (SIMD3<Float>) -> Void
+    let onHandleEnd: () -> Void
 
-    func makeNSView(context: Context) -> SCNView {
-        let view = SCNView()
+    func makeNSView(context: Context) -> EditableSCNView {
+        let view = EditableSCNView()
         view.scene = scene
         view.pointOfView = pointOfView
         view.allowsCameraControl = true
@@ -2320,56 +3203,33 @@ struct NativeSceneView: NSViewRepresentable {
         view.antialiasingMode = .multisampling4X
         view.backgroundColor = .black
         view.autoenablesDefaultLighting = false
-        let click = NSClickGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleClick(_:)))
-        click.delaysPrimaryMouseButtonEvents = false
-        view.addGestureRecognizer(click)
+        apply(to: view)
         context.coordinator.lastRevision = cameraRevision
-        context.coordinator.onClick = onClick
         return view
     }
 
-    func updateNSView(_ view: SCNView, context: Context) {
-        if view.scene !== scene {
-            view.scene = scene
-        }
+    func updateNSView(_ view: EditableSCNView, context: Context) {
+        if view.scene !== scene { view.scene = scene }
         if context.coordinator.lastRevision != cameraRevision {
-            viewerDebugLog("updateNSView: reset pointOfView (revision \(context.coordinator.lastRevision) -> \(cameraRevision))")
             view.pointOfView = pointOfView
             context.coordinator.lastRevision = cameraRevision
         }
-        context.coordinator.onClick = onClick
+        apply(to: view)
     }
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator()
+    private func apply(to view: EditableSCNView) {
+        view.onInspect = onClick
+        view.onHandleBegin = onHandleBegin
+        view.onHandleDrag = onHandleDrag
+        view.onAxisDrag = onAxisDrag
+        view.onHandleEnd = onHandleEnd
+        view.editing = editing
     }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
 
     final class Coordinator: NSObject {
         var lastRevision = -1
-        var onClick: ((SIMD3<Float>, SIMD3<Float>) -> Void)?
-
-        @objc func handleClick(_ recognizer: NSClickGestureRecognizer) {
-            guard let view = recognizer.view as? SCNView else { return }
-            let povBefore = view.pointOfView
-            viewerDebugLog("click: pov \(povBefore?.name ?? "senza-nome") pos \(povBefore?.presentation.simdWorldPosition ?? .zero)")
-            let location = recognizer.location(in: view)
-            let hits = view.hitTest(location, options: [SCNHitTestOption.searchMode: SCNHitTestSearchMode.all.rawValue])
-            viewerDebugLog("click: \(hits.count) hit — primi nodi: \(hits.prefix(3).map { $0.node.name ?? String(describing: type(of: $0.node.geometry)) })")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                let pov = view.pointOfView
-                viewerDebugLog("post-click(0.6s): pov \(pov?.name ?? "senza-nome") pos \(pov?.presentation.simdWorldPosition ?? .zero) zNear \(pov?.camera?.zNear ?? -1) zFar \(pov?.camera?.zFar ?? -1) fov \(pov?.camera?.fieldOfView ?? -1)")
-            }
-            for hit in hits {
-                if hit.node.geometry is SCNText { continue }
-                let p = hit.worldCoordinates
-                let n = hit.worldNormal
-                onClick?(
-                    SIMD3<Float>(Float(p.x), Float(p.y), Float(p.z)),
-                    SIMD3<Float>(Float(n.x), Float(n.y), Float(n.z))
-                )
-                return
-            }
-        }
     }
 }
 

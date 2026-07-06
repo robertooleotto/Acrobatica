@@ -3,17 +3,54 @@ import SwiftUI
 @main
 struct AcrobaticaApp: App {
     @StateObject private var app = AppState()
+    @StateObject private var flow = AppFlow()
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     init() { CrashReporter.install() }   // cattura crash → report al riavvio
 
     var body: some Scene {
         WindowGroup {
-            EditorMesh3DView()   // TEMP-VERIFY-3D (avvio diretto per anteprima al simulatore)
+            AppFlowView()
                 .environmentObject(app)
+                .environmentObject(flow)
                 .crashBanner()   // mostra il crash precedente, se c'è
                 .onAppear { BackgroundUploader.shared.resumeOnLaunch() }
         }
+    }
+}
+
+/// Gestisce le fasi d'avvio: splash → login → app.
+final class AppFlow: ObservableObject {
+    enum Phase { case splash, login, main }
+    @Published var phase: Phase
+
+    init() {
+        // Dev: SIMCTL_CHILD_SKIP_LOGIN=1 entra diretto nell'app.
+        phase = ProcessInfo.processInfo.environment["SKIP_LOGIN"] == "1" ? .main : .splash
+    }
+
+    func login()  { withAnimation(.easeInOut) { phase = .main } }
+    func logout() { withAnimation(.easeInOut) { phase = .login } }
+}
+
+/// Tab attiva condivisa (permette "Vedi tutti" e azioni rapide di cambiare tab).
+enum AppTab: Hashable { case home, cantieri, preventivi, clienti, profilo }
+final class TabRouter: ObservableObject { @Published var selected: AppTab = .home }
+
+/// Root del flusso applicativo.
+struct AppFlowView: View {
+    @EnvironmentObject var app: AppState
+    @EnvironmentObject var flow: AppFlow
+
+    var body: some View {
+        ZStack {
+            switch flow.phase {
+            case .splash: SplashView { flow.phase = .login }
+            case .login:  LoginView(onLogin: { flow.login() })
+            case .main:   RootTabView()
+            }
+        }
+        .onAppear { app.caricaDemoSeInVuoto() }
     }
 }
 
@@ -56,25 +93,34 @@ enum OrientationGate {
     }
 }
 
-/// Root: due tab (Cantieri / Preventivi). L'AR capture parte da DettaglioCantiere.
+/// Root: tab bar a 5 voci. L'AR capture parte da DettaglioCantiere.
 struct RootTabView: View {
+    @StateObject private var router = TabRouter()
+
     var body: some View {
-        TabView {
+        TabView(selection: $router.selected) {
+            HomeView()
+                .tabItem { Label("Home", systemImage: "house.fill") }
+                .tag(AppTab.home)
+
             CantieriListView()
                 .tabItem { Label("Cantieri", systemImage: "building.2.fill") }
+                .tag(AppTab.cantieri)
 
             ListaPreventiviView()
                 .tabItem { Label("Preventivi", systemImage: "doc.text.fill") }
+                .tag(AppTab.preventivi)
 
-            #if DEBUG
-            // Accesso diretto all'editor zone per provarlo nel Simulatore
-            // (la cattura AR non gira in simulatore): carica l'ortofoto reale
-            // servita in locale da `python3 -m http.server 8770`.
-            DebugEditorTab()
-                .tabItem { Label("Editor (debug)", systemImage: "pencil.and.outline") }
-            #endif
+            ClientiListView()
+                .tabItem { Label("Clienti", systemImage: "person.2.fill") }
+                .tag(AppTab.clienti)
+
+            ImpostazioniView()
+                .tabItem { Label("Profilo", systemImage: "person.crop.circle") }
+                .tag(AppTab.profilo)
         }
         .tint(Theme.navy)
+        .environmentObject(router)
     }
 }
 

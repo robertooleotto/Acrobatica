@@ -102,7 +102,8 @@ struct CantieriListView: View {
     }
 }
 
-private struct NuovoCantiereSheet: View {
+struct NuovoCantiereSheet: View {
+    var clientePreset: String = ""
     let onCreate: (Cantiere) -> Void
     @State private var nome = ""
     @State private var cliente = ""
@@ -122,6 +123,7 @@ private struct NuovoCantiereSheet: View {
             }
             .navigationTitle("Nuovo cantiere")
             .navigationBarTitleDisplayMode(.inline)
+            .onAppear { if cliente.isEmpty { cliente = clientePreset } }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Annulla") { dismiss() }

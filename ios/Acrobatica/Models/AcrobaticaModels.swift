@@ -188,8 +188,19 @@ struct VoceLavoro: Identifiable, Codable, Hashable {
 final class AppState: ObservableObject {
     @Published var cantieri: [Cantiere] = []
     @Published var preventivi: [Preventivo] = []
+    @Published var clienti: [Cliente] = []
+    @Published var listino: [VoceListino] = []
+
     /// Ruolo utente loggato (multi-utente futuro). Default operatore.
     @Published var ruoloUtente: Ruolo = .operatore
+
+    // ─── Profilo / impostazioni ────────────────────────────────
+    @Published var utenteNome  = "Carlo Marchetti"
+    @Published var utenteEmail = "carlo@impresaedile.it"
+    @Published var tariffaOrariaDefault: Double = 35
+    @Published var ivaDefault: Double = 22
+    @Published var validitaDefault: Int = 30
+    @Published var prefissoPreventivo = "PRV"
 
     enum Ruolo: String, Codable { case operatore, senior }
 
@@ -197,6 +208,93 @@ final class AppState: ObservableObject {
     func nuovoNumeroPreventivo() -> String {
         let year = Calendar.current.component(.year, from: .now)
         let n = preventivi.filter { $0.numero.contains("\(year)") }.count + 1
-        return String(format: "PRV-%04d-%04d", year, n)
+        return String(format: "\(prefissoPreventivo)-%04d-%04d", year, n)
+    }
+
+    // ─── Collegamenti cliente ↔ cantieri/preventivi (per nome) ──
+    func cantieri(di cliente: Cliente) -> [Cantiere] {
+        cantieri.filter { $0.cliente == cliente.nome }
+    }
+    func preventivi(di cliente: Cliente) -> [Preventivo] {
+        preventivi.filter { $0.clienteNome == cliente.nome }
+    }
+
+    /// m² netti dei rilievi elaborati (KPI dashboard).
+    var metriTotali: Double {
+        cantieri.flatMap { $0.rilievi }.reduce(0) { $0 + $1.areaNetta }
+    }
+
+    /// Listino raggruppato per categoria, ordine di prima apparizione.
+    var listinoPerCategoria: [(categoria: String, voci: [VoceListino])] {
+        var ordine: [String] = []
+        var mappa: [String: [VoceListino]] = [:]
+        for v in listino {
+            if mappa[v.categoria] == nil { ordine.append(v.categoria) }
+            mappa[v.categoria, default: []].append(v)
+        }
+        return ordine.map { ($0, mappa[$0] ?? []) }
+    }
+}
+
+// MARK: - Cliente (anagrafica)
+
+final class Cliente: ObservableObject, Identifiable {
+    let id: UUID
+    @Published var nome: String
+    @Published var citta: String
+    @Published var telefono: String
+    @Published var email: String
+    @Published var indirizzo: String
+    @Published var partitaIva: String
+
+    init(id: UUID = UUID(),
+         nome: String,
+         citta: String = "",
+         telefono: String = "",
+         email: String = "",
+         indirizzo: String = "",
+         partitaIva: String = "—") {
+        self.id = id
+        self.nome = nome
+        self.citta = citta
+        self.telefono = telefono
+        self.email = email
+        self.indirizzo = indirizzo
+        self.partitaIva = partitaIva
+    }
+
+    /// Iniziali (max 2) per l'avatar.
+    var iniziali: String {
+        nome.split(separator: " ").prefix(2)
+            .compactMap { $0.first.map(String.init) }
+            .joined()
+            .uppercased()
+    }
+}
+
+extension Cliente: Hashable {
+    static func == (l: Cliente, r: Cliente) -> Bool { l.id == r.id }
+    func hash(into h: inout Hasher) { h.combine(id) }
+}
+
+// MARK: - VoceListino (catalogo prezzi)
+
+struct VoceListino: Identifiable, Codable, Hashable {
+    let id: UUID
+    var descrizione: String
+    var unita: String            // es. "m²", "h", "pz", "corpo"
+    var prezzoUnitario: Double
+    var categoria: String
+
+    init(id: UUID = UUID(),
+         descrizione: String,
+         unita: String = "m²",
+         prezzoUnitario: Double = 0,
+         categoria: String = "Generale") {
+        self.id = id
+        self.descrizione = descrizione
+        self.unita = unita
+        self.prezzoUnitario = prezzoUnitario
+        self.categoria = categoria
     }
 }

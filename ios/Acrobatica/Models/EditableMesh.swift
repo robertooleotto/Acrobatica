@@ -1117,4 +1117,301 @@ struct EditableMesh: @unchecked Sendable {
         g.materials = [m]
         return g
     }
+
+    // MARK: - Segmentazione a ISTOGRAMMI nel sistema di assi dell'edificio (BCS)
+
+    /// Un piano architettonico estratto dagli istogrammi: quad + normale + tipo.
+    struct PianoIstogramma {
+        var corners: [SIMD3<Float>]
+        var normale: SIMD3<Float>
+        var punto: SIMD3<Float>
+        var tipo: TipoFaccia
+        var area: Float
+    }
+
+    /// Frame dell'edificio dalla PCA delle POSIZIONI: una facciata è sottile in
+    /// profondità → min varianza = normale; media = verticale; max = larghezza.
+    /// Robusto a mesh acquisite storte (assi inclinati). Riusa `eigenSym3`
+    /// (autovettori-colonna per autovalore DECRESCENTE).
+    func assiPCAEdificio() -> (d: SIMD3<Float>, up: SIMD3<Float>, right: SIMD3<Float>) {
+        guard !vertices.isEmpty else { return (SIMD3(0,0,1), SIMD3(0,1,0), SIMD3(1,0,0)) }
+        var c = SIMD3<Double>(0,0,0)
+        for v in vertices { c += SIMD3<Double>(Double(v.x), Double(v.y), Double(v.z)) }
+        c /= Double(vertices.count)
+        var cov = [[0.0,0,0],[0,0,0],[0,0,0]]
+        for v in vertices {
+            let q = SIMD3<Double>(Double(v.x), Double(v.y), Double(v.z)) - c
+            cov[0][0]+=q.x*q.x; cov[0][1]+=q.x*q.y; cov[0][2]+=q.x*q.z
+            cov[1][1]+=q.y*q.y; cov[1][2]+=q.y*q.z; cov[2][2]+=q.z*q.z
+        }
+        cov[1][0]=cov[0][1]; cov[2][0]=cov[0][2]; cov[2][1]=cov[1][2]
+        let (_, vec) = Self.eigenSym3(cov)   // colonne per autovalore DECRESCENTE
+        func col(_ k: Int) -> SIMD3<Float> {
+            simd_normalize(SIMD3(Float(vec[0][k]), Float(vec[1][k]), Float(vec[2][k])))
+        }
+        var d = col(2)            // min varianza → normale facciata
+        var up = col(1)           // media → verticale
+        if up.y < 0 { up = -up }
+        let right = simd_normalize(simd_cross(up, d))
+        d = simd_normalize(simd_cross(right, up))
+        return (d, up, right)
+    }
+
+    private func areaTri(_ i: Int) -> Float {
+        let t = triangles[i]
+        return 0.5 * simd_length(simd_cross(vertices[Int(t.y)] - vertices[Int(t.x)],
+                                            vertices[Int(t.z)] - vertices[Int(t.x)]))
+    }
+
+    /// Cluster contigui di valori (pesati per area) lungo un asse: bin-izza, tieni
+    /// i bin sopra soglia, unisci i contigui colmando vuoti ≤ maxGap.
+    private func clusterContigui(_ values: [Float], _ weights: [Float], bin: Float, maxGap: Int) -> [(Float, Float)] {
+        guard let lo = values.min(), let hi = values.max(), hi > lo else { return [] }
+        let nb = max(1, Int(((hi - lo) / bin).rounded(.up)))
+        var hist = [Float](repeating: 0, count: nb)
+        for (v, w) in zip(values, weights) {
+            let b = min(nb - 1, max(0, Int((v - lo) / bin)))
+            hist[b] += w
+        }
+        let floor = max((hist.max() ?? 0) * 0.02, 1e-9)
+        var out: [(Float, Float)] = []
+        var i = 0
+        while i < nb {
+            if hist[i] <= floor { i += 1; continue }
+            var j = i, end = i, gap = 0
+            while j < nb {
+                if hist[j] > floor { end = j; gap = 0 } else { gap += 1; if gap > maxGap { break } }
+                j += 1
+            }
+            out.append((lo + Float(i) * bin, lo + Float(end + 1) * bin))
+            i = j
+        }
+        return out
+    }
+
+    private func perc(_ a: [Float], _ f: Float) -> Float {
+        guard !a.isEmpty else { return 0 }
+        let i = min(a.count - 1, max(0, Int((Float(a.count - 1) * f / 100).rounded())))
+        return a[i]
+    }
+
+    /// Istogramma lungo `axis` (normale dei piani cercati) → split lungo `eH`;
+    /// quad finale nel piano (eH, eV).
+    private func pianiLungoAsse(axis: SIMD3<Float>, eH: SIMD3<Float>, eV: SIMD3<Float>, tipo: TipoFaccia,
+                                nf: [SIMD3<Float>], cf: [SIMD3<Float>], af: [Float],
+                                angTolGradi: Float, bin: Float, minArea: Float, percLo: Float, percHi: Float) -> [PianoIstogramma] {
+        let cosTol = cos(angTolGradi * .pi / 180)
+        var sel: [Int] = []
+        for i in triangles.indices where abs(simd_dot(nf[i], axis)) > cosTol { sel.append(i) }
+        guard !sel.isEmpty else { return [] }
+        let depth = sel.map { simd_dot(cf[$0], axis) }
+        let aSel = sel.map { af[$0] }
+        let hco = sel.map { simd_dot(cf[$0], eH) }
+        var out: [PianoIstogramma] = []
+        func quad(_ faceIdx: [Int]) {
+            let ar = faceIdx.reduce(Float(0)) { $0 + af[$1] }
+            guard ar >= minArea else { return }
+            var vids = Set<Int>()
+            for fi in faceIdx { let t = triangles[fi]; vids.insert(Int(t.x)); vids.insert(Int(t.y)); vids.insert(Int(t.z)) }
+            var xs: [Float] = [], ys: [Float] = [], zs: [Float] = []
+            for vi in vids { let v = vertices[vi]; xs.append(simd_dot(v, eH)); ys.append(simd_dot(v, eV)); zs.append(simd_dot(v, axis)) }
+            xs.sort(); ys.sort()
+            let x0 = perc(xs, percLo), x1 = perc(xs, percHi), y0 = perc(ys, percLo), y1 = perc(ys, percHi)
+            guard x1 > x0, y1 > y0 else { return }
+            let off = zs.reduce(0, +) / Float(zs.count)
+            func p3(_ x: Float, _ y: Float) -> SIMD3<Float> { eH * x + eV * y + axis * off }
+            out.append(PianoIstogramma(corners: [p3(x0, y0), p3(x1, y0), p3(x1, y1), p3(x0, y1)],
+                                       normale: axis, punto: eH * (x0+x1)/2 + eV * (y0+y1)/2 + axis * off,
+                                       tipo: tipo, area: ar))
+        }
+        for (z0, z1) in clusterContigui(depth, aSel, bin: bin, maxGap: 3) {
+            let inDepth = sel.indices.filter { depth[$0] >= z0 - bin && depth[$0] <= z1 + bin }
+            guard !inDepth.isEmpty else { continue }
+            let hsub = inDepth.map { hco[$0] }, asub = inDepth.map { aSel[$0] }
+            for (h0, h1) in clusterContigui(hsub, asub, bin: bin, maxGap: 4) {
+                let faces = inDepth.filter { hco[$0] >= h0 - bin && hco[$0] <= h1 + bin }.map { sel[$0] }
+                quad(faces)
+            }
+        }
+        return out
+    }
+
+    /// Estrae i piani con la pipeline a istogrammi (fronte/lato/alto). `assi` se
+    /// passati (override manuale) sostituiscono la stima PCA.
+    func segmentaPianiIstogrammi(angTolGradi: Float = 25, binFraz: Float = 0.006, minAreaFraz: Float = 0.02,
+                                 percLo: Float = 2, percHi: Float = 98,
+                                 assi: (d: SIMD3<Float>, up: SIMD3<Float>, right: SIMD3<Float>)? = nil) -> [PianoIstogramma] {
+        guard triangles.count > 10 else { return [] }
+        let (d, up, right) = assi ?? assiPCAEdificio()
+        let nf = triangles.indices.map { normale($0) }
+        let cf = triangles.indices.map { centroid(triangles[$0]) }
+        let af = triangles.indices.map { areaTri($0) }
+        let (lo, hi) = aabb
+        let ext = max(hi.x - lo.x, max(hi.y - lo.y, hi.z - lo.z))
+        let bin = max(ext * binFraz, 1e-4)
+        let cosV = cos(angTolGradi * .pi / 180)
+        let areaVert = triangles.indices.filter { abs(simd_dot(nf[$0], up)) < sin(angTolGradi * .pi / 180) }
+            .reduce(Float(0)) { $0 + af[$1] }
+        let minArea = max(areaVert * minAreaFraz, 1e-4)
+        _ = cosV
+        var out: [PianoIstogramma] = []
+        out += pianiLungoAsse(axis: d, eH: right, eV: up, tipo: .facciata, nf: nf, cf: cf, af: af,
+                              angTolGradi: angTolGradi, bin: bin, minArea: minArea, percLo: percLo, percHi: percHi)
+        out += pianiLungoAsse(axis: right, eH: d, eV: up, tipo: .spalletta, nf: nf, cf: cf, af: af,
+                              angTolGradi: 12, bin: bin, minArea: minArea, percLo: 10, percHi: 90)
+        out += pianiLungoAsse(axis: up, eH: right, eV: d, tipo: .orizzontale, nf: nf, cf: cf, af: af,
+                              angTolGradi: 12, bin: bin, minArea: minArea, percLo: 10, percHi: 90)
+        return out
+    }
+
+    /// Pipeline BCS deterministica: usa gli assi dell'edificio (right/up/front),
+    /// cerca picchi di area lungo Z per facciate/torrette e lungo X per spallette,
+    /// poi genera quad puliti con percentili robusti.
+    func segmentaPianiBCS(assi: (right: SIMD3<Float>, up: SIMD3<Float>, front: SIMD3<Float>),
+                          binMetri: Float = 0.10,
+                          angTolGradi: Float = 15,
+                          minAreaFacciata: Float = 2.0,
+                          minAreaSpalletta: Float = 0.7,
+                          maxFacciate: Int = 7,
+                          maxSpallette: Int = 10,
+                          percLo: Float = 5,
+                          percHi: Float = 95) -> [PianoIstogramma] {
+        guard triangles.count > 10, !vertices.isEmpty else { return [] }
+        let r = simd_normalize(assi.right)
+        let u0 = assi.up - simd_dot(assi.up, r) * r
+        let u = simd_length(u0) > 1e-4 ? simd_normalize(u0) : SIMD3<Float>(0, 1, 0)
+        var f = assi.front - simd_dot(assi.front, r) * r - simd_dot(assi.front, u) * u
+        if simd_length(f) < 1e-4 { f = simd_cross(r, u) }
+        f = simd_normalize(f)
+        let rot = simd_float3x3(r, u, f)
+        let rt = rot.transpose
+        let (loW, hiW) = aabb
+        let origin = (loW + hiW) / 2
+        let localVerts = vertices.map { rt * ($0 - origin) }
+        let (loL, hiL) = localVerts.reduce((localVerts[0], localVerts[0])) { acc, v in
+            (simd_min(acc.0, v), simd_max(acc.1, v))
+        }
+        let ext = hiL - loL
+        let bin = max(min(binMetri, max(max(ext.x, ext.y), ext.z) * 0.04), max(max(max(ext.x, ext.y), ext.z) * 0.004, 0.01))
+        let cosTol = cos(angTolGradi * .pi / 180)
+
+        struct TriBCS {
+            let index: Int
+            let area: Float
+            let c: SIMD3<Float>
+            let n: SIMD3<Float>
+        }
+        var dati: [TriBCS] = []
+        dati.reserveCapacity(triangles.count)
+        for i in triangles.indices {
+            let t = triangles[i]
+            let a = localVerts[Int(t.x)], b = localVerts[Int(t.y)], c = localVerts[Int(t.z)]
+            let cr = simd_cross(b - a, c - a)
+            let ar = simd_length(cr) * 0.5
+            guard ar > 1e-9 else { continue }
+            dati.append(TriBCS(index: i, area: ar, c: (a + b + c) / 3, n: cr / (ar * 2)))
+        }
+        guard !dati.isEmpty else { return [] }
+        let areaVerticale = dati.filter { abs($0.n.y) < 0.45 }.reduce(Float(0)) { $0 + $1.area }
+        let minFront = max(minAreaFacciata, areaVerticale * 0.010)
+        let minSide = max(minAreaSpalletta, areaVerticale * 0.003)
+
+        func percent(_ values: [Float], _ p: Float) -> Float {
+            guard !values.isEmpty else { return 0 }
+            let sorted = values.sorted()
+            let idx = min(sorted.count - 1, max(0, Int((Float(sorted.count - 1) * p / 100).rounded())))
+            return sorted[idx]
+        }
+
+        func peakBins(_ tris: [TriBCS], coord: (SIMD3<Float>) -> Float, minArea: Float, maxCount: Int) -> [(center: Float, area: Float)] {
+            guard !tris.isEmpty else { return [] }
+            let vals = tris.map { coord($0.c) }
+            guard let lo = vals.min(), let hi = vals.max(), hi > lo else { return [] }
+            let nb = max(1, Int(((hi - lo) / bin).rounded(.up)) + 1)
+            var hist = [Float](repeating: 0, count: nb)
+            for (tri, v) in zip(tris, vals) {
+                let b = min(nb - 1, max(0, Int(((v - lo) / bin).rounded(.down))))
+                hist[b] += tri.area
+            }
+            let localFloor = max(minArea, (hist.max() ?? 0) * 0.08)
+            var peaks: [(Int, Float)] = []
+            for i in hist.indices where hist[i] >= localFloor {
+                let prev = i > 0 ? hist[i - 1] : -Float.greatestFiniteMagnitude
+                let next = i + 1 < hist.count ? hist[i + 1] : -Float.greatestFiniteMagnitude
+                if hist[i] >= prev && hist[i] >= next {
+                    peaks.append((i, hist[i]))
+                }
+            }
+            peaks.sort { $0.1 > $1.1 }
+            var selected: [(center: Float, area: Float)] = []
+            for (idx, area) in peaks {
+                let center = lo + (Float(idx) + 0.5) * bin
+                if selected.contains(where: { abs($0.center - center) < bin * 2.0 }) { continue }
+                selected.append((center, area))
+                if selected.count >= maxCount { break }
+            }
+            return selected
+        }
+
+        func makePlane(tris: [TriBCS], axis: WritableKeyPath<SIMD3<Float>, Float>,
+                       a0: WritableKeyPath<SIMD3<Float>, Float>,
+                       a1: WritableKeyPath<SIMD3<Float>, Float>,
+                       normal: SIMD3<Float>, tipo: TipoFaccia, minArea: Float) -> PianoIstogramma? {
+            let ar = tris.reduce(Float(0)) { $0 + $1.area }
+            guard ar >= minArea else { return nil }
+            var p0: [Float] = [], p1: [Float] = [], fixedVals: [Float] = []
+            p0.reserveCapacity(tris.count * 3); p1.reserveCapacity(tris.count * 3); fixedVals.reserveCapacity(tris.count)
+            for tri in tris {
+                let t = triangles[tri.index]
+                for vi in [Int(t.x), Int(t.y), Int(t.z)] {
+                    let v = localVerts[vi]
+                    p0.append(v[keyPath: a0])
+                    p1.append(v[keyPath: a1])
+                }
+                fixedVals.append(tri.c[keyPath: axis] * tri.area)
+            }
+            let x0 = percent(p0, percLo), x1 = percent(p0, percHi)
+            let y0 = percent(p1, percLo), y1 = percent(p1, percHi)
+            guard x1 - x0 > bin * 2, y1 - y0 > bin * 2 else { return nil }
+            let precise = fixedVals.reduce(0, +) / max(ar, 1e-6)
+            func local(_ p: Float, _ q: Float) -> SIMD3<Float> {
+                var v = SIMD3<Float>(repeating: 0)
+                v[keyPath: axis] = precise
+                v[keyPath: a0] = p
+                v[keyPath: a1] = q
+                return v
+            }
+            let lc = [local(x0, y0), local(x1, y0), local(x1, y1), local(x0, y1)]
+            let wc = lc.map { origin + rot * $0 }
+            let pn = simd_normalize(rot * normal)
+            return PianoIstogramma(corners: wc,
+                                   normale: pn,
+                                   punto: origin + rot * local((x0 + x1) * 0.5, (y0 + y1) * 0.5),
+                                   tipo: tipo,
+                                   area: ar)
+        }
+
+        let frontali = dati.filter { abs($0.n.z) >= cosTol && abs($0.n.y) < 0.55 }
+        let laterali = dati.filter { abs($0.n.x) >= cosTol && abs($0.n.y) < 0.60 }
+        var out: [PianoIstogramma] = []
+        for peak in peakBins(frontali, coord: { $0.z }, minArea: minFront, maxCount: maxFacciate) {
+            let inliers = frontali.filter { abs($0.c.z - peak.center) <= bin * 1.35 }
+            let sign: Float = (inliers.reduce(Float(0)) { $0 + $1.n.z * $1.area }) >= 0 ? 1 : -1
+            if let p = makePlane(tris: inliers, axis: \.z, a0: \.x, a1: \.y,
+                                 normal: SIMD3<Float>(0, 0, sign),
+                                 tipo: .facciata, minArea: minFront) {
+                out.append(p)
+            }
+        }
+        for peak in peakBins(laterali, coord: { $0.x }, minArea: minSide, maxCount: maxSpallette) {
+            let inliers = laterali.filter { abs($0.c.x - peak.center) <= bin * 1.25 }
+            let sign: Float = (inliers.reduce(Float(0)) { $0 + $1.n.x * $1.area }) >= 0 ? 1 : -1
+            if let p = makePlane(tris: inliers, axis: \.x, a0: \.z, a1: \.y,
+                                 normal: SIMD3<Float>(sign, 0, 0),
+                                 tipo: .spalletta, minArea: minSide) {
+                out.append(p)
+            }
+        }
+        return out.sorted { $0.area > $1.area }
+    }
 }

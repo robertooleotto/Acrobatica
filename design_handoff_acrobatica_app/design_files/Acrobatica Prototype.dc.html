@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+  @keyframes acro-spin { to { transform: rotate(360deg); } }
+  @keyframes acro-rise { from { transform: translateY(24px); opacity: .6; } to { transform: none; opacity: 1; } }
+  @keyframes acro-load { from { width: 4%; } to { width: 100%; } }
+  ::-webkit-scrollbar { width: 8px; }
+  ::-webkit-scrollbar-thumb { background: rgba(15,30,72,0.14); border-radius: 99px; }
+</style>
+<script src="app/image-slot.js"></script>
+</helmet>
+<div style="display: flex; width: 100vw; height: 100vh; background: #E9E7E0; background-image: radial-gradient(circle at 50% 0%, #f3f1ec, #e2dfd6); font-family: -apple-system, system-ui, 'SF Pro Text', sans-serif;">
+  <sc-if value="{{ railVisible }}" hint-placeholder-val="{{ true }}">
+    <div style="width: 252px; flex: none; height: 100%; background: #FFFFFF; border-right: 1px solid rgba(15,30,72,0.08); display: flex; flex-direction: column; box-sizing: border-box;">
+      <div style="display: flex; align-items: center; gap: 10px; padding: 16px 14px 12px;">
+        <div style="width: 32px; height: 32px; border-radius: 9px; background: #F5DC0F; display: flex; align-items: center; justify-content: center; flex: none;">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="#0F1E48"><path d="M3 21V7l8-4v4l8-4v18h-7v-5h-2v5z"></path></svg>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 1px;">
+          <span style="font: 700 15px -apple-system, system-ui, sans-serif; color: #0F1E48; letter-spacing: -.01em;">Acrobatica</span>
+          <span style="font: 500 10px -apple-system, system-ui, sans-serif; color: rgba(15,30,72,0.55);">Prototipo · 21 schermate</span>
+        </div>
+      </div>
+      <div style="display: flex; gap: 0; margin: 0 14px 12px; background: #EEECE6; border-radius: 999px; padding: 3px;">
+        <div onClick="{{ setDemo }}" style="flex: 1; text-align: center; padding: 5px 0; border-radius: 999px; cursor: pointer; font: 600 11px -apple-system, system-ui, sans-serif; background: {{ demoBg }}; color: {{ demoFg }}; box-shadow: {{ demoShadow }};">Dati demo</div>
+        <div onClick="{{ setVuoto }}" style="flex: 1; text-align: center; padding: 5px 0; border-radius: 999px; cursor: pointer; font: 600 11px -apple-system, system-ui, sans-serif; background: {{ vuotoBg }}; color: {{ vuotoFg }}; box-shadow: {{ vuotoShadow }};">Vuoto</div>
+      </div>
+      <div style="flex: 1; overflow-y: auto; padding: 0 8px 8px;">
+        <sc-for list="{{ groups }}" as="g" hint-placeholder-count="8">
+          <div style="display: flex; flex-direction: column; gap: 2px; margin-bottom: 12px;">
+            <div style="font: 600 9.5px -apple-system, system-ui, sans-serif; letter-spacing: .6px; text-transform: uppercase; color: rgba(15,30,72,0.45); padding: 0 8px 5px;">{{ g.fase }}</div>
+            <sc-for list="{{ g.items }}" as="it" hint-placeholder-count="3">
+              <div onClick="{{ it.go }}" style="display: flex; align-items: center; gap: 7px; padding: 6px 8px; border-radius: 9px; cursor: pointer; background: {{ it.bg }};">
+                <span style="font: 600 10px ui-monospace, 'SF Mono', Menlo, monospace; color: {{ it.numColor }}; width: 22px; flex: none;">{{ it.num }}</span>
+                <span style="font: {{ it.weight }} 12.5px -apple-system, system-ui, sans-serif; color: #0F1E48; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ it.label }}</span>
+                <sc-for list="{{ it.varLetters }}" as="v" hint-placeholder-count="0">
+                  <span onClick="{{ v.pick }}" style="width: 17px; height: 17px; border-radius: 5px; flex: none; display: flex; align-items: center; justify-content: center; font: 700 9px -apple-system, system-ui, sans-serif; background: {{ v.bg }}; color: {{ v.fg }}; border: 1px solid {{ v.border }};">{{ v.l }}</span>
+                </sc-for>
+              </div>
+            </sc-for>
+          </div>
+        </sc-for>
+      </div>
+      <div style="border-top: 1px solid rgba(15,30,72,0.08); padding: 10px 14px 12px; display: flex; flex-direction: column; gap: 4px;">
+        <span style="font: 600 9.5px -apple-system, system-ui, sans-serif; letter-spacing: .6px; text-transform: uppercase; color: rgba(15,30,72,0.45);">Stati da provare</span>
+        <span style="font: 400 11px -apple-system, system-ui, sans-serif; color: rgba(15,30,72,0.55); line-height: 1.5;">«Vuoto» mostra gli empty state · Accedi senza password = errore · Stop in cattura = elaborazione · Firma col dito in 5.5</span>
+      </div>
+    </div>
+  </sc-if>
+  <div style="flex: 1; min-width: 0; height: 100vh;">
+    <x-import component-from-global-scope="AcroPrototype" from="./app/acrobatica-all.jsx" nav="{{ nav }}" variants="{{ variants }}" dataset="{{ dataset }}" go="{{ go }}" stage-w="{{ stageW }}" stage-h="{{ stageH }}" style="width: 100%; height: 100%;" hint-size="100%,100%"></x-import>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;railVisible&quot;: {&quot;editor&quot;: &quot;boolean&quot;, &quot;default&quot;: true, &quot;tsType&quot;: &quot;boolean&quot;, &quot;section&quot;: &quot;Prototipo&quot;}, &quot;dataset&quot;: {&quot;editor&quot;: &quot;enum&quot;, &quot;options&quot;: [&quot;demo&quot;, &quot;vuoto&quot;], &quot;default&quot;: &quot;demo&quot;, &quot;tsType&quot;: &quot;'demo' | 'vuoto'&quot;, &quot;section&quot;: &quot;Prototipo&quot;}}">
+const REGISTRY = [
+  { fase: 'Fase 0 · Accesso', items: [
+    { id: '0.1', label: 'Splash / Launch', vk: 'splash', vs: ['A', 'B'] },
+    { id: '0.2', label: 'Login', vk: 'login', vs: ['A', 'B'] },
+    { id: '0.3', label: 'Home / Dashboard', vk: 'home', vs: ['A', 'B', 'C'] },
+  ] },
+  { fase: 'Fase 1 · Cantieri', items: [
+    { id: '1.1', label: 'Cantieri / Lista' },
+    { id: '1.2', label: 'Nuovo cantiere (sheet)' },
+    { id: '1.4', label: 'Cantiere / Dettaglio' },
+  ] },
+  { fase: 'Fase 2 · Cattura', items: [
+    { id: '2.1', label: 'Cattura AR / Live' },
+    { id: '2.2', label: 'Frame strip', nav: { id: '2.1', shots: 4 } },
+  ] },
+  { fase: 'Fase 3 · Elaborazione 3D', items: [
+    { id: '3.1', label: 'Risultato / Panorama' },
+    { id: '3.2', label: 'Editor 3D mesh' },
+    { id: '3.4', label: 'Rettifica facciata' },
+    { id: '3.5', label: 'Misura scala' },
+  ] },
+  { fase: 'Fase 4 · Marcatura', items: [
+    { id: '4.1', label: 'Zone e aperture' },
+  ] },
+  { fase: 'Fase 5 · Preventivo', items: [
+    { id: '5.1', label: 'Preventivi / Lista' },
+    { id: '5.2', label: 'Preventivo / Editor' },
+    { id: '5.4', label: 'Anteprima PDF' },
+    { id: '5.5', label: 'Firma cliente' },
+  ] },
+  { fase: 'Fase 6 · Anagrafiche', items: [
+    { id: '6.1', label: 'Clienti / Lista', vk: 'clienti', vs: ['A', 'B'] },
+    { id: '6.2', label: 'Cliente / Dettaglio', vk: 'cliente', vs: ['A', 'B'] },
+    { id: '6.3', label: 'Listino prezzi', vk: 'listino', vs: ['A', 'B'] },
+    { id: '6.4', label: 'Impostazioni / Profilo', vk: 'impostazioni', vs: ['A', 'B'] },
+  ] },
+  { fase: 'iPad · Landscape', items: [
+    { id: '2.1p', label: 'Cattura AR (iPad)', nav: { id: '2.1', pad: true } },
+    { id: '3.2p', label: 'Editor 3D (iPad)', nav: { id: '3.2', pad: true } },
+  ] },
+];
+
+const NAVY = '#0F1E48', YELLOW = '#F5DC0F';
+
+class Component extends DCLogic {
+  state = {
+    nav: { id: '0.3' },
+    dataset: null,
+    variants: { splash: 'A', login: 'A', home: 'A', clienti: 'A', cliente: 'A', listino: 'A', impostazioni: 'A' },
+  };
+
+  activeKey() {
+    const n = this.state.nav;
+    if (n.pad) return n.id + 'p';
+    if (n.id === '2.1' && n.shots > 0) return '2.2';
+    return n.id;
+  }
+
+  componentDidMount() {
+    this._onResize = () => this.forceUpdate();
+    window.addEventListener('resize', this._onResize);
+  }
+  componentWillUnmount() {
+    window.removeEventListener('resize', this._onResize);
+  }
+
+  renderVals() {
+    const dataset = this.state.dataset ?? this.props.dataset ?? 'demo';
+    const railVis = this.props.railVisible ?? true;
+    const stageW = Math.max(200, window.innerWidth - (railVis ? 252 : 0));
+    const stageH = Math.max(200, window.innerHeight);
+    const variants = this.state.variants;
+    const active = this.activeKey();
+    const go = (nav) => this.setState({ nav });
+
+    const groups = REGISTRY.map(g => ({
+      fase: g.fase,
+      items: g.items.map(it => {
+        const key = it.id;
+        const on = active === key || (key === '2.1' && active === '2.2' && false);
+        const targetNav = it.nav || { id: it.id };
+        const varLetters = (it.vs || []).map(l => {
+          const von = variants[it.vk] === l;
+          return {
+            l,
+            bg: von ? NAVY : '#FFFFFF',
+            fg: von ? YELLOW : 'rgba(15,30,72,0.55)',
+            border: von ? NAVY : 'rgba(15,30,72,0.16)',
+            pick: (e) => {
+              if (e && e.stopPropagation) e.stopPropagation();
+              this.setState(s => ({ variants: { ...s.variants, [it.vk]: l }, nav: targetNav }));
+            },
+          };
+        });
+        return {
+          num: it.id.replace('p', ''),
+          label: it.label,
+          bg: on ? 'rgba(245,220,15,0.30)' : 'transparent',
+          numColor: on ? NAVY : 'rgba(15,30,72,0.40)',
+          weight: on ? 700 : 500,
+          go: () => this.setState({ nav: targetNav }),
+          varLetters,
+        };
+      }),
+    }));
+
+    const demo = dataset === 'demo';
+    return {
+      railVisible: railVis,
+      stageW,
+      stageH,
+      groups,
+      nav: this.state.nav,
+      variants,
+      dataset,
+      go,
+      setDemo: () => this.setState({ dataset: 'demo' }),
+      setVuoto: () => this.setState({ dataset: 'vuoto' }),
+      demoBg: demo ? '#FFFFFF' : 'transparent',
+      demoFg: demo ? NAVY : 'rgba(15,30,72,0.55)',
+      demoShadow: demo ? 'inset 0 0 0 1px rgba(15,30,72,0.16)' : 'none',
+      vuotoBg: !demo ? '#FFFFFF' : 'transparent',
+      vuotoFg: !demo ? NAVY : 'rgba(15,30,72,0.55)',
+      vuotoShadow: !demo ? 'inset 0 0 0 1px rgba(15,30,72,0.16)' : 'none',
+    };
+  }
+}
+</script>
+</body>
+</html>

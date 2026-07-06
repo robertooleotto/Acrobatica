@@ -26,6 +26,9 @@ from ..models import (
     CreateSessionResponse,
     ExtrudePolygonRequest,
     ExtrudePolygonResult,
+    FailRequest,
+    OcJobPhoto,
+    OcJobResponse,
     FacadeModelRequest,
     FacadeModelResult,
     FacadePlaneModel,
@@ -60,6 +63,7 @@ from ..services import (
     measurement_service,
     rectification_service,
     segmentation_service,
+    session_state,
     session_store,
     storage_service,
     stitching_service,
@@ -74,6 +78,28 @@ router = APIRouter(prefix="/facade-sessions", tags=["facade-sessions"])
 def create_session():
     row = session_store.create_session()
     return CreateSessionResponse(session_id=row["id"], status=row["status"])
+
+
+# NB: questa rotta LETTERALE va PRIMA di GET /{session_id} (parametrica), altrimenti
+# "next-oc-job" verrebbe catturato come session_id.
+@router.get("/next-oc-job", response_model=OcJobResponse)
+def next_oc_job():
+    """Passo 3 — il worker OC reclama il prossimo job dalla coda `queued_oc`.
+    Prenota la sessione (→ computing_oc) e restituisce foto (URL firmati) +
+    intrinseci ARKit. `session_id` None = niente lavoro."""
+    row = session_store.claim_next_oc_job()
+    if row is None:
+        return OcJobResponse()
+    photos = session_store.list_photos(row["id"])
+    job_photos = [
+        OcJobPhoto(
+            order_index=p["order_index"],
+            url=storage_service.signed_url(p["storage_path"], expires_in_sec=3600),
+            camera_intrinsics=(p.get("metadata") or {}).get("camera_intrinsics") or [],
+        )
+        for p in photos
+    ]
+    return OcJobResponse(session_id=row["id"], photos=job_photos)
 
 
 @router.post("/{session_id}/photos", response_model=UploadPhotoResponse)
@@ -107,6 +133,88 @@ async def upload_photo(
         order_index=meta_obj.order_index,
         photos_count=len(photos),
     )
+
+
+def _pose_ok(meta: dict) -> bool:
+    """La foto ha pose ARKit utilizzabili (transform 16 + intrinseci 9)?"""
+    ct = meta.get("camera_transform")
+    ck = meta.get("camera_intrinsics")
+    return isinstance(ct, list) and len(ct) == 16 and isinstance(ck, list) and len(ck) == 9
+
+
+def _session_state(sess: dict, photos: list[dict]) -> SessionState:
+    return SessionState(
+        session_id=sess["id"],
+        status=sess["status"],
+        created_at=_iso_to_epoch(sess["created_at"]),
+        updated_at=_iso_to_epoch(sess["updated_at"]),
+        photos=[ARMetadata.model_validate(p["metadata"]) for p in photos],
+        result=ProcessResult.model_validate(sess["result"]) if sess.get("result") else None,
+    )
+
+
+@router.post("/{session_id}/finalize", response_model=SessionState)
+def finalize_capture(session_id: str):
+    """Passo 2 — chiude la cattura: tutte le foto sono caricate e hanno pose valide.
+    Transiziona la sessione a `uploaded` (pronta per il calcolo mesh)."""
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        raise HTTPException(404, "Sessione non trovata")
+    photos = session_store.list_photos(session_id)
+    if not photos:
+        raise HTTPException(400, "Nessuna foto caricata")
+    n_bad = sum(0 if _pose_ok(p.get("metadata") or {}) else 1 for p in photos)
+    if n_bad:
+        raise HTTPException(422, f"{n_bad}/{len(photos)} foto senza pose ARKit valide")
+    try:
+        row = session_store.update_status(session_id, session_state.UPLOADED)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    return _session_state(row, photos)
+
+
+@router.post("/{session_id}/request-mesh", response_model=SessionState)
+def request_mesh(session_id: str):
+    """Passo 3 (handoff) — accoda la sessione per il calcolo Object Capture sul Mac
+    cloud. La sessione deve essere in `uploaded`. Il worker che consuma la coda è
+    lo stadio successivo (dipende dalla scelta di hosting del Mac)."""
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        raise HTTPException(404, "Sessione non trovata")
+    try:
+        row = session_store.update_status(session_id, session_state.QUEUED_OC)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    photos = session_store.list_photos(session_id)
+    return _session_state(row, photos)
+
+
+@router.post("/{session_id}/mesh-ready", response_model=SessionState)
+def mesh_ready(session_id: str):
+    """Passo 4 — il worker ha caricato mesh+pose: la sessione è pronta per il
+    download/pulizia on-device (computing_oc → mesh_ready)."""
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        raise HTTPException(404, "Sessione non trovata")
+    try:
+        row = session_store.update_status(session_id, session_state.MESH_READY)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    return _session_state(row, session_store.list_photos(session_id))
+
+
+@router.post("/{session_id}/fail", response_model=SessionState)
+def fail_session(session_id: str, req: Optional[FailRequest] = None):
+    """Segna la sessione come fallita (da qualunque stadio di lavoro). Il worker
+    la chiama se OC va in errore; l'app potrà ri-accodare."""
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        raise HTTPException(404, "Sessione non trovata")
+    try:
+        row = session_store.update_status(session_id, session_state.FAILED)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    return _session_state(row, session_store.list_photos(session_id))
 
 
 @router.post("/{session_id}/process", response_model=ProcessResult)
@@ -842,25 +950,43 @@ _MESH_CONTENT_TYPES = {
     ".mtl": "model/mtl",
     ".usdz": "model/vnd.usdz+zip",
     ".ply": "application/octet-stream",
+    ".json": "application/json",
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
 }
 
 
-def _mesh_remote(session_id: str, name: str) -> str:
-    # Sotto-cartella dedicata, nome sanificato (niente path traversal).
-    return storage_service.out_path(session_id, f"mesh/{Path(name).name}")
+_MESH_KINDS = ("raw", "clean")
+_MESH_MAIN_EXT = (".obj", ".usdz")   # priorità: .obj poi .usdz
+
+
+def _mesh_remote(session_id: str, kind: str, name: str) -> str:
+    # Path separati per grezza/pulita; nome sanificato (niente path traversal).
+    return storage_service.out_path(session_id, f"mesh/{kind}/{Path(name).name}")
+
+
+def _mesh_dict(result: dict | None) -> dict:
+    """Normalizza result['mesh'] alla forma nidificata {raw:{...}, clean:{...}}.
+    Compat: una vecchia forma piatta {files, main_obj} viene letta come 'raw'."""
+    mesh = (result or {}).get("mesh") or {}
+    if "files" in mesh and "raw" not in mesh and "clean" not in mesh:
+        return {"raw": mesh}
+    return mesh
 
 
 @router.put("/{session_id}/mesh", response_model=MeshUploadResult)
-async def upload_mesh(session_id: str, files: list[UploadFile] = File(...)):
-    """Riceve la mesh di Object Capture dal Mac (OBJ + eventuali MTL/PNG texture).
-
-    PUT idempotente: sovrascrive i file con lo stesso nome. Il primo .obj
-    caricato diventa la mesh principale servita all'app. Lo script Mac da
-    `backend/photogrammetry/objectcapture/` farà questa POST dopo usdz2obj.
-    """
+async def upload_mesh(
+    session_id: str,
+    kind: str = Form("raw"),
+    files: list[UploadFile] = File(...),
+):
+    """Riceve una mesh per la sessione. `kind`='raw' (dal Mac/Object Capture) o
+    'clean' (mesh ripulita dall'iPad). Le due sono conservate SEPARATE: la pulita
+    non sovrascrive la grezza, così si può sempre ripartire dalla grezza.
+    Il primo .obj (o in mancanza .usdz) è la mesh principale."""
+    if kind not in _MESH_KINDS:
+        raise HTTPException(400, f"kind deve essere uno di {_MESH_KINDS}")
     sess = session_store.get_session(session_id)
     if sess is None:
         raise HTTPException(404, "Sessione non trovata")
@@ -869,18 +995,21 @@ async def upload_mesh(session_id: str, files: list[UploadFile] = File(...)):
 
     infos: list[MeshFileInfo] = []
     manifest: list[dict] = []
-    main_obj: str | None = None
+    first_obj: str | None = None
+    first_usdz: str | None = None
     for f in files:
         name = Path(f.filename or "mesh").name
         ext = Path(name).suffix.lower()
         if ext not in _MESH_CONTENT_TYPES:
             raise HTTPException(400, f"Estensione mesh non supportata: '{name}'")
         data = await f.read()
-        remote = _mesh_remote(session_id, name)
+        remote = _mesh_remote(session_id, kind, name)
         storage_service.upload_bytes(remote, data, _MESH_CONTENT_TYPES[ext])
-        manifest.append({"name": name, "size": len(data)})
-        if ext == ".obj" and main_obj is None:
-            main_obj = name
+        manifest.append({"name": name, "size": len(data), "path": remote})
+        if ext == ".obj" and first_obj is None:
+            first_obj = name
+        elif ext == ".usdz" and first_usdz is None:
+            first_usdz = name
         infos.append(MeshFileInfo(
             name=name,
             url=storage_service.signed_url(remote, expires_in_sec=3600),
@@ -888,35 +1017,46 @@ async def upload_mesh(session_id: str, files: list[UploadFile] = File(...)):
         ))
 
     existing = sess.get("result") or {}
-    existing["mesh"] = {"files": manifest, "main_obj": main_obj}
+    meshes = _mesh_dict(existing)
+    meshes[kind] = {"files": manifest, "main_obj": first_obj or first_usdz}
+    existing["mesh"] = meshes
     session_store.update_session(session_id, {"result": existing})
 
     return MeshUploadResult(session_id=session_id, files=infos)
 
 
 @router.get("/{session_id}/mesh", response_model=MeshInfoResult)
-def get_mesh(session_id: str):
-    """Restituisce gli URL firmati della mesh per il download su iPad."""
+def get_mesh(session_id: str, kind: Optional[str] = None):
+    """URL firmati della mesh per il download su iPad. `kind` opzionale:
+    default = 'clean' se esiste, altrimenti 'raw' (l'app vuole la più recente
+    utilizzabile)."""
     sess = session_store.get_session(session_id)
     if sess is None:
         raise HTTPException(404, "Sessione non trovata")
-    mesh = (sess.get("result") or {}).get("mesh")
-    if not mesh or not mesh.get("files"):
+    meshes = _mesh_dict(sess.get("result"))
+    if not meshes:
         raise HTTPException(404, "Nessuna mesh caricata per questa sessione")
+    chosen = kind or ("clean" if meshes.get("clean", {}).get("files") else "raw")
+    if chosen not in _MESH_KINDS:
+        raise HTTPException(400, f"kind deve essere uno di {_MESH_KINDS}")
+    entry = meshes.get(chosen) or {}
+    if not entry.get("files"):
+        raise HTTPException(404, f"Nessuna mesh '{chosen}' per questa sessione")
 
     files: list[MeshFileInfo] = []
     main: MeshFileInfo | None = None
-    for entry in mesh["files"]:
-        name = entry["name"] if isinstance(entry, dict) else entry
-        size = int(entry.get("size", 0)) if isinstance(entry, dict) else 0
-        remote = _mesh_remote(session_id, name)
+    for e in entry["files"]:
+        name = e["name"] if isinstance(e, dict) else e
+        size = int(e.get("size", 0)) if isinstance(e, dict) else 0
+        remote = (e.get("path") if isinstance(e, dict) and e.get("path")
+                  else _mesh_remote(session_id, chosen, name))
         info = MeshFileInfo(
             name=name,
             url=storage_service.signed_url(remote, expires_in_sec=3600),
             size_bytes=size,
         )
         files.append(info)
-        if name == mesh.get("main_obj"):
+        if name == entry.get("main_obj"):
             main = info
     return MeshInfoResult(session_id=session_id, main_obj=main, files=files)
 

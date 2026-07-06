@@ -1,0 +1,223 @@
+<!doctype html><meta charset="utf-8">
+<style>
+html,body{margin:0;height:100%;overflow:hidden;background:#202124;font-family:sans-serif}
+#panel{position:absolute;top:10px;left:10px;z-index:10;width:230px;background:#1b1c1edd;border:1px solid #333;border-radius:8px;padding:10px;color:#ddd}
+h3{margin:0 0 8px;font-size:13px;font-weight:600}
+button,select{display:block;width:100%;margin:5px 0;background:#2a2c30;color:#ddd;border:1px solid #444;border-radius:6px;padding:7px 10px;font-size:13px;text-align:left}
+button.on{background:#2f6fed;color:#fff;border-color:#2f6fed}
+#stats{white-space:pre-wrap;font:12px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace;color:#c8c8c8;margin-top:8px}
+#planeTools{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px}
+#planeTools button{margin:0;text-align:center;padding:6px 4px;font-size:12px}
+#planeList{margin-top:8px;max-height:260px;overflow:auto;border-top:1px solid #3a3d44;padding-top:6px}
+.planeRow{display:grid;grid-template-columns:18px 14px 12px 1fr;gap:5px;align-items:center;padding:4px 2px;border-radius:4px;font:12px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace;color:#ddd}
+.planeRow:hover{background:#2a2c30}
+.planeRow input{margin:0}
+.swatch{width:10px;height:10px;border-radius:2px;border:1px solid #ffffff88}
+.planeMeta{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+</style>
+<div id="panel">
+  <h3>BCS planes local test</h3>
+  <select id="preset">
+    <option value="bcs_pochi.json">Verticale conservativo</option>
+    <option value="bcs_standard.json" selected>Verticale medio</option>
+    <option value="bcs_dettaglio.json">Verticale dettaglio</option>
+    <option value="bcs_orizzontali.json">Verticale + orizzontali</option>
+  </select>
+  <button id="meshTex" class="on">Texture OC</button>
+  <button id="meshGray">Mesh grigia</button>
+  <button id="meshOff">Nascondi mesh</button>
+  <button id="planes" class="on">Piani BCS</button>
+  <button id="wire" class="on">Bordi piani</button>
+  <button id="front">Vista frontale</button>
+  <button id="iso">Vista obliqua</button>
+  <div id="stats">loading...</div>
+  <div id="planeTools">
+    <button id="allPlanesOn">Tutti on</button>
+    <button id="allPlanesOff">Tutti off</button>
+  </div>
+  <div id="planeList"></div>
+</div>
+<script type="importmap">{"imports":{"three":"https://unpkg.com/three@0.165.0/build/three.module.js","three/addons/":"https://unpkg.com/three@0.165.0/examples/jsm/"}}</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x202124);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x303030, 1.35));
+const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.01, 5000);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+const gltf = await new GLTFLoader().loadAsync('model_nobbox_webgl_flipv.glb');
+const oc = gltf.scene;
+const ocToArkit = await fetch('oc_to_arkit_transform.json').then(r => r.json()).catch(() => null);
+if (ocToArkit?.matrix_row_major) {
+  const mr = ocToArkit.matrix_row_major.flat();
+  oc.matrixAutoUpdate = false;
+  oc.matrix.set(
+    mr[0], mr[1], mr[2], mr[3],
+    mr[4], mr[5], mr[6], mr[7],
+    mr[8], mr[9], mr[10], mr[11],
+    mr[12], mr[13], mr[14], mr[15]
+  );
+  oc.updateMatrixWorld(true);
+}
+const originalMaterials = new Map();
+const gray = new THREE.MeshStandardMaterial({color:0x9da0a6, roughness:0.85, side:THREE.DoubleSide, transparent:false, opacity:1});
+let triCount = 0;
+oc.traverse(o => {
+  if(!o.isMesh) return;
+  originalMaterials.set(o, o.material);
+  triCount += o.geometry.index ? o.geometry.index.count / 3 : o.geometry.attributes.position.count / 3;
+});
+scene.add(oc);
+
+let planesGroup = new THREE.Group();
+let wiresGroup = new THREE.Group();
+scene.add(planesGroup, wiresGroup);
+wiresGroup.visible = true;
+const colors = [0xff4a4a,0x36a3ff,0x35d07f,0xffbd2e,0xc16cff,0x2ee6d6,0xff6fae,0xf0ee48];
+let planeItems = [];
+
+function geomQuad(corners){
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(corners.flat(), 3));
+  g.setIndex([0,1,2,0,2,3]);
+  g.computeVertexNormals();
+  return g;
+}
+
+async function loadPlanes(file){
+  planesGroup.clear();
+  wiresGroup.clear();
+  planeItems = [];
+  const data = await (await fetch(file + '?v=' + Date.now())).json();
+  for(const [i,p] of data.piani.entries()){
+    const color = colors[i % colors.length];
+    const mat = new THREE.MeshStandardMaterial({
+      color,
+      side: THREE.DoubleSide,
+      transparent: false,
+      opacity: 1,
+      depthTest: true,
+      depthWrite: true,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1
+    });
+    const mesh = new THREE.Mesh(geomQuad(p.corners), mat);
+    planesGroup.add(mesh);
+    const pts = p.corners.map(v => new THREE.Vector3(...v));
+    pts.push(pts[0].clone());
+    const line = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(pts),
+      new THREE.LineBasicMaterial({color:0xffffff, transparent:false, opacity:1, depthTest:true, depthWrite:false})
+    );
+    wiresGroup.add(line);
+    planeItems.push({mesh, line, plane:p, color});
+  }
+  document.getElementById('stats').textContent =
+    `${file}\nmesh tri ${Math.round(triCount).toLocaleString('it-IT')}\n` +
+    `piani ${data.piani.length}\n` +
+    data.piani.map((p,i)=>`#${i+1} ${p.tipo} ${p.area_m2.toFixed(1)} m2 ${p.w.toFixed(2)}x${p.h.toFixed(2)}`).join('\n');
+  renderPlaneList();
+  frame(data);
+}
+
+function renderPlaneList(){
+  const list = document.getElementById('planeList');
+  list.replaceChildren();
+  for(const [i,item] of planeItems.entries()){
+    const row = document.createElement('label');
+    row.className = 'planeRow';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = item.mesh.visible;
+    cb.onchange = () => {
+      item.mesh.visible = cb.checked;
+      item.line.visible = cb.checked;
+    };
+    const num = document.createElement('span');
+    num.textContent = `${i + 1}`;
+    const swatch = document.createElement('span');
+    swatch.className = 'swatch';
+    swatch.style.background = `#${item.color.toString(16).padStart(6, '0')}`;
+    const meta = document.createElement('span');
+    meta.className = 'planeMeta';
+    meta.textContent = `${item.plane.tipo} ${item.plane.w.toFixed(1)}x${item.plane.h.toFixed(1)}`;
+    row.append(cb, num, swatch, meta);
+    list.append(row);
+  }
+}
+
+function setAllPlaneItems(visible){
+  for(const item of planeItems){
+    item.mesh.visible = visible;
+    item.line.visible = visible;
+  }
+  renderPlaneList();
+}
+
+function frame(data){
+  const all = data.piani.flatMap(p => p.corners).map(v => new THREE.Vector3(...v));
+  if(all.length < 4) return;
+  const box = new THREE.Box3().setFromPoints(all);
+  const c = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3()).length();
+  const n = new THREE.Vector3(...data.d).normalize();
+  const up = new THREE.Vector3(...data.up).normalize();
+  camera.position.copy(c.clone().addScaledVector(n, size * 0.75).addScaledVector(up, size * 0.05));
+  camera.up.copy(up);
+  controls.target.copy(c);
+  camera.near = Math.max(size / 1000, 0.001);
+  camera.far = size * 10;
+  camera.updateProjectionMatrix();
+  controls.update();
+}
+
+function setMeshMode(mode){
+  document.getElementById('meshTex').classList.toggle('on', mode === 'tex');
+  document.getElementById('meshGray').classList.toggle('on', mode === 'gray');
+  document.getElementById('meshOff').classList.toggle('on', mode === 'off');
+  oc.traverse(o => {
+    if(!o.isMesh) return;
+    o.visible = mode !== 'off';
+    if(mode === 'off') return;
+    o.material = mode === 'tex' ? originalMaterials.get(o) : gray;
+  });
+}
+
+document.getElementById('preset').onchange = e => loadPlanes(e.target.value);
+document.getElementById('meshTex').onclick = () => setMeshMode('tex');
+document.getElementById('meshGray').onclick = () => setMeshMode('gray');
+document.getElementById('meshOff').onclick = () => setMeshMode('off');
+document.getElementById('planes').onclick = e => { planesGroup.visible = !planesGroup.visible; e.currentTarget.classList.toggle('on', planesGroup.visible); };
+document.getElementById('wire').onclick = e => { wiresGroup.visible = !wiresGroup.visible; e.currentTarget.classList.toggle('on', wiresGroup.visible); };
+document.getElementById('allPlanesOn').onclick = () => setAllPlaneItems(true);
+document.getElementById('allPlanesOff').onclick = () => setAllPlaneItems(false);
+document.getElementById('front').onclick = () => loadPlanes(document.getElementById('preset').value);
+document.getElementById('iso').onclick = async () => {
+  const data = await (await fetch(document.getElementById('preset').value)).json();
+  const all = data.piani.flatMap(p => p.corners).map(v => new THREE.Vector3(...v));
+  const box = new THREE.Box3().setFromPoints(all);
+  const c = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3()).length();
+  const n = new THREE.Vector3(...data.d).normalize();
+  const up = new THREE.Vector3(...data.up).normalize();
+  const right = new THREE.Vector3(...data.right).normalize();
+  camera.position.copy(c.clone().addScaledVector(n, size * 0.65).addScaledVector(right, size * 0.55).addScaledVector(up, size * 0.25));
+  camera.up.copy(up); controls.target.copy(c); controls.update();
+};
+
+addEventListener('resize',()=>{ camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth,innerHeight); });
+await loadPlanes('bcs_standard.json');
+renderer.setAnimationLoop(()=>{ controls.update(); renderer.render(scene,camera); });
+</script>
