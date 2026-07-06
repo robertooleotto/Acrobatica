@@ -34,9 +34,14 @@ def _use_s3() -> bool:
 def _s3():
     import boto3
     from botocore.config import Config
+    from urllib.parse import urlparse
+    # Endpoint = solo scheme://host: se l'utente ha incollato anche /<bucket> in
+    # coda (errore comune con R2), lo togliamo → niente doppio bucket nel path.
+    p = urlparse((config.S3_ENDPOINT_URL or "").strip())
+    endpoint = f"{p.scheme}://{p.netloc}" if p.scheme and p.netloc else config.S3_ENDPOINT_URL
     return boto3.client(
         "s3",
-        endpoint_url=config.S3_ENDPOINT_URL,
+        endpoint_url=endpoint,
         aws_access_key_id=config.S3_ACCESS_KEY_ID,
         aws_secret_access_key=config.S3_SECRET_ACCESS_KEY,
         region_name=config.S3_REGION,
