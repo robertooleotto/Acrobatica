@@ -60,7 +60,7 @@ struct EditorMesh3DView: View {
                 SceneKitContainer(model: model)
                 if model.modoPerimetro && model.perimetroTraccia { PannelloPerimetro(model: model) }
                 hud
-                NavGizmo(model: model).padding(.top, 8).padding(.trailing, 10)
+                NavGizmo(model: model).padding(.top, 8).padding(.trailing, 62)
                 railDestro
             }
             barraStrumenti
@@ -109,10 +109,13 @@ struct EditorMesh3DView: View {
                 Text(model.nome)
                     .font(Theme.Typo.title(15))
                     .foregroundStyle(EditorTheme.testo)
-                Text("Editor 3D · pulizia mesh")
+                    .lineLimit(1)
+                Text("Pulizia mesh")
                     .font(Theme.Typo.caption(10))
                     .foregroundStyle(EditorTheme.testoMuto)
+                    .lineLimit(1)
             }
+            .fixedSize()
             Spacer()
             Button { model.undo() } label: {
                 Image(systemName: "arrow.uturn.backward").frame(width: 36, height: 36)
@@ -124,15 +127,6 @@ struct EditorMesh3DView: View {
             }
             .disabled(!model.puoRedo)
             .foregroundStyle(model.puoRedo ? EditorTheme.testo : EditorTheme.testoMuto.opacity(0.4))
-            Button {
-                let nome = model.nome.replacingOccurrences(of: " ", with: "_")
-                urlsExport = model.esportaMeshRipulita(nomeBase: nome)
-            } label: {
-                Image(systemName: "tray.and.arrow.down")
-                    .frame(width: 36, height: 36)
-                    .foregroundStyle(model.numTriangoli == 0 ? EditorTheme.testoMuto.opacity(0.4) : EditorTheme.testo)
-            }
-            .disabled(model.numTriangoli == 0)
             if sessionId != nil {
                 Button { salvaSuCloud() } label: {
                     Image(systemName: caricandoCloud ? "arrow.triangle.2.circlepath" : "cloud.and.arrow.up")
@@ -141,15 +135,22 @@ struct EditorMesh3DView: View {
                 }
                 .disabled(model.numTriangoli == 0 || caricandoCloud)
             }
-            Button {
-                let nome = model.nome.replacingOccurrences(of: " ", with: "_")
-                urlsExport = model.esportaProxy(nomeBase: nome)
+            Menu {
+                Button {
+                    let nome = model.nome.replacingOccurrences(of: " ", with: "_")
+                    urlsExport = model.esportaMeshRipulita(nomeBase: nome)
+                } label: { Label("Esporta mesh (file)", systemImage: "tray.and.arrow.down") }
+                    .disabled(model.numTriangoli == 0)
+                Button {
+                    let nome = model.nome.replacingOccurrences(of: " ", with: "_")
+                    urlsExport = model.esportaProxy(nomeBase: nome)
+                } label: { Label("Esporta piani", systemImage: "square.and.arrow.up") }
+                    .disabled(model.facce.isEmpty)
             } label: {
-                Image(systemName: "square.and.arrow.up")
+                Image(systemName: "ellipsis.circle")
                     .frame(width: 36, height: 36)
-                    .foregroundStyle(model.facce.isEmpty ? EditorTheme.testoMuto.opacity(0.4) : EditorTheme.testo)
+                    .foregroundStyle(EditorTheme.testo)
             }
-            .disabled(model.facce.isEmpty)
         }
         .font(.system(size: 16, weight: .medium))
         .padding(.horizontal, 10)
