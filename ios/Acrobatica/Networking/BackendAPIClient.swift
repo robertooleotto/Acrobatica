@@ -377,6 +377,38 @@ actor BackendAPIClient {
         return try JSONDecoder().decode(MeshInfoResult.self, from: data)
     }
 
+    struct MeshUploadResult: Codable {
+        let session_id: String
+        let files: [MeshFileInfo]
+    }
+
+    /// Carica una mesh sul backend (es. quella RIPULITA dall'editor). `kind`:
+    /// "clean" (default, dall'iPad) o "raw". Va su `sessions/<id>/out/mesh/<kind>/`
+    /// senza sovrascrivere la grezza. Multipart PUT /mesh.
+    func uploadMesh(sessionId: String, fileURL: URL, kind: String = "clean") async throws -> MeshUploadResult {
+        let url = baseURL.appendingPathComponent("/facade-sessions/\(sessionId)/mesh")
+        let boundary = "Boundary-\(UUID().uuidString)"
+        var req = URLRequest(url: url)
+        req.httpMethod = "PUT"
+        req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        let crlf = "\r\n"
+        var body = Data()
+        body.appendString("--\(boundary)\(crlf)")
+        body.appendString("Content-Disposition: form-data; name=\"kind\"\(crlf)\(crlf)")
+        body.appendString("\(kind)\(crlf)")
+        let fileData = try Data(contentsOf: fileURL)
+        let filename = fileURL.lastPathComponent
+        body.appendString("--\(boundary)\(crlf)")
+        body.appendString("Content-Disposition: form-data; name=\"files\"; filename=\"\(filename)\"\(crlf)")
+        body.appendString("Content-Type: model/obj\(crlf)\(crlf)")
+        body.append(fileData)
+        body.appendString(crlf)
+        body.appendString("--\(boundary)--\(crlf)")
+        let (data, resp) = try await urlSession.upload(for: req, from: body)
+        try assertHTTPOK(resp, data: data)
+        return try JSONDecoder().decode(MeshUploadResult.self, from: data)
+    }
+
     /// Scarica un file mesh (OBJ/USDZ/texture) su un file temporaneo locale e ne
     /// ritorna l'URL — SceneKit carica da file, non da Data.
     func downloadMeshFile(_ info: MeshFileInfo) async throws -> URL {

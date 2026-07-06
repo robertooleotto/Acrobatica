@@ -14,15 +14,43 @@ import simd
 struct EditorMesh3DView: View {
     @StateObject private var model: Mesh3DModel
     private let onChiudi: (() -> Void)?
+    private let sessionId: String?
     @Environment(\.dismiss) private var dismiss
     @State private var urlsExport: [URL] = []
+    @State private var caricandoCloud = false
+    @State private var toastCloud: String?
 
-    /// `meshFile` nil → mesh demo procedurale.
+    /// `meshFile` nil → mesh demo procedurale. `sessionId` presente → abilita il
+    /// salvataggio della mesh RIPULITA sul backend (kind=clean).
     init(meshFile: URL? = nil,
          nome: String = "Mesh facciata",
+         sessionId: String? = nil,
          onChiudi: (() -> Void)? = nil) {
         _model = StateObject(wrappedValue: Mesh3DModel(meshFile: meshFile, nome: nome))
+        self.sessionId = sessionId
         self.onChiudi = onChiudi
+    }
+
+    /// Esporta la mesh ripulita e la carica sul backend come `clean`.
+    private func salvaSuCloud() {
+        guard let sid = sessionId, !caricandoCloud else { return }
+        let nome = model.nome.replacingOccurrences(of: " ", with: "_")
+        guard let obj = model.esportaMeshRipulita(nomeBase: nome).first else {
+            toastCloud = "Nessuna mesh da salvare"; return
+        }
+        caricandoCloud = true
+        toastCloud = "Carico la mesh pulita…"
+        Task {
+            do {
+                _ = try await BackendAPIClient.shared.uploadMesh(sessionId: sid, fileURL: obj, kind: "clean")
+                toastCloud = "Mesh pulita salvata sul cloud ✓"
+            } catch {
+                toastCloud = "Upload fallito: \(error.localizedDescription)"
+            }
+            caricandoCloud = false
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            if toastCloud?.contains("✓") == true { toastCloud = nil }
+        }
     }
 
     var body: some View {
@@ -39,6 +67,20 @@ struct EditorMesh3DView: View {
         }
         .background(EditorTheme.bg.ignoresSafeArea())
         .preferredColorScheme(.dark)
+        .overlay(alignment: .bottom) {
+            if let t = toastCloud {
+                HStack(spacing: 8) {
+                    if caricandoCloud { ProgressView().tint(.white).scaleEffect(0.8) }
+                    Text(t).font(Theme.Typo.caption(12)).foregroundStyle(.white)
+                }
+                .padding(.horizontal, 14).padding(.vertical, 10)
+                .background(.black.opacity(0.82), in: Capsule())
+                .padding(.bottom, 92)
+                .onTapGesture { toastCloud = nil }
+                .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut, value: toastCloud)
         .sheet(isPresented: Binding(
             get: { !urlsExport.isEmpty },
             set: { if !$0 { urlsExport = [] } }
@@ -91,6 +133,14 @@ struct EditorMesh3DView: View {
                     .foregroundStyle(model.numTriangoli == 0 ? EditorTheme.testoMuto.opacity(0.4) : EditorTheme.testo)
             }
             .disabled(model.numTriangoli == 0)
+            if sessionId != nil {
+                Button { salvaSuCloud() } label: {
+                    Image(systemName: caricandoCloud ? "arrow.triangle.2.circlepath" : "cloud.and.arrow.up")
+                        .frame(width: 36, height: 36)
+                        .foregroundStyle(model.numTriangoli == 0 ? EditorTheme.testoMuto.opacity(0.4) : EditorTheme.accento)
+                }
+                .disabled(model.numTriangoli == 0 || caricandoCloud)
+            }
             Button {
                 let nome = model.nome.replacingOccurrences(of: " ", with: "_")
                 urlsExport = model.esportaProxy(nomeBase: nome)
@@ -6470,6 +6520,7 @@ struct EditorMesh3DCaricamentoView: View {
             if pronto {
                 EditorMesh3DView(meshFile: meshFile,
                                  nome: "Mesh facciata",
+                                 sessionId: sessionId,
                                  onChiudi: onChiudi)
             } else {
                 ZStack {
