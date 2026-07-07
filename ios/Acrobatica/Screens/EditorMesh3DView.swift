@@ -322,8 +322,10 @@ struct EditorMesh3DView: View {
 
     private var barraAllinea: some View {
         VStack(spacing: 8) {
-            // riga A — selezione: modo + tipo elemento
+            // riga A — selezione: selettori scorrevoli, conteggio/azioni fissi a destra
             HStack(spacing: 6) {
+              ScrollView(.horizontal, showsIndicators: false) {
+               HStack(spacing: 6) {
                 ForEach([ModoSelezione.tocco, .rettangolo, .lazo]) { m in
                     Button { model.modoSelezione = m } label: {
                         Label(m == .tocco ? "Puntatore" : m.etichetta, systemImage: m == .tocco ? "hand.point.up.left" : m.icona)
@@ -345,14 +347,17 @@ struct EditorMesh3DView: View {
                                         in: RoundedRectangle(cornerRadius: 8))
                     }
                 }
-                Spacer()
+               }
+              }
                 Text("\(model.numElementiSel) sel").font(Theme.Typo.mono(10)).foregroundStyle(EditorTheme.testoMuto)
                 Button { model.deselezionaAllinea() } label: {
                     Image(systemName: "xmark.circle").foregroundStyle(EditorTheme.testoMuto)
                 }
             }
-            // riga B — assi di allineamento + azione
+            // riga B — assi scorrevoli, azioni (Sposta/Allinea) fisse a destra
             HStack(spacing: 6) {
+              ScrollView(.horizontal, showsIndicators: false) {
+               HStack(spacing: 6) {
                 Picker("", selection: $model.rifAssiAllinea) {
                     ForEach(AssiRiferimento.allCases) { Text($0.etichetta).tag($0) }
                 }.pickerStyle(.segmented).frame(width: 150)
@@ -360,7 +365,8 @@ struct EditorMesh3DView: View {
                 assiToggle(nomi[0], isOn: $model.allineaAsse0)
                 assiToggle(nomi[1], isOn: $model.allineaAsse1)
                 assiToggle(nomi[2], isOn: $model.allineaAsse2)
-                Spacer()
+               }
+              }
                 Button { model.spostaAllinea.toggle() } label: {
                     Label("Sposta", systemImage: "arrow.up.and.down.and.arrow.left.and.right")
                         .font(Theme.Typo.caption(11, .semibold))
@@ -400,17 +406,20 @@ struct EditorMesh3DView: View {
             Label(model.testoPassoAssiManuali, systemImage: "arrow.up.and.down.and.arrow.left.and.right")
                 .font(Theme.Typo.caption(11))
                 .foregroundStyle(EditorTheme.testoMuto)
-            Spacer()
-            ChipSelezione("Reset", "arrow.counterclockwise") { model.resetAssiManuali() }
-            ChipSelezione("Auto", "wand.and.stars") { model.ricalcolaAssiAutomatici() }
-            ChipSelezione("Flip", "arrow.left.arrow.right") { model.flipAssiFronte() }
+                .lineLimit(1).truncationMode(.tail)
+            Spacer(minLength: 6)
+            ChipSelezione("Reset", "arrow.counterclockwise") { model.resetAssiManuali() }.fixedSize()
+            ChipSelezione("Auto", "wand.and.stars") { model.ricalcolaAssiAutomatici() }.fixedSize()
+            ChipSelezione("Flip", "arrow.left.arrow.right") { model.flipAssiFronte() }.fixedSize()
             Button { model.snapFronte() } label: {
                 Label("Fronte", systemImage: "viewfinder")
                     .font(Theme.Typo.caption(12, .bold))
+                    .lineLimit(1)
                     .padding(.horizontal, 10).padding(.vertical, 6)
                     .background(EditorTheme.accento, in: RoundedRectangle(cornerRadius: 8))
                     .foregroundStyle(.white)
             }
+            .fixedSize()
         }
         .padding(.horizontal, 12)
     }
@@ -529,8 +538,9 @@ struct EditorMesh3DView: View {
 
     private var barraPiani: some View {
         VStack(spacing: 8) {
-            // 1 · MODO — come marchi le superfici (pulsanti con etichetta) + Aggiungi
-            HStack(spacing: 6) {
+            // 1 · MODO — scorrevole in orizzontale: troppi bottoni per la larghezza iPhone.
+            ScrollView(.horizontal, showsIndicators: false) {
+              HStack(spacing: 6) {
                 ForEach(ModoSelezione.allCases.filter { $0 != .poligonale }) { m in
                     Button { model.modoSelezione = m } label: {
                         Label(m.etichetta, systemImage: m.icona)
@@ -541,7 +551,7 @@ struct EditorMesh3DView: View {
                                         in: RoundedRectangle(cornerRadius: 8))
                     }
                 }
-                Spacer()
+                Divider().frame(height: 20).padding(.horizontal, 2)
                 if model.modoSelezione.selezioneMesh {
                     Button { model.selezioneAdditiva.toggle() } label: {
                         Label("Aggiungi", systemImage: model.selezioneAdditiva ? "plus.square.fill.on.square.fill" : "plus.square.on.square")
@@ -613,6 +623,8 @@ struct EditorMesh3DView: View {
                         .background(EditorTheme.panelAlt, in: RoundedRectangle(cornerRadius: 8))
                 }
                 .disabled(model.numTriangoli == 0)
+              }
+              .padding(.horizontal, 12)
             }
             if model.modoSelezione == .pennello { controlliPennello }
             if model.modoSelezione == .poligonale {
