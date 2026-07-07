@@ -921,10 +921,13 @@ final class ViewerModel: ObservableObject {
     /// `oc_to_arkit_transform.json` per le aree metriche.
     func headlessBake(mesh: URL, poses: URL, photos: URL, out: URL,
                       resMM: Double, crop: Double, facing: Double,
-                      maxPhotos: Int, occlusion: Bool) -> Bool {
+                      maxPhotos: Int, occlusion: Bool, fullMesh: URL? = nil) -> Bool {
         meshURL = mesh
         posesURL = poses
         photosURL = photos
+        // Mesh completa (occlusore + sonda di orientamento dei piani): DEVE essere nello
+        // stesso frame di piani e pose. Se assente, si usa l'OBJ dei piani stesso.
+        referenceMeshURL = fullMesh ?? mesh
         bakeResolutionMM = resMM
         projectionCrop = crop
         projectionFacingThreshold = facing
@@ -3289,6 +3292,7 @@ enum HeadlessRunner {
         }
         let mesh = need("--mesh"), poses = need("--poses")
         let photos = need("--photos"), out = need("--out")
+        let fullMesh = arg("--full-mesh").map { URL(fileURLWithPath: $0) }
         let resMM = Double(arg("--res") ?? "") ?? 8
         let crop = Double(arg("--crop") ?? "") ?? 0.9
         let facing = Double(arg("--facing") ?? "") ?? 0.34
@@ -3298,7 +3302,7 @@ enum HeadlessRunner {
         let model = ViewerModel()
         let ok = model.headlessBake(mesh: mesh, poses: poses, photos: photos, out: out,
                                     resMM: resMM, crop: crop, facing: facing,
-                                    maxPhotos: maxP, occlusion: occ)
+                                    maxPhotos: maxP, occlusion: occ, fullMesh: fullMesh)
         err(model.bakeStatus)
         if let e = model.error { err("ERRORE: " + e) }
         exit(ok ? 0 : 1)
