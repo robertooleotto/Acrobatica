@@ -408,6 +408,8 @@ def main():
                     help="percentili per spallette/lati; larghi per non tagliare i bordi")
     ap.add_argument("--pad-m", type=float, default=0.15,
                     help="margine metrico aggiunto ai quad ricostruiti")
+    ap.add_argument("--min-width-m", type=float, default=0.4,
+                    help="scarta i piani con un lato < soglia (rimuove i degeneri ~0 m)")
     ap.add_argument("--no-regularize", action="store_true",
                     help="disabilita uniformazione altezze e snap su intersezioni")
     ap.add_argument("--snap-m", type=float, default=1.25,
@@ -514,6 +516,12 @@ def main():
     fd, fw = orienta_quads(piani, cam_centroid)
     print(f"  orientamento quad: {fd} dir ribaltate, {fw} winding corretti"
           + ("  [baricentro camere]" if cam_centroid is not None else "  [normali mesh]"))
+
+    # scarta i piani degeneri (un lato ~0 = spazzatura da lati sovra-rilevati)
+    n0 = len(piani)
+    piani = [p for p in piani if p["w"] >= args.min_width_m and p["h"] >= args.min_width_m]
+    if len(piani) < n0:
+        print(f"  scartati {n0 - len(piani)} piani degeneri (lato < {args.min_width_m} m)")
 
     # ordina per area decrescente
     piani.sort(key=lambda p: p["area_m2"], reverse=True)
