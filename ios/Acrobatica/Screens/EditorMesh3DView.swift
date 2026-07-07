@@ -5864,7 +5864,10 @@ final class Mesh3DModel: ObservableObject {
         classificaPerGravita()
         for f in facce where f.pianoNormale != nil { generaPoligono(perFaccia: f.id) }
         pianiGenerati = facce.filter { $0.pianoNormale != nil }.count
-        mostraProxy = true
+        // Vista "come il NativePoseMeshViewer": mostra i QUAD puliti dei piani sulla
+        // mesh grezza, non i triangoli proxy dipinti (i proxy restano un toggle nel
+        // menu vista). Così i piani convalidati si leggono come superfici piatte.
+        mostraProxy = false
         mostraPiani = true
         ridisegnaFacce()
         ridisegnaPiani()
@@ -5994,7 +5997,7 @@ final class Mesh3DModel: ObservableObject {
             let m = SCNMaterial()
             let faSel = strumento == .allinea && facciaAllineaSelezionata(f.id)
             m.diffuse.contents = faSel ? UIColor.systemOrange.withAlphaComponent(0.6)
-                : f.colore.withAlphaComponent(soloPiani ? 1.0 : 0.45)
+                : f.colore.withAlphaComponent(soloPiani ? 1.0 : 0.62)   // più solido = look viewer
             m.isDoubleSided = true; m.lightingModel = .constant
             m.writesToDepthBuffer = soloPiani
             g.materials = [m]
