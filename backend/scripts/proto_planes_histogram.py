@@ -412,6 +412,9 @@ def main():
                     help="disabilita uniformazione altezze e snap su intersezioni")
     ap.add_argument("--snap-m", type=float, default=1.25,
                     help="tolleranza metrica per snap dei bordi su piani perpendicolari")
+    ap.add_argument("--up", type=float, nargs=3, default=None,
+                    help="up NOTO (gravità), es. --up 0 1 0. Salta la stima PCA (fragile su "
+                         "mesh rumorose): per le mesh OC/ARKit la gravità è Y → piani dritti.")
     ap.add_argument("--axes-json", help="JSON con plane.n / plane.up / plane.right da usare come BCS")
     ap.add_argument("--transform-json", help="JSON con matrix_row_major da applicare ai vertici OBJ prima del fitting")
     ap.add_argument("--cameras-json", help="JSON pose camere (id -> {translation:[x,y,z]}, es. oc_poses_nobbox.json); "
@@ -461,6 +464,14 @@ def main():
         d_main = np.cross(right, up)
         d_main /= np.linalg.norm(d_main) + 1e-12
         print(f"assi BCS da: {args.axes_json}")
+    elif args.up is not None:
+        up = np.asarray(args.up, dtype=np.float64)
+        up /= np.linalg.norm(up) + 1e-12
+        dn, rt = normale_facciata(normals, areas, up, args.ang_tol)
+        if dn is not None:
+            d_main, right = dn, rt                    # normale facciata robusta, up = gravità nota
+        else:
+            d_main, up, right = assi_da_pca(verts)
     else:
         d_main, up, right = assi_da_pca(verts)       # frame robusto dalle posizioni
     estensione = float((verts.max(0) - verts.min(0)).max())
