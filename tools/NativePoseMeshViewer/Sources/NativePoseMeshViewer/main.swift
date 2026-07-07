@@ -767,7 +767,7 @@ final class ViewerModel: ObservableObject {
         }
     }
 
-    func bakeOrthophotos() {
+    func bakeOrthophotos(outDir outDirOverride: URL? = nil) {
         bakeStatus = "Bake in corso…"
         error = nil
         do {
@@ -777,7 +777,8 @@ final class ViewerModel: ObservableObject {
             let activeShots = shots.filter { !excludedShotIDs.contains($0.id) }
             let tester = occlusionTesterIfNeeded()
             let stamp = Self.timestamp()
-            let outDir = defaultRoot.appendingPathComponent("exports/ortho_bake_\(stamp)")
+            let outDir = outDirOverride
+                ?? defaultRoot.appendingPathComponent("exports/ortho_bake_\(stamp)")
             try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
             // trasformazione OC→metrico: i piani/pose sono in frame OC (~6× più piccolo del reale);
             // risoluzione e aree vanno calcolate in metri, non in unità OC.
@@ -912,6 +913,33 @@ final class ViewerModel: ObservableObject {
             self.error = String(describing: error)
             bakeStatus = "Errore bake"
         }
+    }
+
+    /// Esecuzione headless (senza GUI): imposta gli input, carica le pose e lancia
+    /// lo STESSO bake della GUI su una cartella di output data. Ritorna true se ok.
+    /// Il mesh è l'OBJ dei piani (gruppi = quad); accanto può esserci
+    /// `oc_to_arkit_transform.json` per le aree metriche.
+    func headlessBake(mesh: URL, poses: URL, photos: URL, out: URL,
+                      resMM: Double, crop: Double, facing: Double,
+                      maxPhotos: Int, occlusion: Bool) -> Bool {
+        meshURL = mesh
+        posesURL = poses
+        photosURL = photos
+        bakeResolutionMM = resMM
+        projectionCrop = crop
+        projectionFacingThreshold = facing
+        projectionMaxPhotos = Double(maxPhotos)
+        occlusionEnabled = occlusion
+        projectMultiplePhotos = true
+        do {
+            try loadPoses()
+        } catch {
+            self.error = "loadPoses: \(error)"
+            return false
+        }
+        guard !shots.isEmpty else { self.error = "nessuna posa caricata"; return false }
+        bakeOrthophotos(outDir: out)
+        return self.error == nil
     }
 
     // ============================ EDITOR PIANI ============================
@@ -3233,7 +3261,6 @@ struct NativeSceneView: NSViewRepresentable {
     }
 }
 
-@main
 struct NativePoseMeshViewerApp: App {
     var body: some Scene {
         WindowGroup {
@@ -3241,6 +3268,48 @@ struct NativePoseMeshViewerApp: App {
         }
         .windowStyle(.titleBar)
     }
+}
+
+/// Runner headless: `NativePoseMeshViewer --headless --mesh piani.obj --poses oc.json
+/// --photos dir --out dir [--res 8] [--crop 0.9] [--facing 0.34] [--max-photos 60]
+/// [--occlusion]`. Riusa lo stesso bake della GUI (buildMosaic + rasterizzazione).
+enum HeadlessRunner {
+    static func arg(_ name: String) -> String? {
+        let a = CommandLine.arguments
+        if let i = a.firstIndex(of: name), i + 1 < a.count { return a[i + 1] }
+        return nil
+    }
+    static func err(_ s: String) { FileHandle.standardError.write((s + "\n").data(using: .utf8)!) }
+
+    @MainActor
+    static func run() {
+        func need(_ n: String) -> URL {
+            guard let v = arg(n) else { err("manca argomento \(n)"); exit(2) }
+            return URL(fileURLWithPath: v)
+        }
+        let mesh = need("--mesh"), poses = need("--poses")
+        let photos = need("--photos"), out = need("--out")
+        let resMM = Double(arg("--res") ?? "") ?? 8
+        let crop = Double(arg("--crop") ?? "") ?? 0.9
+        let facing = Double(arg("--facing") ?? "") ?? 0.34
+        let maxP = Int(arg("--max-photos") ?? "") ?? 60
+        let occ = CommandLine.arguments.contains("--occlusion")
+
+        let model = ViewerModel()
+        let ok = model.headlessBake(mesh: mesh, poses: poses, photos: photos, out: out,
+                                    resMM: resMM, crop: crop, facing: facing,
+                                    maxPhotos: maxP, occlusion: occ)
+        err(model.bakeStatus)
+        if let e = model.error { err("ERRORE: " + e) }
+        exit(ok ? 0 : 1)
+    }
+}
+
+// Entry point: headless da CLI, altrimenti la GUI.
+if CommandLine.arguments.contains("--headless") {
+    MainActor.assumeIsolated { HeadlessRunner.run() }
+} else {
+    NativePoseMeshViewerApp.main()
 }
 
 private extension SCNNode {
