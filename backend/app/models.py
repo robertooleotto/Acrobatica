@@ -423,6 +423,24 @@ class PlanesDataResult(BaseModel):
     url: Optional[str] = None
 
 
+class ProjectionInput(BaseModel):
+    """Stato di un singolo input della proiezione (foto/mesh/pose/piani)."""
+    kind: str
+    present: bool
+    detail: str
+    paths: list[str] = []
+
+
+class ProjectionScaffoldResult(BaseModel):
+    """Esito del controllo di prontezza della proiezione foto→piani (scaffold).
+    `ready` = tutti e 4 gli input scaricabili da storage; `missing` = quali mancano."""
+    session_id: str
+    ready: bool
+    status: str
+    inputs: list[ProjectionInput] = []
+    missing: list[str] = []
+
+
 class ZonaMarcataModel(BaseModel):
     """Singola zona marcata dall'operatore sull'ortofoto (schema concordato
     con l'editor iOS — i campi/rawValue NON vanno cambiati).

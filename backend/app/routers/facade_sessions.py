@@ -46,6 +46,7 @@ from ..models import (
     OrthorectifySessionResult,
     PlanesDataResult,
     PlanesSaveResult,
+    ProjectionScaffoldResult,
     ProcessRequest,
     ProcessResult,
     RectifyPanoramaRequest,
@@ -63,6 +64,7 @@ from ..models import (
 )
 from ..services import (
     measurement_service,
+    projection_service,
     rectification_service,
     segmentation_service,
     session_state,
@@ -1128,6 +1130,20 @@ def get_planes_data(session_id: str):
         count=int(info.get("count", 0)),
         url=storage_service.signed_url(info["path"], expires_in_sec=3600),
     )
+
+
+# ─── Proiezione foto → piani (passo 8) ──────────────────────────────────────
+
+@router.post("/{session_id}/project", response_model=ProjectionScaffoldResult)
+def project_session(session_id: str):
+    """Proiezione foto→piani. SCAFFOLD: raccoglie e verifica i 4 input scaricandoli
+    da storage (foto, mesh pulita, pose OC, piani) e riporta la prontezza. Non
+    esegue ancora il mosaico né cambia lo stato — serve a validare il plumbing
+    'tutto dal cloud' prima di innestare l'algoritmo."""
+    report = projection_service.gather_inputs(session_id)
+    if report is None:
+        raise HTTPException(404, "Sessione non trovata")
+    return ProjectionScaffoldResult(session_id=session_id, **report)
 
 
 # ─── Pre-marcatura automatica: zone fuori-piano proposte ────────────────────

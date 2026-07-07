@@ -72,6 +72,21 @@ def download_bytes(remote_path: str) -> bytes:
     return _supabase_bucket().download(remote_path)
 
 
+def head_size(remote_path: str) -> int | None:
+    """Dimensione in byte del file su storage senza scaricarlo (HEAD su S3/R2),
+    o None se non esiste/non raggiungibile. Su Supabase non c'è un HEAD economico
+    → ripiega su download (raro ora che il backend di produzione è S3)."""
+    if _use_s3():
+        try:
+            return int(_s3().head_object(Bucket=config.S3_BUCKET, Key=remote_path)["ContentLength"])
+        except Exception:
+            return None
+    try:
+        return len(_supabase_bucket().download(remote_path))
+    except Exception:
+        return None
+
+
 def signed_url(remote_path: str, expires_in_sec: int | None = None) -> str:
     ttl = expires_in_sec or config.SIGNED_URL_TTL_SEC
     if _use_s3():
