@@ -15,7 +15,7 @@ from typing import Optional
 
 import cv2
 import numpy as np
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Body, File, Form, HTTPException, UploadFile
 
 from ..models import (
     ARMetadata,
@@ -44,6 +44,8 @@ from ..models import (
     ZoneMarkupResult,
     OrthorectifyPhotoResult,
     OrthorectifySessionResult,
+    PlanesDataResult,
+    PlanesSaveResult,
     ProcessRequest,
     ProcessResult,
     RectifyPanoramaRequest,
@@ -1059,6 +1061,73 @@ def get_mesh(session_id: str, kind: Optional[str] = None):
         if name == entry.get("main_obj"):
             main = info
     return MeshInfoResult(session_id=session_id, main_obj=main, files=files)
+
+
+# ─── Piani decisi nell'editor 3D (passo 7 → input della proiezione) ─────────
+
+def _planes_remote(session_id: str) -> str:
+    return storage_service.out_path(session_id, "planes.json")
+
+
+@router.put("/{session_id}/planes-data", response_model=PlanesSaveResult)
+def save_planes(session_id: str, payload: dict = Body(...)):
+    """Salva i piani decisi dall'utente nell'editor 3D (passo 7). Il payload è il
+    JSON dei piani prodotto dall'app (mesh già pulita): lo conserviamo verbatim su
+    storage in `out/planes.json`, così la proiezione lo scaricherà da lì. Avanza lo
+    stato a `planes_ready` (best-effort: non fallisce se la transizione non è valida).
+
+    Il payload atteso ha una chiave `planes` (lista); il resto è opaco al backend."""
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        raise HTTPException(404, "Sessione non trovata")
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Payload piani non valido (atteso oggetto JSON)")
+
+    planes = payload.get("planes")
+    if not isinstance(planes, list):
+        raise HTTPException(400, "Il payload deve contenere 'planes' (lista)")
+
+    remote = _planes_remote(session_id)
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    storage_service.upload_bytes(remote, data, "application/json")
+
+    existing = sess.get("result") or {}
+    existing["planes"] = {"path": remote, "count": len(planes), "bytes": len(data)}
+    session_store.update_session(session_id, {"result": existing})
+
+    # Avanza lo stato del flusso; best-effort, la transizione può non essere valida
+    # (es. re-salvataggio quando è già più avanti) → in quel caso teniamo lo stato.
+    status = sess.get("status") or ""
+    try:
+        row = session_store.update_status(session_id, session_state.PLANES_READY)
+        status = row.get("status", session_state.PLANES_READY)
+    except Exception:
+        pass
+
+    return PlanesSaveResult(
+        session_id=session_id,
+        count=len(planes),
+        path=remote,
+        url=storage_service.signed_url(remote, expires_in_sec=3600),
+        status=status,
+    )
+
+
+@router.get("/{session_id}/planes-data", response_model=PlanesDataResult)
+def get_planes_data(session_id: str):
+    """URL firmato al planes.json salvato (per ricaricare i piani sull'app o per un
+    consumatore esterno). 404 se non ne sono ancora stati salvati."""
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        raise HTTPException(404, "Sessione non trovata")
+    info = (sess.get("result") or {}).get("planes") or {}
+    if not info.get("path"):
+        raise HTTPException(404, "Nessun piano salvato per questa sessione")
+    return PlanesDataResult(
+        session_id=session_id,
+        count=int(info.get("count", 0)),
+        url=storage_service.signed_url(info["path"], expires_in_sec=3600),
+    )
 
 
 # ─── Pre-marcatura automatica: zone fuori-piano proposte ────────────────────

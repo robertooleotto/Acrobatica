@@ -332,6 +332,29 @@ actor BackendAPIClient {
         return try JSONDecoder().decode(ZoneMarkupResult.self, from: data)
     }
 
+    /// Esito del salvataggio dei piani decisi nell'editor 3D.
+    struct PlanesSaveResult: Codable {
+        let session_id: String
+        let count: Int
+        let path: String
+        let url: String
+        let status: String
+    }
+
+    /// Carica i piani decisi nell'editor 3D (passo 7) sul backend, che li
+    /// conserva su storage in `out/planes.json`. La proiezione foto→piani li
+    /// scaricherà da lì. `jsonData` = documento piani (schema acro.planes/v1).
+    func uploadPlanes(sessionId: String, jsonData: Data) async throws -> PlanesSaveResult {
+        let url = baseURL.appendingPathComponent("/facade-sessions/\(sessionId)/planes-data")
+        var req = URLRequest(url: url)
+        req.httpMethod = "PUT"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = jsonData
+        let (data, resp) = try await urlSession.data(for: req)
+        try assertHTTPOK(resp, data: data)
+        return try JSONDecoder().decode(PlanesSaveResult.self, from: data)
+    }
+
     /// Scarica le zone fuori-piano proposte dal backend (pre-marcatura
     /// automatica: balconi/aggetti oltre `sogliaM` dal piano facciata).
     /// Ritorna i Data del documento JSON nello schema di marcatura (lo

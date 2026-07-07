@@ -406,6 +406,23 @@ class MeshInfoResult(BaseModel):
     files: list[MeshFileInfo] = []
 
 
+class PlanesSaveResult(BaseModel):
+    """Esito del salvataggio dei piani decisi nell'editor 3D (passo 7).
+    Il JSON completo dei piani è su storage (out/planes.json); qui si riepiloga."""
+    session_id: str
+    count: int
+    path: str
+    url: str
+    status: str
+
+
+class PlanesDataResult(BaseModel):
+    """Piani salvati per la sessione: URL firmato al planes.json + conteggio."""
+    session_id: str
+    count: int
+    url: Optional[str] = None
+
+
 class ZonaMarcataModel(BaseModel):
     """Singola zona marcata dall'operatore sull'ortofoto (schema concordato
     con l'editor iOS — i campi/rawValue NON vanno cambiati).

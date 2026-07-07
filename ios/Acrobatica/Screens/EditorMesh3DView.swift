@@ -53,6 +53,28 @@ struct EditorMesh3DView: View {
         }
     }
 
+    /// Serializza i piani decisi e li carica sul backend (out/planes.json su
+    /// storage) come input della proiezione foto→piani (passo 7).
+    private func salvaPianiSuCloud() {
+        guard let sid = sessionId, !caricandoCloud else { return }
+        guard let data = model.esportaPianiPayload() else {
+            toastCloud = "Nessun piano da salvare"; return
+        }
+        caricandoCloud = true
+        toastCloud = "Carico i piani…"
+        Task {
+            do {
+                let r = try await BackendAPIClient.shared.uploadPlanes(sessionId: sid, jsonData: data)
+                toastCloud = "Piani salvati sul cloud (\(r.count)) ✓"
+            } catch {
+                toastCloud = "Upload piani fallito: \(error.localizedDescription)"
+            }
+            caricandoCloud = false
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            if toastCloud?.contains("✓") == true { toastCloud = nil }
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             barraSuperiore
@@ -146,6 +168,13 @@ struct EditorMesh3DView: View {
                     urlsExport = model.esportaProxy(nomeBase: nome)
                 } label: { Label("Esporta piani", systemImage: "square.and.arrow.up") }
                     .disabled(model.facce.isEmpty)
+                if sessionId != nil {
+                    Divider()
+                    Button { salvaPianiSuCloud() } label: {
+                        Label("Salva piani sul cloud", systemImage: "cloud.and.arrow.up")
+                    }
+                    .disabled(model.facce.isEmpty || caricandoCloud)
+                }
             } label: {
                 Image(systemName: "ellipsis.circle")
                     .frame(width: 36, height: 36)
@@ -2094,6 +2123,19 @@ private struct PianoProxyJSON: Codable {
 private struct MultipianoJSON: Codable {
     let versione: Int; let stato: String
     let piano_base: PianoBaseJSON?; let piani: [PianoProxyJSON]
+}
+
+/// Payload dei piani caricato sul backend (out/planes.json) come input della
+/// proiezione foto→piani. Rispetto a MultipianoJSON include per ogni piano i
+/// `triangoli` (maschera/estensione sulla mesh pulita) e usa la chiave `planes`.
+private struct PianoUploadJSON: Codable {
+    let id: Int; let nome: String; let tipo: String; let priorita: Int
+    let punto: [Float]; let normale: [Float]
+    let n_triangoli: Int; let triangoli: [Int]
+}
+private struct PianiUploadDoc: Codable {
+    let schema: String; let versione: Int; let stato: String
+    let piano_base: PianoBaseJSON?; let planes: [PianoUploadJSON]
 }
 
 // MARK: – Modello: scena, camera, caricamento mesh
@@ -6155,6 +6197,29 @@ final class Mesh3DModel: ObservableObject {
             if (try? d.write(to: u, options: .atomic)) != nil { urls.append(u) }
         }
         return urls
+    }
+
+    /// Serializza i piani decisi (facce con piano fittato + piano_base) nel
+    /// documento da caricare sul backend per la proiezione. `nil` se non c'è
+    /// nessun piano valido. Include i triangoli per la maschera sulla mesh pulita.
+    func esportaPianiPayload() -> Data? {
+        assicuraPiani()   // fitta i piani mancanti senza toccare le rifiniture
+        let pb: PianoBaseJSON? = haPianoBase ? PianoBaseJSON(
+            origine: pianoBaseOrigine.lista, normale: pianoBaseNormale.lista,
+            right: pianoBaseRight.lista, up: pianoBaseUp.lista) : nil
+        let planes: [PianoUploadJSON] = facce.compactMap { f in
+            guard let p = f.pianoPunto, let n = f.pianoNormale else { return nil }
+            return PianoUploadJSON(
+                id: f.id, nome: f.nome, tipo: f.tipo.rawValue, priorita: f.priorita,
+                punto: p.lista, normale: n.lista,
+                n_triangoli: f.triangoli.count, triangoli: f.triangoli.sorted())
+        }
+        guard !planes.isEmpty else { return nil }
+        let doc = PianiUploadDoc(schema: "acro.planes/v1", versione: 1,
+                                 stato: statoProxy.raw, piano_base: pb, planes: planes)
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.sortedKeys]
+        return try? enc.encode(doc)
     }
 
     func esportaMeshRipulita(nomeBase: String) -> [URL] {
