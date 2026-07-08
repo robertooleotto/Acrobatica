@@ -424,15 +424,16 @@ class PlanesDataResult(BaseModel):
 
 
 class DetectedPlane(BaseModel):
-    """Un piano rilevato automaticamente (istogrammi BCS): quad + tipo."""
+    """Un piano rilevato automaticamente: poligono (anche trapezio) + tipo."""
     nome: str
-    tipo: str                          # "facciata" | "spalla" | "orizzontale"
+    tipo: str                          # "facciata" | "spalla" | "falda" | "orizzontale"
     punto: list[float]                 # centro del piano (frame mesh)
-    normale: list[float]               # normale (fuori dal muro)
-    corners: list[list[float]]         # 4 angoli del rettangolo (poligono)
+    normale: list[float]               # normale (fuori dal muro), qualsiasi inclinazione
+    corners: list[list[float]]         # poligono di N vertici (non solo 4)
     area_m2: float
     w: float
     h: float
+    triangoli: list[int] = []          # triangoli mesh del piano (maschera proiezione)
 
 
 class DetectPlanesResult(BaseModel):

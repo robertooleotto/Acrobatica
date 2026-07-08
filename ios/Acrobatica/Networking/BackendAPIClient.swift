@@ -341,16 +341,18 @@ actor BackendAPIClient {
         let status: String
     }
 
-    /// Un piano rilevato automaticamente dal backend (istogrammi BCS).
+    /// Un piano rilevato automaticamente dal backend (Open3D: qualsiasi
+    /// orientamento — verticali, falde oblique, poligoni/trapezi).
     struct DetectedPlane: Codable {
         let nome: String
-        let tipo: String            // "facciata" | "spalla" | "orizzontale"
+        let tipo: String            // "facciata" | "spalla" | "falda" | "orizzontale"
         let punto: [Float]
         let normale: [Float]
-        let corners: [[Float]]
+        let corners: [[Float]]      // poligono di N vertici
         let area_m2: Float
         let w: Float
         let h: Float
+        let triangoli: [Int]?       // triangoli mesh del piano (per la proiezione)
     }
     struct DetectPlanesResult: Codable {
         let session_id: String

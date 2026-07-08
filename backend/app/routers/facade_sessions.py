@@ -1178,25 +1178,44 @@ def detect_planes(session_id: str, up: Optional[list[float]] = Body(None, embed=
         mesh_local = Path(td) / "mesh.obj"
         mesh_local.write_bytes(storage_service.download_bytes(obj_path))
         out_base = Path(td) / "piani"
-        cmd = [sys.executable, "-m", "scripts.proto_planes_histogram",
-               str(mesh_local), "--out", str(out_base),
-               "--up", *[str(x) for x in up_vec]]
-        try:
-            subprocess.run(cmd, cwd=str(_BACKEND_ROOT), check=True,
-                           capture_output=True, text=True, timeout=120)
-        except subprocess.CalledProcessError as e:
-            raise HTTPException(500, f"Rilevamento fallito: {(e.stderr or '')[:200]}")
-        with open(str(out_base) + ".json") as fh:
-            doc = json.load(fh)
+        up_args = ["--up", *[str(x) for x in up_vec]]
 
-    planes = []
-    for i, p in enumerate(doc.get("piani", []), 1):
-        tipo = p.get("tipo", "facciata")
-        planes.append(DetectedPlane(
-            nome=f"{'Spalletta' if tipo == 'spalla' else 'Facciata'} {i}",
-            tipo=tipo, punto=p["centro"], normale=p["dir"], corners=p["corners"],
-            area_m2=round(float(p["area_m2"]), 2), w=round(float(p["w"]), 3),
-            h=round(float(p["h"]), 3)))
+        # Motore preferito: v2 Open3D (qualsiasi orientamento: verticali, oblique,
+        # trapezi). Fallback: v1 istogrammi (solo verticali) se Open3D non c'è.
+        doc = None
+        try:
+            subprocess.run([sys.executable, "-m", "scripts.detect_planes_open3d",
+                            str(mesh_local), "--out", str(out_base), *up_args],
+                           cwd=str(_BACKEND_ROOT), check=True,
+                           capture_output=True, text=True, timeout=300)
+            with open(str(out_base) + ".json") as fh:
+                doc = json.load(fh)
+            raw_planes = doc.get("planes", [])
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            doc = None
+        if doc is None:
+            try:
+                subprocess.run([sys.executable, "-m", "scripts.proto_planes_histogram",
+                                str(mesh_local), "--out", str(out_base), *up_args],
+                               cwd=str(_BACKEND_ROOT), check=True,
+                               capture_output=True, text=True, timeout=120)
+            except subprocess.CalledProcessError as e:
+                raise HTTPException(500, f"Rilevamento fallito: {(e.stderr or '')[:200]}")
+            with open(str(out_base) + ".json") as fh:
+                doc = json.load(fh)
+            # adatta lo schema v1 (piani: centro/dir) a quello comune
+            raw_planes = [{
+                "nome": f"{'Spalletta' if p.get('tipo') == 'spalla' else 'Facciata'} {i}",
+                "tipo": p.get("tipo", "facciata"), "punto": p["centro"],
+                "normale": p["dir"], "corners": p["corners"],
+                "area_m2": p["area_m2"], "w": p["w"], "h": p["h"], "triangoli": [],
+            } for i, p in enumerate(doc.get("piani", []), 1)]
+
+    planes = [DetectedPlane(
+        nome=p["nome"], tipo=p["tipo"], punto=p["punto"], normale=p["normale"],
+        corners=p["corners"], area_m2=round(float(p["area_m2"]), 2),
+        w=round(float(p["w"]), 3), h=round(float(p["h"]), 3),
+        triangoli=p.get("triangoli", [])) for p in raw_planes]
     return DetectPlanesResult(session_id=session_id, up=doc.get("up", up_vec),
                               count=len(planes), planes=planes)
 

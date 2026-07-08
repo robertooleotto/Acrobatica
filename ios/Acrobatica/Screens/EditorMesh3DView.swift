@@ -3968,12 +3968,18 @@ final class Mesh3DModel: ObservableObject {
             let colore = FacciaProxy.palette[facce.count % FacciaProxy.palette.count]
             var f = FacciaProxy(id: prossimoIdFaccia, nome: p.nome, colore: colore)
             prossimoIdFaccia += 1
-            f.tipo = (p.tipo == "spalla") ? .spalletta : .facciata
+            switch p.tipo {
+            case "spalla":      f.tipo = .spalletta
+            case "falda":       f.tipo = .torretta      // obliquo (timpano/mansarda)
+            case "orizzontale": f.tipo = .orizzontale
+            default:            f.tipo = .facciata
+            }
             if p.punto.count == 3 { f.pianoPunto = SIMD3<Float>(p.punto[0], p.punto[1], p.punto[2]) }
             if p.normale.count == 3 { f.pianoNormale = SIMD3<Float>(p.normale[0], p.normale[1], p.normale[2]) }
             f.poligono = p.corners.compactMap { c in
                 c.count == 3 ? SIMD3<Float>(c[0], c[1], c[2]) : nil
             }
+            if let tri = p.triangoli { f.triangoli = Set(tri) }   // maschera per la proiezione
             facce.append(f)
         }
         facciaAttivaId = facce.first?.id
