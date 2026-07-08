@@ -394,6 +394,55 @@ def orienta_quads(piani, cam_centroid=None):
     return flip_dir, flip_wind
 
 
+def fondi_piani_paralleli(piani, up, ang_deg=12.0, depth_m=1.0):
+    """Fonde i piani con STESSA direzione (entro ang_deg) e offset vicino (< depth_m)
+    in un unico piano: estensione = unione dei quad nel piano (e_h, e_v), offset =
+    media pesata per area. Cura le facciate spezzate in più picchi di profondità
+    (finestre incassate, logge) che sono in realtà UN piano."""
+    up = np.asarray(up, dtype=np.float64)
+    cos_t = math.cos(math.radians(ang_deg))
+    used = [False] * len(piani)
+    out = []
+    for i, p in enumerate(piani):
+        if used[i]:
+            continue
+        di = np.asarray(p["dir"], dtype=np.float64)
+        group = [p]
+        used[i] = True
+        for j in range(i + 1, len(piani)):
+            if used[j]:
+                continue
+            dj = np.asarray(piani[j]["dir"], dtype=np.float64)
+            if (di @ dj) > cos_t and abs(p["offset"] - piani[j]["offset"]) < depth_m:
+                group.append(piani[j])
+                used[j] = True
+        if len(group) == 1:
+            out.append(p)
+            continue
+        axis = di
+        e_v = up - (up @ axis) * axis
+        e_v /= np.linalg.norm(e_v) + 1e-12
+        e_h = np.cross(e_v, axis)
+        e_h /= np.linalg.norm(e_h) + 1e-12
+        ar = np.array([g["area_m2"] for g in group], dtype=np.float64)
+        off = float(sum(g["offset"] * g["area_m2"] for g in group) / ar.sum())
+        xs, ys = [], []
+        for g in group:
+            for c in g["corners"]:
+                c = np.asarray(c, dtype=np.float64)
+                xs.append(c @ e_h)
+                ys.append(c @ e_v)
+        minx, maxx, miny, maxy = min(xs), max(xs), min(ys), max(ys)
+        def P3(xx, yy):
+            return (e_h * xx + e_v * yy + axis * off).tolist()
+        out.append({"tipo": group[0]["tipo"], "dir": axis.tolist(), "offset": off,
+                    "area_m2": float(ar.sum()), "verso_mesh": group[0]["verso_mesh"],
+                    "w": float(maxx - minx), "h": float(maxy - miny),
+                    "centro": (e_h * (minx + maxx) / 2 + e_v * (miny + maxy) / 2 + axis * off).tolist(),
+                    "corners": [P3(minx, miny), P3(maxx, miny), P3(maxx, maxy), P3(minx, maxy)]})
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("obj")
@@ -410,6 +459,12 @@ def main():
                     help="margine metrico aggiunto ai quad ricostruiti")
     ap.add_argument("--min-width-m", type=float, default=0.4,
                     help="scarta i piani con un lato < soglia (rimuove i degeneri ~0 m)")
+    ap.add_argument("--merge-depth-m", type=float, default=1.0,
+                    help="fonde piani complanari (stessa dir) con offset entro questa profondità")
+    ap.add_argument("--merge-ang-deg", type=float, default=12.0,
+                    help="tolleranza angolare per considerare due piani 'stessa direzione'")
+    ap.add_argument("--min-area-frac-of-max", type=float, default=0.10,
+                    help="scarta i piani con area < questa frazione del piano più grande")
     ap.add_argument("--no-regularize", action="store_true",
                     help="disabilita uniformazione altezze e snap su intersezioni")
     ap.add_argument("--snap-m", type=float, default=1.25,
@@ -499,6 +554,12 @@ def main():
     piani = fronte + lato + alto
     print(f"  fronte: {len(fronte)}  lato/spalle: {len(lato)}  alto/orizz: {len(alto)}")
 
+    # fondi i piani complanari spezzati (stessa dir, offset vicino) → 1 piano
+    n0 = len(piani)
+    piani = fondi_piani_paralleli(piani, up, args.merge_ang_deg, args.merge_depth_m)
+    if len(piani) < n0:
+        print(f"  fusi {n0 - len(piani)} piani complanari (entro {args.merge_depth_m:.1f} m)")
+
     if not args.no_regularize:
         piani = regolarizza_piani_verticali(piani, up, d_main, right, snap_m=args.snap_m)
         print(f"  regolarizzazione: altezze comuni + snap bordi entro {args.snap_m:.2f} m")
@@ -522,6 +583,14 @@ def main():
     piani = [p for p in piani if p["w"] >= args.min_width_m and p["h"] >= args.min_width_m]
     if len(piani) < n0:
         print(f"  scartati {n0 - len(piani)} piani degeneri (lato < {args.min_width_m} m)")
+
+    # scarta i piani troppo piccoli rispetto al maggiore (residui/rumore)
+    if piani:
+        amax = max(p["area_m2"] for p in piani)
+        n1 = len(piani)
+        piani = [p for p in piani if p["area_m2"] >= args.min_area_frac_of_max * amax]
+        if len(piani) < n1:
+            print(f"  scartati {n1 - len(piani)} piani minori (< {args.min_area_frac_of_max:.0%} del maggiore)")
 
     # ordina per area decrescente
     piani.sort(key=lambda p: p["area_m2"], reverse=True)
