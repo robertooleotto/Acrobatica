@@ -9,6 +9,8 @@ e ricaricate come output. Niente persistenza locale.
 """
 from __future__ import annotations
 import json
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -44,6 +46,8 @@ from ..models import (
     ZoneMarkupResult,
     OrthorectifyPhotoResult,
     OrthorectifySessionResult,
+    DetectedPlane,
+    DetectPlanesResult,
     PlanesDataResult,
     PlanesSaveResult,
     ProjectionScaffoldResult,
@@ -1144,6 +1148,57 @@ def project_session(session_id: str):
     if report is None:
         raise HTTPException(404, "Sessione non trovata")
     return ProjectionScaffoldResult(session_id=session_id, **report)
+
+
+# ─── Rilevamento automatico piani (istogrammi BCS, dal detector python) ──────
+
+_BACKEND_ROOT = Path(__file__).resolve().parents[2]
+
+
+@router.post("/{session_id}/detect-planes", response_model=DetectPlanesResult)
+def detect_planes(session_id: str, up: Optional[list[float]] = Body(None, embed=True)):
+    """Rileva i piani facciata sulla mesh della sessione col detector a istogrammi
+    (scripts/proto_planes_histogram.py: assi di gravità + fusione complanari + filtri).
+    `up` = gravità nota nel frame mesh (default [0,1,0] per le mesh OC). Scarica la
+    mesh da storage, gira il detector e ritorna i piani (quad + tipo) pronti per
+    l'editor. È il motore di 'riconosci piani' dell'app."""
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        raise HTTPException(404, "Sessione non trovata")
+    result = sess.get("result") or {}
+    clean = projection_service._mesh_entry(result, "clean")
+    raw = projection_service._mesh_entry(result, "raw")
+    entry = clean if clean.get("files") else raw
+    obj_path = projection_service._mesh_main_path(entry)
+    if not obj_path or not obj_path.lower().endswith(".obj"):
+        raise HTTPException(409, "Nessuna mesh OBJ per la sessione")
+
+    up_vec = up if (up and len(up) == 3) else [0.0, 1.0, 0.0]
+    with tempfile.TemporaryDirectory(prefix="acro_detect_") as td:
+        mesh_local = Path(td) / "mesh.obj"
+        mesh_local.write_bytes(storage_service.download_bytes(obj_path))
+        out_base = Path(td) / "piani"
+        cmd = [sys.executable, "-m", "scripts.proto_planes_histogram",
+               str(mesh_local), "--out", str(out_base),
+               "--up", *[str(x) for x in up_vec]]
+        try:
+            subprocess.run(cmd, cwd=str(_BACKEND_ROOT), check=True,
+                           capture_output=True, text=True, timeout=120)
+        except subprocess.CalledProcessError as e:
+            raise HTTPException(500, f"Rilevamento fallito: {(e.stderr or '')[:200]}")
+        with open(str(out_base) + ".json") as fh:
+            doc = json.load(fh)
+
+    planes = []
+    for i, p in enumerate(doc.get("piani", []), 1):
+        tipo = p.get("tipo", "facciata")
+        planes.append(DetectedPlane(
+            nome=f"{'Spalletta' if tipo == 'spalla' else 'Facciata'} {i}",
+            tipo=tipo, punto=p["centro"], normale=p["dir"], corners=p["corners"],
+            area_m2=round(float(p["area_m2"]), 2), w=round(float(p["w"]), 3),
+            h=round(float(p["h"]), 3)))
+    return DetectPlanesResult(session_id=session_id, up=doc.get("up", up_vec),
+                              count=len(planes), planes=planes)
 
 
 # ─── Pre-marcatura automatica: zone fuori-piano proposte ────────────────────

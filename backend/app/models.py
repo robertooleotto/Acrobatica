@@ -423,6 +423,26 @@ class PlanesDataResult(BaseModel):
     url: Optional[str] = None
 
 
+class DetectedPlane(BaseModel):
+    """Un piano rilevato automaticamente (istogrammi BCS): quad + tipo."""
+    nome: str
+    tipo: str                          # "facciata" | "spalla" | "orizzontale"
+    punto: list[float]                 # centro del piano (frame mesh)
+    normale: list[float]               # normale (fuori dal muro)
+    corners: list[list[float]]         # 4 angoli del rettangolo (poligono)
+    area_m2: float
+    w: float
+    h: float
+
+
+class DetectPlanesResult(BaseModel):
+    """Esito del rilevamento automatico piani sulla mesh della sessione."""
+    session_id: str
+    up: list[float]
+    count: int
+    planes: list[DetectedPlane] = []
+
+
 class ProjectionInput(BaseModel):
     """Stato di un singolo input della proiezione (foto/mesh/pose/piani)."""
     kind: str
