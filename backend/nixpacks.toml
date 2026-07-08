@@ -5,6 +5,11 @@ nixPkgs = ["python312", "gcc", "glibc"]
 # libgomp1/libegl1/libusb: runtime richiesti da open3d (detector piani v2)
 aptPkgs = ["libgl1", "libglib2.0-0", "libgomp1", "libegl1", "libusb-1.0-0", "libx11-6", "libxext6", "libsm6", "libice6", "libdrm2", "libxfixes3", "libxau6", "libxdmcp6"]
 
+# Il Python di Nix non consulta la cache ld di sistema → non vede le librerie apt
+# (libX11 ecc. richieste da open3d). Puntiamo il loader alle dir apt esplicitamente.
+[variables]
+LD_LIBRARY_PATH = "/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu"
+
 [phases.install]
 cmds = ["python -m venv /opt/venv && . /opt/venv/bin/activate && pip install --upgrade pip && pip install -r requirements.txt"]
 
