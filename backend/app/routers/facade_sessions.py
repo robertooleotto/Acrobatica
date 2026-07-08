@@ -9,6 +9,7 @@ e ricaricate come output. Niente persistenza locale.
 """
 from __future__ import annotations
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -1184,10 +1185,17 @@ def detect_planes(session_id: str, up: Optional[list[float]] = Body(None, embed=
         # trapezi). Fallback: v1 istogrammi (solo verticali) se Open3D non c'è.
         doc = None
         engine_error = ""
+        # Su Railway (Nixpacks) LD_LIBRARY_PATH è /usr/lib, ma le librerie apt che
+        # servono a open3d (libX11 ecc.) stanno in /usr/lib/x86_64-linux-gnu →
+        # estendiamo il path SOLO per il subprocess del detector.
+        env = dict(os.environ)
+        env["LD_LIBRARY_PATH"] = ":".join(filter(None, [
+            "/usr/lib/x86_64-linux-gnu", "/lib/x86_64-linux-gnu",
+            env.get("LD_LIBRARY_PATH", "")]))
         try:
             subprocess.run([sys.executable, "-m", "scripts.detect_planes_open3d",
                             str(mesh_local), "--out", str(out_base), *up_args],
-                           cwd=str(_BACKEND_ROOT), check=True,
+                           cwd=str(_BACKEND_ROOT), check=True, env=env,
                            capture_output=True, text=True, timeout=300)
             with open(str(out_base) + ".json") as fh:
                 doc = json.load(fh)
