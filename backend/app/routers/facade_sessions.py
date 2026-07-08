@@ -1191,6 +1191,7 @@ def detect_planes(session_id: str, up: Optional[list[float]] = Body(None, embed=
             with open(str(out_base) + ".json") as fh:
                 doc = json.load(fh)
             raw_planes = doc.get("planes", [])
+            engine = "open3d"
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             doc = None
         if doc is None:
@@ -1210,6 +1211,7 @@ def detect_planes(session_id: str, up: Optional[list[float]] = Body(None, embed=
                 "normale": p["dir"], "corners": p["corners"],
                 "area_m2": p["area_m2"], "w": p["w"], "h": p["h"], "triangoli": [],
             } for i, p in enumerate(doc.get("piani", []), 1)]
+            engine = "istogrammi"
 
     planes = [DetectedPlane(
         nome=p["nome"], tipo=p["tipo"], punto=p["punto"], normale=p["normale"],
@@ -1217,7 +1219,7 @@ def detect_planes(session_id: str, up: Optional[list[float]] = Body(None, embed=
         w=round(float(p["w"]), 3), h=round(float(p["h"]), 3),
         triangoli=p.get("triangoli", [])) for p in raw_planes]
     return DetectPlanesResult(session_id=session_id, up=doc.get("up", up_vec),
-                              count=len(planes), planes=planes)
+                              count=len(planes), engine=engine, planes=planes)
 
 
 # ─── Pre-marcatura automatica: zone fuori-piano proposte ────────────────────

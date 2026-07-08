@@ -441,6 +441,7 @@ class DetectPlanesResult(BaseModel):
     session_id: str
     up: list[float]
     count: int
+    engine: str = ""                   # "open3d" (v2) | "istogrammi" (fallback v1)
     planes: list[DetectedPlane] = []
 
 

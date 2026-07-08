@@ -2,7 +2,8 @@
 # a opencv-python (libGL, libglib) anche su slim images.
 [phases.setup]
 nixPkgs = ["python312", "gcc", "glibc"]
-aptPkgs = ["libgl1", "libglib2.0-0"]
+# libgomp1/libegl1/libusb: runtime richiesti da open3d (detector piani v2)
+aptPkgs = ["libgl1", "libglib2.0-0", "libgomp1", "libegl1", "libusb-1.0-0"]
 
 [phases.install]
 cmds = ["python -m venv /opt/venv && . /opt/venv/bin/activate && pip install --upgrade pip && pip install -r requirements.txt"]
