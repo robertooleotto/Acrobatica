@@ -3946,11 +3946,12 @@ final class Mesh3DModel: ObservableObject {
         guard !segmentando, !mesh.triangles.isEmpty else { return }
         segmentando = true
         cursoreInfo = "Riconosco i piani…"
-        calcolaAssiNavigazione()
-        let u = assiNav.u
+        // La gravità della mesh OC/ARKit è l'asse Y del suo frame. NON passare l'up
+        // stimato (assiNav.u): esce inclinato → i piani vengono RUOTATI. La gravità
+        // nota [0,1,0] tiene i piani dritti (normali orizzontali).
         do {
             let r = try await BackendAPIClient.shared.detectPlanes(
-                sessionId: sessionId, up: [u.x, u.y, u.z])
+                sessionId: sessionId, up: [0, 1, 0])
             applicaPianiRilevati(r.planes)
             cursoreInfo = "Piani riconosciuti: \(facce.count)"
         } catch {
