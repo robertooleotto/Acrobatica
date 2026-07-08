@@ -19,6 +19,7 @@ struct EditorMesh3DView: View {
     @State private var urlsExport: [URL] = []
     @State private var caricandoCloud = false
     @State private var toastCloud: String?
+    @State private var autoRiconoscimentoFatto = false
 
     /// `meshFile` nil → mesh demo procedurale. `sessionId` presente → abilita il
     /// salvataggio della mesh RIPULITA sul backend (kind=clean).
@@ -103,6 +104,15 @@ struct EditorMesh3DView: View {
             }
         }
         .animation(.easeInOut, value: toastCloud)
+        // Riconoscimento piani AUTOMATICO appena la mesh è pronta (una volta sola,
+        // solo se non ci sono già piani): "riconosce subito i piani" col detector
+        // python. Se non c'è sessione (mesh demo) resta manuale.
+        .onChange(of: model.numTriangoli) { n in
+            if n > 0, let sid = sessionId, model.facce.isEmpty, !autoRiconoscimentoFatto {
+                autoRiconoscimentoFatto = true
+                Task { await model.riconosciPianiAuto(sessionId: sid) }
+            }
+        }
         .sheet(isPresented: Binding(
             get: { !urlsExport.isEmpty },
             set: { if !$0 { urlsExport = [] } }
@@ -638,7 +648,13 @@ struct EditorMesh3DView: View {
                         .background(Color(red: 0.18, green: 0.70, blue: 0.44), in: RoundedRectangle(cornerRadius: 8))
                 }
                 .disabled(model.numTriangoli == 0 || model.segmentando)
-                Button { Task { await model.segmentaPianiBCS() } } label: {
+                Button {
+                    if let sid = sessionId {
+                        Task { await model.riconosciPianiAuto(sessionId: sid) }
+                    } else {
+                        Task { await model.segmentaPianiBCS() }   // fallback on-device (mesh demo)
+                    }
+                } label: {
                     Label("Auto BCS", systemImage: "square.grid.3x3")
                         .font(Theme.Typo.caption(11, .semibold)).foregroundStyle(EditorTheme.testo)
                         .padding(.horizontal, 10).padding(.vertical, 6)
@@ -3921,6 +3937,48 @@ final class Mesh3DModel: ObservableObject {
         let facciate = facce.count - spallette
         cursoreInfo = "Auto BCS: \(facciate) facciate, \(spallette) spallette"
         segmentando = false
+    }
+
+    /// Riconoscimento piani AUTOMATICO via backend (detector python a istogrammi:
+    /// assi di gravità + fusione complanari + filtri). È il motore preferito —
+    /// gira sulla mesh della sessione (su storage) e ritorna piani puliti.
+    func riconosciPianiAuto(sessionId: String) async {
+        guard !segmentando, !mesh.triangles.isEmpty else { return }
+        segmentando = true
+        cursoreInfo = "Riconosco i piani…"
+        calcolaAssiNavigazione()
+        let u = assiNav.u
+        do {
+            let r = try await BackendAPIClient.shared.detectPlanes(
+                sessionId: sessionId, up: [u.x, u.y, u.z])
+            applicaPianiRilevati(r.planes)
+            cursoreInfo = "Piani riconosciuti: \(facce.count)"
+        } catch {
+            cursoreInfo = "Riconoscimento fallito: \(error.localizedDescription)"
+        }
+        segmentando = false
+    }
+
+    /// Sostituisce le facce coi piani rilevati dal backend (quad + tipo).
+    func applicaPianiRilevati(_ planes: [BackendAPIClient.DetectedPlane]) {
+        registraUndo()
+        facce.removeAll(); facceSelezionate.removeAll(); facciaAttivaId = nil
+        for p in planes {
+            let colore = FacciaProxy.palette[facce.count % FacciaProxy.palette.count]
+            var f = FacciaProxy(id: prossimoIdFaccia, nome: p.nome, colore: colore)
+            prossimoIdFaccia += 1
+            f.tipo = (p.tipo == "spalla") ? .spalletta : .facciata
+            if p.punto.count == 3 { f.pianoPunto = SIMD3<Float>(p.punto[0], p.punto[1], p.punto[2]) }
+            if p.normale.count == 3 { f.pianoNormale = SIMD3<Float>(p.normale[0], p.normale[1], p.normale[2]) }
+            f.poligono = p.corners.compactMap { c in
+                c.count == 3 ? SIMD3<Float>(c[0], c[1], c[2]) : nil
+            }
+            facce.append(f)
+        }
+        facciaAttivaId = facce.first?.id
+        pianiGenerati = facce.count
+        mostraProxy = false; mostraPiani = true
+        ridisegnaFacce(); ridisegnaPiani()
     }
 
     /// #14 — Unisce facce COMPLANARI e CONNESSE (stesso muro spezzato dalle

@@ -341,6 +341,37 @@ actor BackendAPIClient {
         let status: String
     }
 
+    /// Un piano rilevato automaticamente dal backend (istogrammi BCS).
+    struct DetectedPlane: Codable {
+        let nome: String
+        let tipo: String            // "facciata" | "spalla" | "orizzontale"
+        let punto: [Float]
+        let normale: [Float]
+        let corners: [[Float]]
+        let area_m2: Float
+        let w: Float
+        let h: Float
+    }
+    struct DetectPlanesResult: Codable {
+        let session_id: String
+        let up: [Float]
+        let count: Int
+        let planes: [DetectedPlane]
+    }
+
+    /// Rileva automaticamente i piani sulla mesh della sessione (motore python a
+    /// istogrammi lato backend). `up` = gravità nota nel frame mesh (opzionale).
+    func detectPlanes(sessionId: String, up: [Float]? = nil) async throws -> DetectPlanesResult {
+        let url = baseURL.appendingPathComponent("/facade-sessions/\(sessionId)/detect-planes")
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: up != nil ? ["up": up!] : [:])
+        let (data, resp) = try await urlSession.data(for: req)
+        try assertHTTPOK(resp, data: data)
+        return try JSONDecoder().decode(DetectPlanesResult.self, from: data)
+    }
+
     /// Carica i piani decisi nell'editor 3D (passo 7) sul backend, che li
     /// conserva su storage in `out/planes.json`. La proiezione foto→piani li
     /// scaricherà da lì. `jsonData` = documento piani (schema acro.planes/v1).
