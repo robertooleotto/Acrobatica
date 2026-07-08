@@ -5825,9 +5825,17 @@ final class Mesh3DModel: ObservableObject {
     }
 
     func eliminaFaccia(_ id: Int) {
+        registraUndo()
         facce.removeAll { $0.id == id }
         if facciaAttivaId == id { facciaAttivaId = facce.last?.id }
+        // togli ogni riferimento residuo alla faccia eliminata
+        facceSelezionate.remove(id)
+        selFacceAllinea.remove(id)
+        // ridisegna SIA il proxy SIA i quad dei piani: eliminando un piano deve
+        // sparire tutto (prima restava il quad perché ridisegnavamo solo le facce).
         ridisegnaFacce()
+        ridisegnaPiani()
+        aggiornaNumElementi()
     }
 
     /// Unisce la faccia `sorgente` in `target` (ne assorbe i triangoli) e la rimuove.
