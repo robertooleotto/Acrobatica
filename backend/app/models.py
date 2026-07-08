@@ -442,6 +442,7 @@ class DetectPlanesResult(BaseModel):
     up: list[float]
     count: int
     engine: str = ""                   # "open3d" (v2) | "istogrammi" (fallback v1)
+    engine_error: str = ""             # se v2 è caduto in fallback: perché (diagnosi)
     planes: list[DetectedPlane] = []
 
 

@@ -3,7 +3,7 @@
 [phases.setup]
 nixPkgs = ["python312", "gcc", "glibc"]
 # libgomp1/libegl1/libusb: runtime richiesti da open3d (detector piani v2)
-aptPkgs = ["libgl1", "libglib2.0-0", "libgomp1", "libegl1", "libusb-1.0-0"]
+aptPkgs = ["libgl1", "libglib2.0-0", "libgomp1", "libegl1", "libusb-1.0-0", "libx11-6", "libxext6", "libsm6", "libice6", "libdrm2", "libxfixes3", "libxau6", "libxdmcp6"]
 
 [phases.install]
 cmds = ["python -m venv /opt/venv && . /opt/venv/bin/activate && pip install --upgrade pip && pip install -r requirements.txt"]

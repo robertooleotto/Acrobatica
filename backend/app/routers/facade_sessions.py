@@ -1183,6 +1183,7 @@ def detect_planes(session_id: str, up: Optional[list[float]] = Body(None, embed=
         # Motore preferito: v2 Open3D (qualsiasi orientamento: verticali, oblique,
         # trapezi). Fallback: v1 istogrammi (solo verticali) se Open3D non c'è.
         doc = None
+        engine_error = ""
         try:
             subprocess.run([sys.executable, "-m", "scripts.detect_planes_open3d",
                             str(mesh_local), "--out", str(out_base), *up_args],
@@ -1192,8 +1193,12 @@ def detect_planes(session_id: str, up: Optional[list[float]] = Body(None, embed=
                 doc = json.load(fh)
             raw_planes = doc.get("planes", [])
             engine = "open3d"
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        except subprocess.CalledProcessError as e:
             doc = None
+            engine_error = ((e.stderr or "") + (e.stdout or ""))[-400:]
+        except subprocess.TimeoutExpired:
+            doc = None
+            engine_error = "timeout v2 (300s)"
         if doc is None:
             try:
                 subprocess.run([sys.executable, "-m", "scripts.proto_planes_histogram",
@@ -1219,7 +1224,9 @@ def detect_planes(session_id: str, up: Optional[list[float]] = Body(None, embed=
         w=round(float(p["w"]), 3), h=round(float(p["h"]), 3),
         triangoli=p.get("triangoli", [])) for p in raw_planes]
     return DetectPlanesResult(session_id=session_id, up=doc.get("up", up_vec),
-                              count=len(planes), engine=engine, planes=planes)
+                              count=len(planes), engine=engine,
+                              engine_error=engine_error if engine != "open3d" else "",
+                              planes=planes)
 
 
 # ─── Pre-marcatura automatica: zone fuori-piano proposte ────────────────────
