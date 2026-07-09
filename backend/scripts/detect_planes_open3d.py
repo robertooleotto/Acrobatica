@@ -164,12 +164,9 @@ def detect(V, F, up, include_horizontal=False, min_area_frac=0.04,
             n = nn
         vid = np.unique(F[tri].reshape(-1))
         P = V[vid]
-        # centro sul muro di FONDO: profondità modale lungo n
-        dd = P @ n
-        cnts, edg = np.histogram(dd, bins=50)
-        kk = int(np.argmax(cnts))
-        sel = (dd >= edg[kk]) & (dd <= edg[kk + 1])
-        ctr = P[sel].mean(0) if sel.sum() >= 3 else P.mean(0)
+        # centro = baricentro pesato-area dei triangoli → SEMPRE sulla superficie
+        # (il centro a profondità modale poteva mettere il quad staccato dal muro).
+        ctr = (tc[tri] * wa[:, None]).sum(0) / wa.sum()
         if float(((tn[tri] @ n) * wa).sum()) < 0:
             n = -n
         # 5) assi nel piano (v = gravità proiettata) e poligono convesso
