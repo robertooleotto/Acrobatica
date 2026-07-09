@@ -1167,12 +1167,25 @@ def detect_planes(session_id: str, up: Optional[list[float]] = Body(None, embed=
     if sess is None:
         raise HTTPException(404, "Sessione non trovata")
     result = sess.get("result") or {}
-    clean = projection_service._mesh_entry(result, "clean")
-    raw = projection_service._mesh_entry(result, "raw")
-    entry = clean if clean.get("files") else raw
-    obj_path = projection_service._mesh_main_path(entry)
-    if not obj_path or not obj_path.lower().endswith(".obj"):
-        raise HTTPException(409, "Nessuna mesh OBJ per la sessione")
+
+    # Trova un .obj tra i file mesh (prima clean, poi raw). Se il "main" non è
+    # un .obj (es. usdz), ripiega su un qualunque .obj presente nel gruppo.
+    def _find_obj() -> str | None:
+        for kind in ("clean", "raw"):
+            entry = projection_service._mesh_entry(result, kind)
+            main = projection_service._mesh_main_path(entry)
+            if main and main.lower().endswith(".obj"):
+                return main
+            for f in entry.get("files", []):
+                p = f.get("path") if isinstance(f, dict) else None
+                if p and p.lower().endswith(".obj"):
+                    return p
+        return None
+
+    obj_path = _find_obj()
+    if not obj_path:
+        raise HTTPException(409, "Nessuna mesh .obj caricata per questa sessione "
+                                 "(carica/ricalcola la mesh prima di rilevare i piani)")
 
     up_vec = up if (up and len(up) == 3) else [0.0, 1.0, 0.0]
     with tempfile.TemporaryDirectory(prefix="acro_detect_") as td:
