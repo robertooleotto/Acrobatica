@@ -180,7 +180,12 @@ def detect(V, F, up, include_horizontal=False, min_area_frac=0.04,
         hull = simplify_polygon(hull, ang_deg=12.0, min_edge=diag * 0.015)
         area = float(poly_area(hull))
         corners = [(ctr + u * x + v * y).tolist() for x, y in hull]
+        # copertura = area 3D dei triangoli / area del poligono. Muro pieno ≈1
+        # (bugnato >1); cuneo da triangoli sparsi «1 → si distingue dal timpano
+        # triangolare VERO, che è pieno (copertura ≈1) benché a punta.
+        coverage = float(tarea[tri].sum()) / max(area, 1e-9)
         return {"n": n, "ctr": ctr, "tilt": abs(float(n @ up)), "area": area,
+                "coverage": coverage,
                 "w": float(hull[:, 0].max() - hull[:, 0].min()),
                 "h": float(hull[:, 1].max() - hull[:, 1].min()),
                 "corners": corners, "tri": np.asarray(tri)}
@@ -192,8 +197,9 @@ def detect(V, F, up, include_horizontal=False, min_area_frac=0.04,
             planes.append(p)
 
     # 4b) fusione POST-refit: stesso muro spezzato dal rilievo (bugnato/cornici)
-    #     → normali vicine (≤18°) e distanza piano-piano piccola ai due centroidi.
-    cos_pm, d_pm = math.cos(math.radians(18)), diag * 0.03
+    #     → normali QUASI-PARALLELE (≤6°: due muri a 12° NON vanno fusi in un piano
+    #     medio inclinato) e distanza piano-piano piccola ai due centroidi.
+    cos_pm, d_pm = math.cos(math.radians(6)), diag * 0.03
     changed = True
     while changed:
         changed = False
@@ -215,6 +221,9 @@ def detect(V, F, up, include_horizontal=False, min_area_frac=0.04,
 
     # scarta orizzontali (terreno/tetti piani) se non richiesti
     planes = [p for p in planes if include_horizontal or p["tilt"] <= horiz_dot]
+    # (nessun filtro forma qui: la copertura è ≈1 anche per i triangoli solidi, e
+    # l'aspetto non separa i cunei dalle spallette sottili vere → gli sporadici
+    # piani spuri si eliminano con un tap nell'editor.)
     for p in planes:
         p["tri"] = p["tri"].tolist()
 
