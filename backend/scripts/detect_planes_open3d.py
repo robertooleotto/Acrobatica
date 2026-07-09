@@ -148,14 +148,29 @@ def detect(V, F, up, include_horizontal=False, min_area_frac=0.04,
         """Refit (centroide pesato + SVD) e poligono convesso dai triangoli."""
         if len(tri) < 30:
             return None
-        w = tarea[tri][:, None]
-        ctr = (tc[tri] * w).sum(0) / w.sum()
+        # NORMALE dai NORMALI dei triangoli (mean-shift pesato area), non da SVD
+        # delle posizioni: il rilievo asimmetrico (bugnato) NON inclina, perché le
+        # sue facce frontali sono parallele al muro; solo i fianchi (perpendicolari)
+        # sono esclusi dal gate. Falda liscia = normali tutte uguali → angolo esatto.
+        wa = tarea[tri]
+        n = _unit((tn[tri] * wa[:, None]).sum(0))
+        for _ in range(6):
+            al = (tn[tri] @ n) > math.cos(math.radians(25))
+            if al.sum() < 3:
+                break
+            nn = _unit((tn[tri][al] * wa[al, None]).sum(0))
+            if float(nn @ n) > 0.99999:
+                n = nn; break
+            n = nn
         vid = np.unique(F[tri].reshape(-1))
         P = V[vid]
-        _, _, vt = np.linalg.svd(P - ctr, full_matrices=False)
-        n = _unit(vt[-1])
-        # verso fuori dal muro = maggioranza pesata delle normali mesh
-        if float(((tn[tri] @ n) * tarea[tri]).sum()) < 0:
+        # centro sul muro di FONDO: profondità modale lungo n
+        dd = P @ n
+        cnts, edg = np.histogram(dd, bins=50)
+        kk = int(np.argmax(cnts))
+        sel = (dd >= edg[kk]) & (dd <= edg[kk + 1])
+        ctr = P[sel].mean(0) if sel.sum() >= 3 else P.mean(0)
+        if float(((tn[tri] @ n) * wa).sum()) < 0:
             n = -n
         # 5) assi nel piano (v = gravità proiettata) e poligono convesso
         v = up - (up @ n) * n
