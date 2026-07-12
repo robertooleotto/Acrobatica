@@ -3326,9 +3326,9 @@ final class Mesh3DModel: ObservableObject {
             if let em = parsed {
                 meshOriginale = em
                 installaMesh(em)
-                if let textureFile { caricaTextureOC(textureFile) }
+                let textureCaricata = textureFile.map(caricaTextureOC) ?? false
                 caricamento = false
-                cursoreInfo = nil
+                if textureFile == nil || textureCaricata { cursoreInfo = nil }
                 return
             }
             errore = "OBJ senza triangoli leggibili"
@@ -3364,7 +3364,8 @@ final class Mesh3DModel: ObservableObject {
 
     /// Carica la mesh raw texturizzata come livello visivo, mantenendo la mesh
     /// clean separata come geometria editabile e sorgente del riconoscimento.
-    private func caricaTextureOC(_ url: URL) {
+    @discardableResult
+    private func caricaTextureOC(_ url: URL) -> Bool {
         do {
             let loaded = try SCNScene(url: url, options: nil)
             let radice = SCNNode()
@@ -3374,8 +3375,10 @@ final class Mesh3DModel: ObservableObject {
             contentNode.addChildNode(radice)
             ocTextureNode = radice
             mostraTexturaOC = true
+            return true
         } catch {
-            cursoreInfo = "Texture OC non caricabile"
+            cursoreInfo = "Texture OC non caricabile: \(error.localizedDescription)"
+            return false
         }
     }
 
@@ -6737,12 +6740,27 @@ struct EditorMesh3DCaricamentoView: View {
             }
             meshFile = try await BackendAPIClient.shared.downloadMeshFile(main)
             // La geometria clean e la texture raw condividono il frame OC. Quando
-            // il main e' un OBJ, scarica anche l'USDZ raw come layer visivo.
+            // il main e' un OBJ, scarica anche il modello raw come layer visivo.
             if main.name.lowercased().hasSuffix(".obj") {
                 if let raw = try? await BackendAPIClient.shared.fetchMeshInfo(
-                    sessionId: sessionId, kind: "raw"),
-                   let usdz = raw.files.first(where: { $0.name.lowercased().hasSuffix(".usdz") }) {
-                    textureFile = try? await BackendAPIClient.shared.downloadMeshFile(usdz)
+                    sessionId: sessionId, kind: "raw") {
+                    if let usdz = raw.files.first(where: {
+                        $0.name.lowercased().hasSuffix(".usdz")
+                    }) {
+                        textureFile = try? await BackendAPIClient.shared.downloadMeshFile(usdz)
+                    } else if let rawOBJ = raw.main_obj ?? raw.files.first(where: {
+                        $0.name.lowercased().hasSuffix(".obj")
+                    }) {
+                        let estensioni = Set(["obj", "mtl", "png", "jpg", "jpeg"])
+                        let bundleFiles = raw.files.filter {
+                            estensioni.contains(URL(fileURLWithPath: $0.name)
+                                .pathExtension.lowercased())
+                        }
+                        if let bundle = try? await BackendAPIClient.shared
+                            .downloadMeshBundle(bundleFiles) {
+                            textureFile = bundle[rawOBJ.name]
+                        }
+                    }
                 }
             }
             pronto = true

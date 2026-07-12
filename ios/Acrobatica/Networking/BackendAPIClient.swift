@@ -484,6 +484,38 @@ actor BackendAPIClient {
         return dest
     }
 
+    /// Scarica nello stesso folder tutti i file che compongono una mesh OBJ.
+    /// MTL e texture vengono risolti da SceneKit tramite i nomi relativi.
+    func downloadMeshBundle(_ files: [MeshFileInfo]) async throws -> [String: URL] {
+        let fileManager = FileManager.default
+        let directory = fileManager.temporaryDirectory
+            .appendingPathComponent("mesh-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        var downloaded: [String: URL] = [:]
+        do {
+            for info in files {
+                guard let remote = URL(string: info.url) else {
+                    throw APIError.httpError(0, "URL mesh non valido")
+                }
+                let (tmp, resp) = try await urlSession.download(from: remote)
+                try assertHTTPOK(resp, data: Data())
+
+                // Il backend espone nomi di file, non percorsi. lastPathComponent
+                // evita comunque che un nome remoto esca dalla cartella dedicata.
+                let name = URL(fileURLWithPath: info.name).lastPathComponent
+                let destination = directory.appendingPathComponent(name)
+                try? fileManager.removeItem(at: destination)
+                try fileManager.moveItem(at: tmp, to: destination)
+                downloaded[info.name] = destination
+            }
+            return downloaded
+        } catch {
+            try? fileManager.removeItem(at: directory)
+            throw error
+        }
+    }
+
     // MARK: - Keystone (Step 2: foto raddrizzate singolarmente)
 
     struct KeystonePhotoResult: Codable, Identifiable {
