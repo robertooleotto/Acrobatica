@@ -6514,18 +6514,103 @@ final class Mesh3DModel: ObservableObject {
         ridisegnaPiani()   // i piani diventano pieni/trasparenti secondo la visibilità mesh
     }
 
-    /// Riallinea gli insiemi di triangoli delle facce dopo un taglio (remap).
+    /// Riallinea triangoli e piani dopo un taglio. Conserva la normale
+    /// architettonica rilevata, aggiornando offset e perimetro sulla mesh residua.
     private func rimappaFacce(_ remap: [Int]) {
         guard !facce.isEmpty else { return }
         for i in facce.indices {
-            facce[i].triangoli = Set(facce[i].triangoli.compactMap { remap.indices.contains($0) && remap[$0] >= 0 ? remap[$0] : nil })
-            facce[i].pianoPunto = nil; facce[i].pianoNormale = nil   // il fit va rifatto
+            let avevaSupporto = !facce[i].triangoli.isEmpty
+            facce[i].triangoli = Set(facce[i].triangoli.compactMap {
+                remap.indices.contains($0) && remap[$0] >= 0 ? remap[$0] : nil
+            })
+
+            // Alcuni detector producono soltanto piano e poligono. In quel caso
+            // ricava il supporto dalla geometria residua. Se invece il supporto
+            // esisteva ed e' stato tagliato interamente, il piano va eliminato.
+            if !avevaSupporto, facce[i].triangoli.isEmpty {
+                facce[i].triangoli = trovaSupportoPiano(facce[i])
+            }
+
+            guard !facce[i].triangoli.isEmpty else { continue }
+            if let normal0 = facce[i].pianoNormale,
+               let point0 = facce[i].pianoPunto {
+                let normal = simd_normalize(normal0)
+                var offset: Float = 0
+                for triangleIndex in facce[i].triangoli {
+                    offset += simd_dot(
+                        mesh.centroid(mesh.triangles[triangleIndex]) - point0, normal)
+                }
+                offset /= Float(facce[i].triangoli.count)
+                let point = point0 + normal * offset
+                facce[i].pianoPunto = point
+                facce[i].pianoNormale = normal
+                facce[i].erroreRms = mesh.rmsDalPiano(
+                    facce[i].triangoli, punto: point, normale: normal)
+            } else if let (point, normal) = mesh.fitPiano(facce[i].triangoli) {
+                facce[i].pianoPunto = point
+                facce[i].pianoNormale = normal
+                facce[i].erroreRms = mesh.rmsDalPiano(
+                    facce[i].triangoli, punto: point, normale: normal)
+            }
         }
         facce.removeAll { $0.triangoli.isEmpty }
+        let validIDs = Set(facce.map(\.id))
+        facceSelezionate.formIntersection(validIDs)
         if facciaAttivaId == nil || !facce.contains(where: { $0.id == facciaAttivaId }) {
             facciaAttivaId = facce.last?.id
         }
+        for id in facce.map(\.id) { generaPoligono(perFaccia: id) }
+        pianiGenerati = facce.filter { $0.pianoNormale != nil }.count
         ridisegnaFacce()
+        ridisegnaPiani()
+    }
+
+    /// Trova i triangoli della mesh residua appartenenti a un piano descritto
+    /// solo da normale e poligono (risultati backend privi di indici).
+    private func trovaSupportoPiano(_ face: FacciaProxy) -> Set<Int> {
+        guard let point = face.pianoPunto,
+              let normal0 = face.pianoNormale,
+              let polygon = face.poligono,
+              polygon.count >= 3 else { return [] }
+        let normal = simd_normalize(normal0)
+        var right = simd_cross(gravitaSu, normal)
+        if simd_length(right) < 1e-5 {
+            right = simd_cross(SIMD3<Float>(1, 0, 0), normal)
+        }
+        right = simd_normalize(right)
+        let up = simd_normalize(simd_cross(normal, right))
+        let polygon2D = polygon.map { p in
+            SIMD2<Float>(simd_dot(p - point, right), simd_dot(p - point, up))
+        }
+        let tolerance = max(estensioneMesh * 0.012, 1e-4)
+        let cosNormal = cos(35 * Float.pi / 180)
+
+        func contiene(_ p: SIMD2<Float>) -> Bool {
+            var inside = false
+            var j = polygon2D.count - 1
+            for i in polygon2D.indices {
+                let a = polygon2D[i]
+                let b = polygon2D[j]
+                if (a.y > p.y) != (b.y > p.y) {
+                    let x = (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x
+                    if p.x < x { inside.toggle() }
+                }
+                j = i
+            }
+            return inside
+        }
+
+        var support: Set<Int> = []
+        for triangleIndex in mesh.triangles.indices {
+            let center = mesh.centroid(mesh.triangles[triangleIndex])
+            guard abs(simd_dot(center - point, normal)) <= tolerance,
+                  abs(simd_dot(mesh.normale(triangleIndex), normal)) >= cosNormal else { continue }
+            let p2 = SIMD2<Float>(
+                simd_dot(center - point, right),
+                simd_dot(center - point, up))
+            if contiene(p2) { support.insert(triangleIndex) }
+        }
+        return support
     }
 
     /// Ricostruisce l'overlay colorato delle facce (una geometria per faccia).
