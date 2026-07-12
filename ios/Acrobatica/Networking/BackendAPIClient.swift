@@ -425,8 +425,12 @@ actor BackendAPIClient {
 
     /// Info sulla mesh disponibile per la sessione (URL firmati). 404 se il Mac
     /// non l'ha ancora caricata via PUT /mesh.
-    func fetchMeshInfo(sessionId: String) async throws -> MeshInfoResult {
-        let url = baseURL.appendingPathComponent("/facade-sessions/\(sessionId)/mesh")
+    func fetchMeshInfo(sessionId: String, kind: String? = nil) async throws -> MeshInfoResult {
+        var components = URLComponents(
+            url: baseURL.appendingPathComponent("/facade-sessions/\(sessionId)/mesh"),
+            resolvingAgainstBaseURL: false)!
+        if let kind { components.queryItems = [URLQueryItem(name: "kind", value: kind)] }
+        guard let url = components.url else { throw APIError.httpError(0, "URL mesh non valido") }
         var req = URLRequest(url: url); req.httpMethod = "GET"
         let (data, resp) = try await urlSession.data(for: req)
         try assertHTTPOK(resp, data: data)

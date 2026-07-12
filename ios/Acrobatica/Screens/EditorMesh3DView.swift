@@ -24,10 +24,12 @@ struct EditorMesh3DView: View {
     /// `meshFile` nil → mesh demo procedurale. `sessionId` presente → abilita il
     /// salvataggio della mesh RIPULITA sul backend (kind=clean).
     init(meshFile: URL? = nil,
+         textureFile: URL? = nil,
          nome: String = "Mesh facciata",
          sessionId: String? = nil,
          onChiudi: (() -> Void)? = nil) {
-        _model = StateObject(wrappedValue: Mesh3DModel(meshFile: meshFile, nome: nome))
+        _model = StateObject(wrappedValue: Mesh3DModel(
+            meshFile: meshFile, textureFile: textureFile, nome: nome))
         self.sessionId = sessionId
         self.onChiudi = onChiudi
     }
@@ -3188,7 +3190,7 @@ final class Mesh3DModel: ObservableObject {
     private(set) var pianoBaseRight = SIMD3<Float>(1, 0, 0)
     private(set) var pianoBaseUp = SIMD3<Float>(0, 1, 0)
 
-    init(meshFile: URL?, nome: String) {
+    init(meshFile: URL?, textureFile: URL? = nil, nome: String) {
         self.nome = nome
         configuraScena()
         // Sorgente, in ordine: file passato (download backend) → mesh OC reale
@@ -3197,7 +3199,7 @@ final class Mesh3DModel: ObservableObject {
             ?? Bundle.main.url(forResource: "facciata_demo", withExtension: "obj")
         if let file {
             caricamento = true
-            Task { await caricaFile(file) }
+            Task { await caricaFile(file, textureFile: textureFile) }
         } else {
             let demo = MeshFactory.demoMesh()
             meshOriginale = demo
@@ -3314,7 +3316,7 @@ final class Mesh3DModel: ObservableObject {
         cursoreInfo = nil
     }
 
-    private func caricaFile(_ url: URL) async {
+    private func caricaFile(_ url: URL, textureFile: URL? = nil) async {
         cursoreInfo = "Carico mesh…"
         let ext = url.pathExtension.lowercased()
         if ext == "obj" {
@@ -3324,6 +3326,7 @@ final class Mesh3DModel: ObservableObject {
             if let em = parsed {
                 meshOriginale = em
                 installaMesh(em)
+                if let textureFile { caricaTextureOC(textureFile) }
                 caricamento = false
                 cursoreInfo = nil
                 return
@@ -3348,6 +3351,7 @@ final class Mesh3DModel: ObservableObject {
                 ocTextureNode = radice
                 meshOriginale = em
                 installaMesh(em)
+                mostraTexturaOC = true
             } else {
                 errore = "Mesh senza triangoli leggibili"
             }
@@ -3356,6 +3360,23 @@ final class Mesh3DModel: ObservableObject {
         }
         caricamento = false
         if errore == nil { cursoreInfo = nil }
+    }
+
+    /// Carica la mesh raw texturizzata come livello visivo, mantenendo la mesh
+    /// clean separata come geometria editabile e sorgente del riconoscimento.
+    private func caricaTextureOC(_ url: URL) {
+        do {
+            let loaded = try SCNScene(url: url, options: nil)
+            let radice = SCNNode()
+            for child in loaded.rootNode.childNodes { radice.addChildNode(child) }
+            radice.enumerateHierarchy { node, _ in node.categoryBitMask = 0 }
+            radice.isHidden = true
+            contentNode.addChildNode(radice)
+            ocTextureNode = radice
+            mostraTexturaOC = true
+        } catch {
+            cursoreInfo = "Texture OC non caricabile"
+        }
     }
 
     nonisolated private static func caricaOBJEditabile(_ url: URL) -> EditableMesh? {
@@ -6666,6 +6687,7 @@ struct EditorMesh3DCaricamentoView: View {
     let onChiudi: () -> Void
 
     @State private var meshFile: URL?
+    @State private var textureFile: URL?
     @State private var errore: String?
     @State private var pronto = false
 
@@ -6673,6 +6695,7 @@ struct EditorMesh3DCaricamentoView: View {
         Group {
             if pronto {
                 EditorMesh3DView(meshFile: meshFile,
+                                 textureFile: textureFile,
                                  nome: "Mesh facciata",
                                  sessionId: sessionId,
                                  onChiudi: onChiudi)
@@ -6713,6 +6736,15 @@ struct EditorMesh3DCaricamentoView: View {
                 return
             }
             meshFile = try await BackendAPIClient.shared.downloadMeshFile(main)
+            // La geometria clean e la texture raw condividono il frame OC. Quando
+            // il main e' un OBJ, scarica anche l'USDZ raw come layer visivo.
+            if main.name.lowercased().hasSuffix(".obj") {
+                if let raw = try? await BackendAPIClient.shared.fetchMeshInfo(
+                    sessionId: sessionId, kind: "raw"),
+                   let usdz = raw.files.first(where: { $0.name.lowercased().hasSuffix(".usdz") }) {
+                    textureFile = try? await BackendAPIClient.shared.downloadMeshFile(usdz)
+                }
+            }
             pronto = true
         } catch {
             errore = error.localizedDescription
