@@ -143,7 +143,7 @@ struct EditableMesh: @unchecked Sendable {
         return EditableMesh(vertices: verts, triangles: tris)
     }
 
-    private static func leggiPosizioni(_ g: SCNGeometry) -> [SIMD3<Float>]? {
+    static func leggiPosizioni(_ g: SCNGeometry) -> [SIMD3<Float>]? {
         guard let src = g.sources(for: .vertex).first,
               src.usesFloatComponents, src.bytesPerComponent == 4,
               src.componentsPerVector >= 3 else { return nil }
@@ -161,7 +161,7 @@ struct EditableMesh: @unchecked Sendable {
         return out
     }
 
-    private static func leggiIndici(_ e: SCNGeometryElement) -> [UInt32]? {
+    static func leggiIndici(_ e: SCNGeometryElement) -> [UInt32]? {
         let n = e.primitiveCount * 3
         guard n > 0 else { return nil }
         var out: [UInt32] = []

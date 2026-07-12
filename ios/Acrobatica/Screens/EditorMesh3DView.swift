@@ -3203,6 +3203,19 @@ final class Mesh3DModel: ObservableObject {
     @Published var mostraTexturaOC = false { didSet { aggiornaVista() } }
     /// Nodo texturizzato OC originale (estratto al caricamento, normalmente nascosto).
     private var ocTextureNode: SCNNode?
+    private struct OCTexturePart {
+        let node: SCNNode
+        let sources: [SCNGeometrySource]
+        let materials: [SCNMaterial]
+        let triangles: [[SIMD3<UInt32>]]
+        let centroids: [[SIMD3<Float>]]
+    }
+    private struct TextureGridKey: Hashable {
+        let x: Int
+        let y: Int
+        let z: Int
+    }
+    private var ocTextureParts: [OCTexturePart] = []
     var haTexturaOC: Bool { ocTextureNode != nil }
     @Published var puoUndo = false
     @Published var puoRedo = false
@@ -3312,6 +3325,7 @@ final class Mesh3DModel: ObservableObject {
         ridisegnaSelezione()
         aggiornaVista()   // riapplica trasparenza mesh + overlay facce
         aggiornaClip()    // ri-applica il clip box (materiale ricreato)
+        sincronizzaTextureConMesh()
     }
 
     private func ridisegnaSelezione() {
@@ -3457,12 +3471,197 @@ final class Mesh3DModel: ObservableObject {
             radice.isHidden = true
             contentNode.addChildNode(radice)
             ocTextureNode = radice
+            registraPartiTexture(radice)
+            sincronizzaTextureConMesh()
             mostraTexturaOC = true
             return true
         } catch {
             cursoreInfo = "Texture OC non caricabile: \(error.localizedDescription)"
             return false
         }
+    }
+
+    /// Conserva sorgenti, materiali e triangoli originali del livello OC. Gli
+    /// elementi possono cosi' essere ricostruiti senza perdere UV e texture.
+    private func registraPartiTexture(_ root: SCNNode) {
+        ocTextureParts = []
+        root.enumerateHierarchy { node, _ in
+            guard let geometry = node.geometry,
+                  let positions = EditableMesh.leggiPosizioni(geometry)
+            else { return }
+
+            var elementTriangles: [[SIMD3<UInt32>]] = []
+            var elementCentroids: [[SIMD3<Float>]] = []
+            for element in geometry.elements where element.primitiveType == .triangles {
+                guard let indices = EditableMesh.leggiIndici(element) else { continue }
+                var triangles: [SIMD3<UInt32>] = []
+                var centroids: [SIMD3<Float>] = []
+                triangles.reserveCapacity(indices.count / 3)
+                centroids.reserveCapacity(indices.count / 3)
+                var i = 0
+                while i + 2 < indices.count {
+                    let triangle = SIMD3(indices[i], indices[i + 1], indices[i + 2])
+                    let a = positions[Int(triangle.x)]
+                    let b = positions[Int(triangle.y)]
+                    let c = positions[Int(triangle.z)]
+                    let local = (a + b + c) / 3
+                    let converted = node.convertPosition(
+                        SCNVector3(local.x, local.y, local.z), to: contentNode)
+                    triangles.append(triangle)
+                    centroids.append(SIMD3(converted.x, converted.y, converted.z))
+                    i += 3
+                }
+                elementTriangles.append(triangles)
+                elementCentroids.append(centroids)
+            }
+            guard !elementTriangles.isEmpty else { return }
+            ocTextureParts.append(OCTexturePart(
+                node: node,
+                sources: geometry.sources,
+                materials: geometry.materials,
+                triangles: elementTriangles,
+                centroids: elementCentroids))
+        }
+    }
+
+    /// Ritaglia la topologia raw texturizzata sulla superficie clean corrente.
+    /// Le due mesh hanno triangolazioni diverse, quindi l'associazione e' fatta
+    /// nello spazio con una griglia e distanza punto-triangolo.
+    private func sincronizzaTextureConMesh() {
+        guard !ocTextureParts.isEmpty, !mesh.triangles.isEmpty else { return }
+
+        let (lo, hi) = mesh.aabb
+        let extent = max(hi.x - lo.x, max(hi.y - lo.y, hi.z - lo.z))
+        let sampleStep = max(1, mesh.triangles.count / 5_000)
+        var sampledEdges: [Float] = []
+        sampledEdges.reserveCapacity(5_001)
+        for i in stride(from: 0, to: mesh.triangles.count, by: sampleStep) {
+            let t = mesh.triangles[i]
+            let a = mesh.vertices[Int(t.x)]
+            let b = mesh.vertices[Int(t.y)]
+            let c = mesh.vertices[Int(t.z)]
+            sampledEdges.append(max(simd_length(a - b), max(simd_length(b - c), simd_length(c - a))))
+        }
+        sampledEdges.sort()
+        let medianEdge = sampledEdges[sampledEdges.count / 2]
+        let tolerance = max(extent * 0.001, medianEdge * 1.5)
+        let cellSize = max(tolerance * 4, extent * 0.002)
+
+        func key(_ p: SIMD3<Float>) -> TextureGridKey {
+            TextureGridKey(
+                x: Int(floor(Double(p.x / cellSize))),
+                y: Int(floor(Double(p.y / cellSize))),
+                z: Int(floor(Double(p.z / cellSize))))
+        }
+
+        var grid: [TextureGridKey: [Int]] = [:]
+        grid.reserveCapacity(mesh.triangles.count / 2)
+        let pad = SIMD3<Float>(repeating: tolerance)
+        for (index, t) in mesh.triangles.enumerated() {
+            let a = mesh.vertices[Int(t.x)]
+            let b = mesh.vertices[Int(t.y)]
+            let c = mesh.vertices[Int(t.z)]
+            let minKey = key(simd_min(a, simd_min(b, c)) - pad)
+            let maxKey = key(simd_max(a, simd_max(b, c)) + pad)
+            for x in minKey.x...maxKey.x {
+                for y in minKey.y...maxKey.y {
+                    for z in minKey.z...maxKey.z {
+                        grid[TextureGridKey(x: x, y: y, z: z), default: []].append(index)
+                    }
+                }
+            }
+        }
+
+        let maxDistance2 = tolerance * tolerance
+        for part in ocTextureParts {
+            var elements: [SCNGeometryElement] = []
+            elements.reserveCapacity(part.triangles.count)
+            for elementIndex in part.triangles.indices {
+                let triangles = part.triangles[elementIndex]
+                let centroids = part.centroids[elementIndex]
+                var keptIndices: [UInt32] = []
+                keptIndices.reserveCapacity(triangles.count * 3)
+                for i in triangles.indices {
+                    let p = centroids[i]
+                    guard let candidates = grid[key(p)] else { continue }
+                    var keep = false
+                    for cleanIndex in candidates {
+                        let t = mesh.triangles[cleanIndex]
+                        let a = mesh.vertices[Int(t.x)]
+                        let b = mesh.vertices[Int(t.y)]
+                        let c = mesh.vertices[Int(t.z)]
+                        if Self.distanza2(punto: p, triangolo: (a, b, c)) <= maxDistance2 {
+                            keep = true
+                            break
+                        }
+                    }
+                    if keep {
+                        let t = triangles[i]
+                        keptIndices.append(t.x)
+                        keptIndices.append(t.y)
+                        keptIndices.append(t.z)
+                    }
+                }
+                let data = keptIndices.withUnsafeBytes { Data($0) }
+                elements.append(SCNGeometryElement(
+                    data: data,
+                    primitiveType: .triangles,
+                    primitiveCount: keptIndices.count / 3,
+                    bytesPerIndex: MemoryLayout<UInt32>.size))
+            }
+            let geometry = SCNGeometry(sources: part.sources, elements: elements)
+            geometry.materials = part.materials
+            part.node.geometry = geometry
+        }
+        aggiornaClip()
+    }
+
+    /// Distanza quadrata fra un punto e un triangolo (Real-Time Collision
+    /// Detection, regioni di Voronoi). Evita proiezioni false vicino ai bordi.
+    nonisolated private static func distanza2(
+        punto p: SIMD3<Float>,
+        triangolo: (SIMD3<Float>, SIMD3<Float>, SIMD3<Float>)
+    ) -> Float {
+        let (a, b, c) = triangolo
+        let ab = b - a
+        let ac = c - a
+        let ap = p - a
+        let d1 = simd_dot(ab, ap)
+        let d2 = simd_dot(ac, ap)
+        if d1 <= 0, d2 <= 0 { return simd_length_squared(ap) }
+
+        let bp = p - b
+        let d3 = simd_dot(ab, bp)
+        let d4 = simd_dot(ac, bp)
+        if d3 >= 0, d4 <= d3 { return simd_length_squared(bp) }
+
+        let vc = d1 * d4 - d3 * d2
+        if vc <= 0, d1 >= 0, d3 <= 0 {
+            let v = d1 / (d1 - d3)
+            return simd_length_squared(p - (a + v * ab))
+        }
+
+        let cp = p - c
+        let d5 = simd_dot(ab, cp)
+        let d6 = simd_dot(ac, cp)
+        if d6 >= 0, d5 <= d6 { return simd_length_squared(cp) }
+
+        let vb = d5 * d2 - d1 * d6
+        if vb <= 0, d2 >= 0, d6 <= 0 {
+            let w = d2 / (d2 - d6)
+            return simd_length_squared(p - (a + w * ac))
+        }
+
+        let va = d3 * d6 - d5 * d4
+        if va <= 0, d4 - d3 >= 0, d5 - d6 >= 0 {
+            let w = (d4 - d3) / ((d4 - d3) + (d5 - d6))
+            return simd_length_squared(p - (b + w * (c - b)))
+        }
+
+        let denom = 1 / (va + vb + vc)
+        let v = vb * denom
+        let w = vc * denom
+        return simd_length_squared(p - (a + ab * v + ac * w))
     }
 
     nonisolated private static func caricaOBJEditabile(_ url: URL) -> EditableMesh? {
@@ -3719,9 +3918,10 @@ final class Mesh3DModel: ObservableObject {
     /// Aggiorna i parametri di clip del materiale mesh dal box corrente.
     /// In modalità Box il clip è attivo → la mesh fuori dal box sparisce.
     private func aggiornaClip() {
-        guard let mat = contentNode.geometry?.firstMaterial else { return }
+        var materials = contentNode.geometry?.materials ?? []
+        materials.append(contentsOf: ocTextureParts.flatMap(\.materials))
+        guard !materials.isEmpty else { return }
         let clipAttivo = strumento == .box
-        mat.shaderModifiers = clipAttivo ? [.surface: MeshFactory.clipModifier] : nil
         let rt = boxRot.transpose
         let t = -(rt * frameOrigin)
         let inv = simd_float4x4(
@@ -3729,10 +3929,13 @@ final class Mesh3DModel: ObservableObject {
             SIMD4<Float>(rt.columns.1, 0),
             SIMD4<Float>(rt.columns.2, 0),
             SIMD4<Float>(t, 1))
-        mat.setValue(SCNVector3(boxLo.x, boxLo.y, boxLo.z), forKey: "clipLo")
-        mat.setValue(SCNVector3(boxHi.x, boxHi.y, boxHi.z), forKey: "clipHi")
-        mat.setValue(NSValue(scnMatrix4: SCNMatrix4(inv)), forKey: "clipInv")
-        mat.setValue(Float(clipAttivo ? 1 : 0), forKey: "clipOn")
+        for material in materials {
+            material.shaderModifiers = clipAttivo ? [.surface: MeshFactory.clipModifier] : nil
+            material.setValue(SCNVector3(boxLo.x, boxLo.y, boxLo.z), forKey: "clipLo")
+            material.setValue(SCNVector3(boxHi.x, boxHi.y, boxHi.z), forKey: "clipHi")
+            material.setValue(NSValue(scnMatrix4: SCNMatrix4(inv)), forKey: "clipInv")
+            material.setValue(Float(clipAttivo ? 1 : 0), forKey: "clipOn")
+        }
     }
 
     private func ricostruisciBox() {
