@@ -1,7 +1,11 @@
 venv/
 .venv/
 __pycache__/
+**/venv/
+**/.venv/
+**/__pycache__/
 *.pyc
 data/
 tests/
+photogrammetry/
 .env

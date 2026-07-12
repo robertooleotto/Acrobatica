@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.16)
+project(cgal_regiongrow)
+set(CMAKE_CXX_STANDARD 17)
+find_package(CGAL REQUIRED)
+find_path(EIGEN3_INCLUDE_DIR Eigen/Dense PATH_SUFFIXES eigen3 REQUIRED)
+add_executable(rg main.cpp)
+target_include_directories(rg PRIVATE ${EIGEN3_INCLUDE_DIR})
+target_link_libraries(rg PRIVATE CGAL::CGAL)

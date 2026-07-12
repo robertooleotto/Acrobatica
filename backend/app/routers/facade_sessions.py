@@ -9,6 +9,7 @@ e ricaricate come output. Niente persistenza locale.
 """
 from __future__ import annotations
 import json
+import math
 import os
 import subprocess
 import sys
@@ -1157,12 +1158,11 @@ _BACKEND_ROOT = Path(__file__).resolve().parents[2]
 
 
 @router.post("/{session_id}/detect-planes", response_model=DetectPlanesResult)
-def detect_planes(session_id: str, up: Optional[list[float]] = Body(None, embed=True)):
-    """Rileva i piani facciata sulla mesh della sessione col detector a istogrammi
-    (scripts/proto_planes_histogram.py: assi di gravità + fusione complanari + filtri).
-    `up` = gravità nota nel frame mesh (default [0,1,0] per le mesh OC). Scarica la
-    mesh da storage, gira il detector e ritorna i piani (quad + tipo) pronti per
-    l'editor. È il motore di 'riconosci piani' dell'app."""
+def detect_planes(session_id: str, payload: Optional[dict] = Body(None)):
+    """Rileva i piani fondendo regioni CGAL e perimetri orizzontali regolarizzati.
+    `up` indica la gravita nel frame mesh; `scale_m_per_mesh_unit` imposta la scala
+    reale della sessione. Open3D e istogrammi restano fallback automatici. Ritorna
+    le facce saldate e pronte per l'editor 3D."""
     sess = session_store.get_session(session_id)
     if sess is None:
         raise HTTPException(404, "Sessione non trovata")
@@ -1187,7 +1187,17 @@ def detect_planes(session_id: str, up: Optional[list[float]] = Body(None, embed=
         raise HTTPException(409, "Nessuna mesh .obj caricata per questa sessione "
                                  "(carica/ricalcola la mesh prima di rilevare i piani)")
 
-    up_vec = up if (up and len(up) == 3) else [0.0, 1.0, 0.0]
+    payload = payload or {}
+    up = payload.get("up")
+    up_vec = up if (isinstance(up, list) and len(up) == 3) else [0.0, 1.0, 0.0]
+    requested_scale = payload.get("scale_m_per_mesh_unit", payload.get("scale"))
+    try:
+        oc_scale = float(requested_scale if requested_scale is not None
+                         else os.environ.get("ACRO_OC_SCALE", "6.0927"))
+    except (TypeError, ValueError):
+        raise HTTPException(422, "scale_m_per_mesh_unit deve essere un numero positivo")
+    if not math.isfinite(oc_scale) or oc_scale <= 0:
+        raise HTTPException(422, "scale_m_per_mesh_unit deve essere un numero positivo")
     with tempfile.TemporaryDirectory(prefix="acro_detect_") as td:
         mesh_local = Path(td) / "mesh.obj"
         mesh_local.write_bytes(storage_service.download_bytes(obj_path))
@@ -1198,6 +1208,26 @@ def detect_planes(session_id: str, up: Optional[list[float]] = Body(None, embed=
         # trapezi). Fallback: v1 istogrammi (solo verticali) se Open3D non c'è.
         doc = None
         engine_error = ""
+        engine = ""
+
+        # Engine 'fused': piani CGAL + sezioni orizzontali regolarizzate e saldate.
+        # ACRO_ENABLE_FUSED=0 permette un rollback immediato a Open3D.
+        fused_enabled = os.environ.get("ACRO_ENABLE_FUSED", "1").lower() not in {"0", "false", "no"}
+        if fused_enabled:
+            try:
+                fused_cmd = [sys.executable, "-m", "scripts.detect_planes_fused",
+                             str(mesh_local), "--out", str(out_base)]
+                fused_cmd += ["--scale", str(oc_scale)]
+                subprocess.run(fused_cmd, cwd=str(_BACKEND_ROOT), check=True,
+                               capture_output=True, text=True, timeout=300)
+                with open(str(out_base) + ".json") as fh:
+                    doc = json.load(fh)
+                raw_planes = doc.get("planes", [])
+                engine = "fused"
+            except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+                doc = None
+                engine_error = ("fused: " + ((getattr(e, "stderr", "") or "") + str(e)))[-400:]
+
         # Su Railway (Nixpacks) LD_LIBRARY_PATH è /usr/lib, ma le librerie apt che
         # servono a open3d (libX11 ecc.) stanno in /usr/lib/x86_64-linux-gnu →
         # estendiamo il path SOLO per il subprocess del detector.
@@ -1205,21 +1235,22 @@ def detect_planes(session_id: str, up: Optional[list[float]] = Body(None, embed=
         env["LD_LIBRARY_PATH"] = ":".join(filter(None, [
             "/usr/lib/x86_64-linux-gnu", "/lib/x86_64-linux-gnu",
             env.get("LD_LIBRARY_PATH", "")]))
-        try:
-            subprocess.run([sys.executable, "-m", "scripts.detect_planes_open3d",
-                            str(mesh_local), "--out", str(out_base), *up_args],
-                           cwd=str(_BACKEND_ROOT), check=True, env=env,
-                           capture_output=True, text=True, timeout=300)
-            with open(str(out_base) + ".json") as fh:
-                doc = json.load(fh)
-            raw_planes = doc.get("planes", [])
-            engine = "open3d"
-        except subprocess.CalledProcessError as e:
-            doc = None
-            engine_error = ((e.stderr or "") + (e.stdout or ""))[-400:]
-        except subprocess.TimeoutExpired:
-            doc = None
-            engine_error = "timeout v2 (300s)"
+        if doc is None:
+            try:
+                subprocess.run([sys.executable, "-m", "scripts.detect_planes_open3d",
+                                str(mesh_local), "--out", str(out_base), *up_args],
+                               cwd=str(_BACKEND_ROOT), check=True, env=env,
+                               capture_output=True, text=True, timeout=300)
+                with open(str(out_base) + ".json") as fh:
+                    doc = json.load(fh)
+                raw_planes = doc.get("planes", [])
+                engine = "open3d"
+            except subprocess.CalledProcessError as e:
+                doc = None
+                engine_error = ((e.stderr or "") + (e.stdout or ""))[-400:]
+            except subprocess.TimeoutExpired:
+                doc = None
+                engine_error = "timeout v2 (300s)"
         if doc is None:
             try:
                 subprocess.run([sys.executable, "-m", "scripts.proto_planes_histogram",
@@ -1246,7 +1277,7 @@ def detect_planes(session_id: str, up: Optional[list[float]] = Body(None, embed=
         triangoli=p.get("triangoli", [])) for p in raw_planes]
     return DetectPlanesResult(session_id=session_id, up=doc.get("up", up_vec),
                               count=len(planes), engine=engine,
-                              engine_error=engine_error if engine != "open3d" else "",
+                              engine_error=engine_error,
                               planes=planes)
 
 
