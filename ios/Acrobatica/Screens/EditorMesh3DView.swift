@@ -1111,7 +1111,10 @@ private struct ViewCubeMini: UIViewRepresentable {
 
         @MainActor @objc func tap(_ g: UITapGestureRecognizer) {
             guard let v = view else { return }
-            let hits = v.hitTest(g.location(in: v), options: [.searchMode: SCNHitTestSearchMode.closest.rawValue])
+            let hits = v.hitTest(g.location(in: v), options: [
+                .searchMode: SCNHitTestSearchMode.closest.rawValue,
+                .categoryBitMask: 1,
+            ])
             guard let h = hits.first else { return }
             let ln = h.localNormal   // normale locale del cubo ≈ ±asse
             let n = SIMD3<Float>(Float(ln.x), Float(ln.y), Float(ln.z))
@@ -1442,7 +1445,10 @@ private struct SceneKitContainer: UIViewRepresentable {
 
         /// Maniglia (angolo "maniglia:f:k" o edge "edge:f:k") sotto `sp`, se c'è.
         @MainActor private func maniglia(sotto sp: CGPoint, in v: SCNView) -> (faccia: Int, edge: Bool, k: Int)? {
-            let hits = v.hitTest(sp, options: [.searchMode: SCNHitTestSearchMode.all.rawValue])
+            let hits = v.hitTest(sp, options: [
+                .searchMode: SCNHitTestSearchMode.all.rawValue,
+                .categoryBitMask: 1,
+            ])
             for h in hits {
                 var nodo: SCNNode? = h.node
                 var nome: String?
@@ -1513,7 +1519,10 @@ private struct SceneKitContainer: UIViewRepresentable {
             if model.modoPerimetro { return }
             // Naviga: il tap posa il mirino d'ispezione sulla mesh.
             if model.strumento == .orbita {
-                let hits = v.hitTest(pt, options: [.searchMode: SCNHitTestSearchMode.closest.rawValue])
+                let hits = v.hitTest(pt, options: [
+                    .searchMode: SCNHitTestSearchMode.closest.rawValue,
+                    .categoryBitMask: 1,
+                ])
                 if let h = hits.first(where: { $0.node === model.contentNode }) {
                     model.posizionaCursore(h.worldCoordinates, triangolo: h.faceIndex)
                 }
@@ -1525,7 +1534,10 @@ private struct SceneKitContainer: UIViewRepresentable {
                 return
             }
             if model.strumento == .assi {
-                let hits = v.hitTest(pt, options: [.searchMode: SCNHitTestSearchMode.closest.rawValue])
+                let hits = v.hitTest(pt, options: [
+                    .searchMode: SCNHitTestSearchMode.closest.rawValue,
+                    .categoryBitMask: 1,
+                ])
                 if let h = hits.first(where: { $0.node === model.contentNode }) {
                     model.aggiungiPuntoAssiManuali(h.worldCoordinates)
                 }
@@ -1538,7 +1550,10 @@ private struct SceneKitContainer: UIViewRepresentable {
                        let p = model.posizioneVertice(faccia: m.faccia, k: m.k) {
                         model.allineaConSorgente(p)
                     } else {
-                        let hits = v.hitTest(pt, options: [.searchMode: SCNHitTestSearchMode.closest.rawValue])
+                        let hits = v.hitTest(pt, options: [
+                            .searchMode: SCNHitTestSearchMode.closest.rawValue,
+                            .categoryBitMask: 1,
+                        ])
                         if let h = hits.first(where: { $0.node === model.contentNode }) {
                             let w = h.worldCoordinates
                             model.allineaConSorgente(SIMD3<Float>(w.x, w.y, w.z))
@@ -1553,13 +1568,19 @@ private struct SceneKitContainer: UIViewRepresentable {
                 case .spigolo:
                     if let m = maniglia(sotto: pt, in: v), m.edge { model.toggleSpigoloAllinea(faccia: m.faccia, k: m.k) }
                 case .faccia:
-                    let tutti = v.hitTest(pt, options: [.searchMode: SCNHitTestSearchMode.all.rawValue])
+                    let tutti = v.hitTest(pt, options: [
+                        .searchMode: SCNHitTestSearchMode.all.rawValue,
+                        .categoryBitMask: 1,
+                    ])
                     for hh in tutti {
                         if let nm = hh.node.name, nm.hasPrefix("piano:"), let id = Int(nm.dropFirst("piano:".count)) {
                             model.toggleFacciaAllinea(id); return
                         }
                     }
-                    let hits = v.hitTest(pt, options: [.searchMode: SCNHitTestSearchMode.closest.rawValue])
+                    let hits = v.hitTest(pt, options: [
+                        .searchMode: SCNHitTestSearchMode.closest.rawValue,
+                        .categoryBitMask: 1,
+                    ])
                     if let h = hits.first(where: { $0.node === model.contentNode }),
                        let g = model.facce.first(where: { $0.triangoli.contains(h.faceIndex) }) {
                         model.toggleFacciaAllinea(g.id)
@@ -1569,7 +1590,10 @@ private struct SceneKitContainer: UIViewRepresentable {
             }
             // Facce + attesa punto zero: il tap fissa il punto zero sul muro.
             if model.strumento == .facce && model.attendePuntoZero {
-                let hits = v.hitTest(pt, options: [.searchMode: SCNHitTestSearchMode.closest.rawValue])
+                let hits = v.hitTest(pt, options: [
+                    .searchMode: SCNHitTestSearchMode.closest.rawValue,
+                    .categoryBitMask: 1,
+                ])
                 if let h = hits.first(where: { $0.node === model.contentNode }) {
                     model.impostaPuntoZero(h.worldCoordinates)
                 }
@@ -1589,14 +1613,20 @@ private struct SceneKitContainer: UIViewRepresentable {
                 }
                 // Piano solo-poligono (es. facciata estrusa): selezionabile dal suo
                 // riempimento "piano:<id>".
-                let tutti = v.hitTest(pt, options: [.searchMode: SCNHitTestSearchMode.all.rawValue])
+                let tutti = v.hitTest(pt, options: [
+                    .searchMode: SCNHitTestSearchMode.all.rawValue,
+                    .categoryBitMask: 1,
+                ])
                 for hh in tutti {
                     if let nm = hh.node.name, nm.hasPrefix("piano:"),
                        let id = Int(nm.dropFirst("piano:".count)) {
                         model.selezionaFacciaAttiva(id); return
                     }
                 }
-                let hits = v.hitTest(pt, options: [.searchMode: SCNHitTestSearchMode.closest.rawValue])
+                let hits = v.hitTest(pt, options: [
+                    .searchMode: SCNHitTestSearchMode.closest.rawValue,
+                    .categoryBitMask: 1,
+                ])
                 guard let h = hits.first(where: { $0.node === model.contentNode }) else { return }
                 if let g = model.facce.first(where: { $0.triangoli.contains(h.faceIndex) }) {
                     model.selezionaFacciaAttiva(g.id)
@@ -1610,6 +1640,7 @@ private struct SceneKitContainer: UIViewRepresentable {
             let hits = v.hitTest(pt, options: [
                 .searchMode: SCNHitTestSearchMode.all.rawValue,
                 .ignoreHiddenNodes: true,
+                .categoryBitMask: 1,
             ])
             for h in hits where discendente(h.node, di: model.contentNode) {
                 model.aggiungiPunto(h.worldCoordinates)
@@ -1626,7 +1657,10 @@ private struct SceneKitContainer: UIViewRepresentable {
 
         /// Normale del triangolo colpito sotto `p` (riferimento del vincolo).
         @MainActor private func catturaNormaleRif(_ p: CGPoint, in v: SCNView) {
-            let hits = v.hitTest(p, options: [.searchMode: SCNHitTestSearchMode.closest.rawValue])
+            let hits = v.hitTest(p, options: [
+                .searchMode: SCNHitTestSearchMode.closest.rawValue,
+                .categoryBitMask: 1,
+            ])
             if let h = hits.first(where: { $0.node === model.contentNode }) {
                 refNormale = model.mesh.normale(h.faceIndex)
             } else {
@@ -1642,7 +1676,10 @@ private struct SceneKitContainer: UIViewRepresentable {
         }
 
         @MainActor private func puntoMesh(sotto p: CGPoint, in v: SCNView) -> SCNVector3? {
-            let hits = v.hitTest(p, options: [.searchMode: SCNHitTestSearchMode.closest.rawValue])
+            let hits = v.hitTest(p, options: [
+                .searchMode: SCNHitTestSearchMode.closest.rawValue,
+                .categoryBitMask: 1,
+            ])
             return hits.first(where: { $0.node === model.contentNode })?.worldCoordinates
         }
 
@@ -2046,7 +2083,10 @@ private struct SceneKitContainer: UIViewRepresentable {
             let p = g.location(in: v)
             switch g.state {
             case .began:
-                let hits = v.hitTest(p, options: [.searchMode: SCNHitTestSearchMode.all.rawValue])
+                let hits = v.hitTest(p, options: [
+                    .searchMode: SCNHitTestSearchMode.all.rawValue,
+                    .categoryBitMask: 1,
+                ])
                 cerca: for h in hits {
                     var n: SCNNode? = h.node
                     while let cur = n {   // risali da anello/nucleo al nodo "box:…"
@@ -3347,7 +3387,7 @@ final class Mesh3DModel: ObservableObject {
                 // Conserva il nodo texturizzato OC (nascosto + non selezionabile)
                 // per il toggle "Texture OC", invece di scartarlo.
                 radice.isHidden = true
-                radice.enumerateHierarchy { n, _ in n.categoryBitMask = 0 }
+                radice.enumerateHierarchy { n, _ in n.categoryBitMask = 2 }
                 ocTextureNode = radice
                 meshOriginale = em
                 installaMesh(em)
@@ -3370,7 +3410,50 @@ final class Mesh3DModel: ObservableObject {
             let loaded = try SCNScene(url: url, options: nil)
             let radice = SCNNode()
             for child in loaded.rootNode.childNodes { radice.addChildNode(child) }
-            radice.enumerateHierarchy { node, _ in node.categoryBitMask = 0 }
+
+            // SceneKit lascia spesso `map_Kd` come semplice nome file. Per gli
+            // OBJ assegna esplicitamente l'immagine adiacente al materiale.
+            let textureImage: UIImage? = {
+                guard url.pathExtension.lowercased() == "obj",
+                      let files = try? FileManager.default.contentsOfDirectory(
+                        at: url.deletingLastPathComponent(),
+                        includingPropertiesForKeys: nil)
+                else { return nil }
+                let imageURL = files.first { file in
+                    ["png", "jpg", "jpeg"].contains(file.pathExtension.lowercased())
+                }
+                return imageURL.flatMap { UIImage(contentsOfFile: $0.path) }
+            }()
+
+            var haGeometria = false
+            var haMateriale = false
+            radice.enumerateHierarchy { node, _ in
+                // Categoria 2: visibile dalla camera, esclusa dagli hit-test
+                // dell'editor che lavorano sulla categoria 1.
+                node.categoryBitMask = 2
+                guard let geometry = node.geometry else { return }
+                haGeometria = true
+                for material in geometry.materials {
+                    if let textureImage {
+                        material.diffuse.contents = textureImage
+                        material.lightingModel = .constant
+                    }
+                    material.transparency = 1
+                    if material.diffuse.contents != nil { haMateriale = true }
+                }
+            }
+            guard haGeometria else {
+                cursoreInfo = "Texture OC senza geometria"
+                return false
+            }
+            guard url.pathExtension.lowercased() != "obj" || textureImage != nil else {
+                cursoreInfo = "Immagine della texture OC mancante"
+                return false
+            }
+            guard haMateriale else {
+                cursoreInfo = "Materiale della texture OC mancante"
+                return false
+            }
             radice.isHidden = true
             contentNode.addChildNode(radice)
             ocTextureNode = radice
