@@ -791,8 +791,9 @@ struct EditorMesh3DView: View {
                         Image(systemName: "trash").foregroundStyle(Theme.danger).frame(width: 28, height: 28)
                     }
                 }
-                // Riconoscimento dal pennello: espandi al muro + punto zero.
-                HStack(spacing: 6) {
+                // Riconoscimento dal pennello + revisione multipunto dei piani.
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
                     ChipSelezione("Nuovo layer", "plus.square.on.square") {
                         model.nuovaFaccia()
                     }
@@ -806,7 +807,7 @@ struct EditorMesh3DView: View {
                         model.espandiAlPiano()
                     }
                     Button { model.attivaPuntoZero() } label: {
-                        Label("Punto zero", systemImage: "scope")
+                        Label("Rivedi piani", systemImage: "scope")
                             .font(Theme.Typo.caption(11, .semibold))
                             .foregroundStyle(model.attendePuntoZero ? .white : EditorTheme.testo)
                             .padding(.horizontal, 10).padding(.vertical, 7)
@@ -814,10 +815,24 @@ struct EditorMesh3DView: View {
                                         in: RoundedRectangle(cornerRadius: 8))
                     }
                     if model.attendePuntoZero {
-                        Text("tocca il muro vero")
+                        Text("\(model.numPuntiRevisione) punti")
                             .font(Theme.Typo.caption(10)).foregroundStyle(EditorTheme.accento)
+                        Button { model.applicaRevisionePiani() } label: {
+                            Image(systemName: "checkmark").frame(width: 28, height: 28)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(model.numPuntiRevisione > 0 ? EditorTheme.accento : EditorTheme.testoMuto)
+                        .disabled(model.numPuntiRevisione == 0)
+                        .help("Adatta e salda i piani")
+                        Button { model.annullaRevisionePiani() } label: {
+                            Image(systemName: "xmark").frame(width: 28, height: 28)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(EditorTheme.testoMuto)
+                        .help("Annulla revisione")
                     }
                     Spacer()
+                    }
                 }
                 // Rifinitura piano (§6): squadra/verticale/orizzontale/offset.
                 if fa.pianoNormale != nil {
@@ -1588,14 +1603,14 @@ private struct SceneKitContainer: UIViewRepresentable {
                 }
                 return
             }
-            // Facce + attesa punto zero: il tap fissa il punto zero sul muro.
+            // Revisione piani: ogni tap associa un riferimento al piano corrispondente.
             if model.strumento == .facce && model.attendePuntoZero {
                 let hits = v.hitTest(pt, options: [
                     .searchMode: SCNHitTestSearchMode.closest.rawValue,
                     .categoryBitMask: 1,
                 ])
                 if let h = hits.first(where: { $0.node === model.contentNode }) {
-                    model.impostaPuntoZero(h.worldCoordinates)
+                    model.aggiungiPuntoRevisione(h.worldCoordinates, triangolo: h.faceIndex)
                 }
                 return
             }
@@ -2531,6 +2546,12 @@ private struct ManigliaPoligonoAttiva {
     let indice: Int
 }
 
+private struct PuntoRevisionePiano {
+    let punto: SIMD3<Float>
+    let triangolo: Int
+    let pianoId: Int
+}
+
 /// Faccia del box di lavoro trascinabile (una maniglia per lato).
 enum FacciaBox: String {
     case xMin, xMax, yMin, yMax, zMin, zMax
@@ -2553,6 +2574,7 @@ final class Mesh3DModel: ObservableObject {
     private let perimetroNode = SCNNode() // slice orizzontale + traccia del perimetro
     private let assiManualiNode = SCNNode() // linee manuali per il frame editor
     private let cursoreNode = SCNNode()   // mirino 3D d'ispezione
+    private let revisionePianiNode = SCNNode() // riferimenti utente per il rifit dei piani
 
     @Published var numVertici = 0
     @Published var numTriangoli = 0
@@ -3286,6 +3308,7 @@ final class Mesh3DModel: ObservableObject {
         contentNode.addChildNode(cursoreNode)
         markersNode.addChildNode(lineNode)
         scene.rootNode.addChildNode(markersNode)
+        contentNode.addChildNode(revisionePianiNode)
 
         // Key light direzionale + ambient soft: stacco di rilievo sulle
         // sporgenze. La camera la gestisce il defaultCameraController (orbit).
@@ -3308,6 +3331,7 @@ final class Mesh3DModel: ObservableObject {
         mesh = m
         selezione = []
         facce = []; facciaAttivaId = nil; pianiGenerati = 0; mostraPiani = false
+        annullaRevisionePiani()
         haPianoBase = false; renderPianoBase(); annullaFaccia(); nascondiCursore()
         resetAssiManuali()
         undoStack = []; redoStack = []
@@ -3888,6 +3912,7 @@ final class Mesh3DModel: ObservableObject {
         let sel = inverti ? mesh.triangoliDentro(frameOrigin, boxRot, boxLo, boxHi)
                           : mesh.triangoliFuori(frameOrigin, boxRot, boxLo, boxHi)
         guard !sel.isEmpty else { return }
+        annullaRevisionePiani()
         registraUndo()
         let remap = mesh.elimina(sel)
         meshRevision += 1
@@ -4038,6 +4063,7 @@ final class Mesh3DModel: ObservableObject {
     /// Cancella i triangoli selezionati dalla mesh (distruttivo, con undo).
     func eliminaSelezione() {
         guard !selezione.isEmpty else { return }
+        annullaRevisionePiani()
         registraUndo()
         let remap = mesh.elimina(selezione)
         meshRevision += 1
@@ -4056,6 +4082,7 @@ final class Mesh3DModel: ObservableObject {
 
     func undo() {
         guard let (m, s, f) = undoStack.popLast() else { return }
+        annullaRevisionePiani()
         redoStack.append((mesh, selezione, facce))
         mesh = m; selezione = s; facce = f
         meshRevision += 1
@@ -4065,6 +4092,7 @@ final class Mesh3DModel: ObservableObject {
 
     func redo() {
         guard let (m, s, f) = redoStack.popLast() else { return }
+        annullaRevisionePiani()
         undoStack.append((mesh, selezione, facce))
         mesh = m; selezione = s; facce = f
         meshRevision += 1
@@ -6089,10 +6117,13 @@ final class Mesh3DModel: ObservableObject {
         ridisegnaFacce()
     }
 
-    // MARK: Crescita dal pennello + punto zero (§3, brush-seeded)
+    // MARK: Crescita dal pennello + revisione piani (§3, brush-seeded)
 
-    /// In attesa che l'utente tocchi il muro per fissare il punto zero.
+    /// Modalita' multipunto: i tocchi sulla mesh diventano riferimenti per i
+    /// piani corrispondenti; il rifit viene eseguito solo alla conferma.
     @Published var attendePuntoZero = false
+    @Published private(set) var numPuntiRevisione = 0
+    private var puntiRevisionePiani: [PuntoRevisionePiano] = []
 
     /// Espande la faccia attiva dal pennellato al MURO (region growing per
     /// normale+profondità): un segno piccolo cattura tutta la facciata.
@@ -6153,37 +6184,342 @@ final class Mesh3DModel: ObservableObject {
         ridisegnaFacce(); ridisegnaPiani()
     }
 
-    /// Avvia/annulla la modalità "tocca il muro per il punto zero".
-    func attivaPuntoZero() { attendePuntoZero.toggle() }
-
-    /// Fissa il punto zero della faccia attiva sul punto toccato del muro:
-    /// il piano mantiene l'ORIENTAMENTO ma viene ancorato lì (finestre/balconi
-    /// restano fuori e si appiattiscono sul piano).
-    func impostaPuntoZero(_ world: SCNVector3) {
-        attendePuntoZero = false
-        guard let id = facciaAttivaId,
-              let i = facce.firstIndex(where: { $0.id == id }) else { return }
-        registraUndo()
-        let p = SIMD3<Float>(world.x, world.y, world.z)
-        // Normale: quella già fittata, o ricavata dai triangoli, o dal piano base.
-        let n = simd_normalize(facce[i].pianoNormale
-            ?? mesh.fitPiano(facce[i].triangoli)?.normale
-            ?? (haPianoBase ? pianoBaseNormale : SIMD3<Float>(0, 0, 1)))
-        facce[i].pianoNormale = n
-        // Ancora il piano al punto toccato lungo la normale (mantiene orientamento e
-        // forma): per i piani solo-poligono trasla il poligono, altrimenti sposta il punto.
-        if var poly = facce[i].poligono, !poly.isEmpty {
-            let c = poly.reduce(SIMD3<Float>(0, 0, 0), +) / Float(poly.count)
-            let off = simd_dot(p - c, n)
-            for k in poly.indices { poly[k] += n * off }
-            facce[i].poligono = poly
-            facce[i].pianoPunto = poly.reduce(SIMD3<Float>(0, 0, 0), +) / Float(poly.count)
+    /// Avvia una nuova revisione o annulla quella in corso.
+    func attivaPuntoZero() {
+        if attendePuntoZero {
+            annullaRevisionePiani()
         } else {
-            facce[i].pianoPunto = p
+            puntiRevisionePiani.removeAll()
+            numPuntiRevisione = 0
+            ridisegnaPuntiRevisione()
+            attendePuntoZero = true
         }
-        facce[i].erroreRms = mesh.rmsDalPiano(facce[i].triangoli, punto: facce[i].pianoPunto ?? p, normale: n)
+    }
+
+    func annullaRevisionePiani() {
+        attendePuntoZero = false
+        puntiRevisionePiani.removeAll()
+        numPuntiRevisione = 0
+        ridisegnaPuntiRevisione()
+    }
+
+    /// Associa il punto al piano che possiede il triangolo toccato. Se il punto
+    /// cade su una sporgenza non assegnata, usa distanza, normale e poligono per
+    /// risalire alla facciata architettonica sottostante.
+    func aggiungiPuntoRevisione(_ world: SCNVector3, triangolo: Int) {
+        guard attendePuntoZero, triangolo >= 0, triangolo < mesh.triangles.count else { return }
+        let p = SIMD3<Float>(world.x, world.y, world.z)
+        guard let id = pianoAssociatoAlPunto(p, triangolo: triangolo) else {
+            errore = "Il punto non e' associabile a un piano. Tocca piu' vicino alla facciata."
+            return
+        }
+        puntiRevisionePiani.append(PuntoRevisionePiano(punto: p, triangolo: triangolo, pianoId: id))
+        numPuntiRevisione = puntiRevisionePiani.count
+        facciaAttivaId = id
+        facceSelezionate.insert(id)
         mostraPiani = true
+        ridisegnaPuntiRevisione()
         ridisegnaPiani()
+    }
+
+    private func pianoAssociatoAlPunto(_ punto: SIMD3<Float>, triangolo: Int) -> Int? {
+        if let face = facce.first(where: { $0.triangoli.contains(triangolo) }) { return face.id }
+        let normalHit = mesh.normale(triangolo)
+        var best: (id: Int, score: Float)?
+        for face in facce {
+            guard let point = face.pianoPunto, let normal0 = face.pianoNormale else { continue }
+            let normal = simd_normalize(normal0)
+            let projected = punto - normal * simd_dot(punto - point, normal)
+            let planeDistance = abs(simd_dot(punto - point, normal))
+            let normalPenalty = (1 - abs(simd_dot(normalHit, normal))) * estensioneMesh * 0.06
+            var outlinePenalty: Float = 0
+            if let polygon = face.poligono, polygon.count >= 3,
+               !puntoNelPoligonoPiano(projected, polygon: polygon, point: point, normal: normal) {
+                outlinePenalty = (polygon.indices.map {
+                    distanzaPuntoSegmento(projected, polygon[$0], polygon[($0 + 1) % polygon.count])
+                }.min() ?? estensioneMesh) * 0.35
+            }
+            let score = planeDistance + normalPenalty + outlinePenalty
+            if best == nil || score < best!.score { best = (face.id, score) }
+        }
+        guard let result = best, result.score <= estensioneMesh * 0.18 else { return nil }
+        return result.id
+    }
+
+    /// Applica in un unico passaggio annullabile il rifit dei piani indicati e
+    /// rende esatti gli spigoli condivisi fra le facciate adiacenti.
+    func applicaRevisionePiani() {
+        guard !puntiRevisionePiani.isEmpty else { return }
+        registraUndo()
+        let gruppi = Dictionary(grouping: puntiRevisionePiani, by: \.pianoId)
+        var aggiornati = Set<Int>()
+        for (id, punti) in gruppi where rifittaPianoRevisionato(id, riferimenti: punti) {
+            aggiornati.insert(id)
+        }
+        if !aggiornati.isEmpty { saldaPianiAdiacenti() }
+        attendePuntoZero = false
+        puntiRevisionePiani.removeAll()
+        numPuntiRevisione = 0
+        ridisegnaPuntiRevisione()
+        mostraPiani = true
+        ridisegnaFacce()
+        ridisegnaPiani()
+    }
+
+    private func rifittaPianoRevisionato(
+        _ id: Int,
+        riferimenti: [PuntoRevisionePiano]
+    ) -> Bool {
+        guard let index = facce.firstIndex(where: { $0.id == id }), !riferimenti.isEmpty else { return false }
+        if facce[index].poligono == nil { generaPoligono(perFaccia: id) }
+        guard let oldPoint = facce[index].pianoPunto,
+              let oldNormal0 = facce[index].pianoNormale else { return false }
+        let oldNormal = simd_normalize(oldNormal0)
+        let su = simd_normalize(gravitaSu)
+        let anchorMean = riferimenti.map(\.punto).reduce(SIMD3<Float>(repeating: 0), +)
+            / Float(riferimenti.count)
+        let anchorQuota = mediana(riferimenti.map { simd_dot($0.punto, su) })
+        let polygon = facce[index].poligono ?? []
+
+        var oldRight = simd_cross(su, oldNormal)
+        if simd_length(oldRight) < 1e-5 { oldRight = simd_cross(SIMD3<Float>(1, 0, 0), oldNormal) }
+        oldRight = simd_normalize(oldRight)
+        let oldXs = polygon.map { simd_dot($0 - oldPoint, oldRight) }
+        let oldMinX = (oldXs.min() ?? -estensioneMesh) - estensioneMesh * 0.06
+        let oldMaxX = (oldXs.max() ?? estensioneMesh) + estensioneMesh * 0.06
+        let cosOrientation = cos(55 * Float.pi / 180)
+
+        // La fascia bassa indicata dai riferimenti stima l'inclinazione del muro
+        // senza far prevalere balconi e parapetti presenti alle quote superiori.
+        var orientationSupport = mesh.crescePianare(
+            da: Set(riferimenti.map(\.triangolo)),
+            normale: oldNormal,
+            punto: anchorMean,
+            tolGradi: 35,
+            tolDistFraz: 0.018,
+            adiacenza: adiacenza())
+        for triangleIndex in mesh.triangles.indices {
+            let center = mesh.centroid(mesh.triangles[triangleIndex])
+            let quota = simd_dot(center, su)
+            guard quota >= anchorQuota - estensioneMesh * 0.04,
+                  quota <= anchorQuota + estensioneMesh * 0.22,
+                  abs(simd_dot(center - anchorMean, oldNormal)) <= estensioneMesh * 0.06,
+                  abs(simd_dot(mesh.normale(triangleIndex), oldNormal)) >= cosOrientation else { continue }
+            let x = simd_dot(center - oldPoint, oldRight)
+            if x >= oldMinX, x <= oldMaxX { orientationSupport.insert(triangleIndex) }
+        }
+        guard orientationSupport.count >= 3,
+              let (_, fittedNormal0) = mesh.fitPianoRANSAC(
+                orientationSupport, iters: 220, tolDistFraz: 0.0045, tolGradi: 30) else { return false }
+        var fittedNormal = simd_normalize(fittedNormal0)
+        if simd_dot(fittedNormal, oldNormal) < 0 { fittedNormal = -fittedNormal }
+
+        // Tutti i riferimenti hanno peso uguale sull'offset: la mediana evita che
+        // un singolo tocco accidentale sposti l'intera facciata.
+        let anchorOffset = mediana(riferimenti.map { simd_dot($0.punto, fittedNormal) })
+        let fittedPoint = anchorMean + fittedNormal
+            * (anchorOffset - simd_dot(anchorMean, fittedNormal))
+
+        var right = simd_cross(su, fittedNormal)
+        if simd_length(right) < 1e-5 { right = simd_cross(SIMD3<Float>(1, 0, 0), fittedNormal) }
+        right = simd_normalize(right)
+        let up = simd_normalize(simd_cross(fittedNormal, right))
+        let projectedOldX = polygon.map { simd_dot($0 - fittedPoint, right) }
+        let minAllowedX = (projectedOldX.min() ?? -estensioneMesh) - estensioneMesh * 0.08
+        let maxAllowedX = (projectedOldX.max() ?? estensioneMesh) + estensioneMesh * 0.08
+        let cosSupport = cos(50 * Float.pi / 180)
+        let distanceTolerance = max(estensioneMesh * 0.022, 1e-4)
+        var support = Set<Int>()
+        for triangleIndex in mesh.triangles.indices {
+            let center = mesh.centroid(mesh.triangles[triangleIndex])
+            guard abs(simd_dot(center - fittedPoint, fittedNormal)) <= distanceTolerance,
+                  abs(simd_dot(mesh.normale(triangleIndex), fittedNormal)) >= cosSupport else { continue }
+            let x = simd_dot(center - fittedPoint, right)
+            if x >= minAllowedX, x <= maxAllowedX { support.insert(triangleIndex) }
+        }
+        if support.count < 8 { support = orientationSupport }
+        guard !support.isEmpty else { return false }
+
+        var xs: [Float] = []
+        var ys: [Float] = []
+        xs.reserveCapacity(support.count * 3)
+        ys.reserveCapacity(support.count * 3)
+        for triangleIndex in support {
+            let triangle = mesh.triangles[triangleIndex]
+            for vertex in [mesh.vertices[Int(triangle.x)], mesh.vertices[Int(triangle.y)], mesh.vertices[Int(triangle.z)]] {
+                xs.append(simd_dot(vertex - fittedPoint, right))
+                ys.append(simd_dot(vertex - fittedPoint, up))
+            }
+        }
+        xs.sort(); ys.sort()
+        guard xs.count >= 3, ys.count >= 3 else { return false }
+        func percentile(_ values: [Float], _ fraction: Float) -> Float {
+            values[min(values.count - 1, max(0, Int((Float(values.count - 1) * fraction).rounded())))]
+        }
+        let minX = percentile(xs, 0.006)
+        let maxX = percentile(xs, 0.994)
+        let anchorY = mediana(riferimenti.map { simd_dot($0.punto - fittedPoint, up) })
+        let supportMinY = percentile(ys, 0.006)
+        let minY = min(anchorY, percentile(ys, 0.08)) >= supportMinY - estensioneMesh * 0.03
+            ? anchorY : supportMinY
+        let maxY = percentile(ys, 0.996)
+        guard maxX - minX > estensioneMesh * 0.002,
+              maxY - minY > estensioneMesh * 0.002 else { return false }
+        func point(_ x: Float, _ y: Float) -> SIMD3<Float> { fittedPoint + right * x + up * y }
+
+        facce[index].pianoPunto = fittedPoint
+        facce[index].pianoNormale = fittedNormal
+        facce[index].triangoli = support
+        facce[index].erroreRms = mesh.rmsDalPiano(support, punto: fittedPoint, normale: fittedNormal)
+        facce[index].poligono = [
+            point(minX, minY), point(maxX, minY),
+            point(maxX, maxY), point(minX, maxY),
+        ]
+        return true
+    }
+
+    /// Estende le coppie di facciate fino alla loro retta d'intersezione e
+    /// assegna a entrambe gli stessi estremi, creando un edge realmente condiviso.
+    private func saldaPianiAdiacenti() {
+        guard facce.count >= 2 else { return }
+        let su = simd_normalize(gravitaSu)
+        let maxDistance = estensioneMesh * 0.12
+        let minOverlap = estensioneMesh * 0.015
+
+        func edgeVicino(
+            _ polygon: [SIMD3<Float>],
+            linePoint: SIMD3<Float>,
+            lineDirection: SIMD3<Float>
+        ) -> (index: Int, distance: Float, minT: Float, maxT: Float)? {
+            var result: (Int, Float, Float, Float)?
+            for k in polygon.indices {
+                let a = polygon[k], b = polygon[(k + 1) % polygon.count]
+                let edge = b - a
+                guard simd_length(edge) > 1e-6,
+                      abs(simd_dot(simd_normalize(edge), lineDirection)) >= 0.65 else { continue }
+                let middle = (a + b) * 0.5
+                let projected = linePoint + lineDirection * simd_dot(middle - linePoint, lineDirection)
+                let distance = simd_length(middle - projected)
+                let ta = simd_dot(a - linePoint, lineDirection)
+                let tb = simd_dot(b - linePoint, lineDirection)
+                if result == nil || distance < result!.1 {
+                    result = (k, distance, min(ta, tb), max(ta, tb))
+                }
+            }
+            return result
+        }
+
+        for _ in 0..<2 {
+            for aIndex in facce.indices {
+                for bIndex in facce.indices where bIndex > aIndex {
+                    guard let normalA0 = facce[aIndex].pianoNormale,
+                          let normalB0 = facce[bIndex].pianoNormale,
+                          let pointA = facce[aIndex].pianoPunto,
+                          let pointB = facce[bIndex].pianoPunto,
+                          var polygonA = facce[aIndex].poligono, polygonA.count >= 3,
+                          var polygonB = facce[bIndex].poligono, polygonB.count >= 3 else { continue }
+                    let normalA = simd_normalize(normalA0)
+                    let normalB = simd_normalize(normalB0)
+                    guard abs(simd_dot(normalA, su)) < 0.65,
+                          abs(simd_dot(normalB, su)) < 0.65,
+                          abs(simd_dot(normalA, normalB)) < cos(15 * Float.pi / 180) else { continue }
+                    let cross = simd_cross(normalA, normalB)
+                    guard simd_length(cross) > 1e-4 else { continue }
+                    let direction = simd_normalize(cross)
+                    guard abs(simd_dot(direction, su)) >= 0.55,
+                          let linePoint = puntoSuRetta(
+                            nA: normalA, pA: pointA, nB: normalB, pB: pointB, dir: direction),
+                          let edgeA = edgeVicino(polygonA, linePoint: linePoint, lineDirection: direction),
+                          let edgeB = edgeVicino(polygonB, linePoint: linePoint, lineDirection: direction),
+                          edgeA.distance <= maxDistance, edgeB.distance <= maxDistance else { continue }
+                    let low = max(edgeA.minT, edgeB.minT)
+                    let high = min(edgeA.maxT, edgeB.maxT)
+                    guard high - low >= minOverlap else { continue }
+                    let sharedLow = linePoint + direction * low
+                    let sharedHigh = linePoint + direction * high
+
+                    func assign(_ polygon: inout [SIMD3<Float>], edge: Int) {
+                        let next = (edge + 1) % polygon.count
+                        let edgeT = simd_dot(polygon[edge] - linePoint, direction)
+                        let nextT = simd_dot(polygon[next] - linePoint, direction)
+                        if edgeT <= nextT {
+                            polygon[edge] = sharedLow; polygon[next] = sharedHigh
+                        } else {
+                            polygon[edge] = sharedHigh; polygon[next] = sharedLow
+                        }
+                    }
+                    assign(&polygonA, edge: edgeA.index)
+                    assign(&polygonB, edge: edgeB.index)
+                    facce[aIndex].poligono = polygonA
+                    facce[bIndex].poligono = polygonB
+                }
+            }
+        }
+    }
+
+    private func mediana(_ values: [Float]) -> Float {
+        guard !values.isEmpty else { return 0 }
+        let sorted = values.sorted()
+        let middle = sorted.count / 2
+        return sorted.count.isMultiple(of: 2)
+            ? (sorted[middle - 1] + sorted[middle]) * 0.5 : sorted[middle]
+    }
+
+    private func distanzaPuntoSegmento(
+        _ point: SIMD3<Float>, _ a: SIMD3<Float>, _ b: SIMD3<Float>
+    ) -> Float {
+        let edge = b - a
+        let denominator = simd_length_squared(edge)
+        guard denominator > 1e-10 else { return simd_length(point - a) }
+        let t = max(0, min(1, simd_dot(point - a, edge) / denominator))
+        return simd_length(point - (a + edge * t))
+    }
+
+    private func puntoNelPoligonoPiano(
+        _ point3D: SIMD3<Float>,
+        polygon: [SIMD3<Float>],
+        point origin: SIMD3<Float>,
+        normal: SIMD3<Float>
+    ) -> Bool {
+        var right = simd_cross(gravitaSu, normal)
+        if simd_length(right) < 1e-5 { right = simd_cross(SIMD3<Float>(1, 0, 0), normal) }
+        right = simd_normalize(right)
+        let up = simd_normalize(simd_cross(normal, right))
+        let query = SIMD2<Float>(simd_dot(point3D - origin, right), simd_dot(point3D - origin, up))
+        let polygon2D = polygon.map {
+            SIMD2<Float>(simd_dot($0 - origin, right), simd_dot($0 - origin, up))
+        }
+        var inside = false
+        var previous = polygon2D.count - 1
+        for current in polygon2D.indices {
+            let a = polygon2D[current], b = polygon2D[previous]
+            if (a.y > query.y) != (b.y > query.y) {
+                let crossingX = (b.x - a.x) * (query.y - a.y) / (b.y - a.y) + a.x
+                if query.x < crossingX { inside.toggle() }
+            }
+            previous = current
+        }
+        return inside
+    }
+
+    private func ridisegnaPuntiRevisione() {
+        revisionePianiNode.childNodes.forEach { $0.removeFromParentNode() }
+        for reference in puntiRevisionePiani {
+            let color = facce.first(where: { $0.id == reference.pianoId })?.colore ?? UIColor.systemYellow
+            let sphere = SCNSphere(radius: max(raggioMarker * 0.75, 0.001))
+            sphere.segmentCount = 16
+            let material = SCNMaterial()
+            material.diffuse.contents = color
+            material.emission.contents = color.withAlphaComponent(0.35)
+            material.lightingModel = .constant
+            material.readsFromDepthBuffer = false
+            material.writesToDepthBuffer = false
+            sphere.materials = [material]
+            let node = SCNNode(geometry: sphere)
+            node.position = SCNVector3(reference.punto.x, reference.punto.y, reference.punto.z)
+            node.renderingOrder = 1200
+            revisionePianiNode.addChildNode(node)
+        }
     }
 
     /// Assegna i triangoli pennellati alla faccia attiva (e li toglie dalle altre).
