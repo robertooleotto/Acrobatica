@@ -388,6 +388,28 @@ actor BackendAPIClient {
         return try JSONDecoder().decode(PlanesSaveResult.self, from: data)
     }
 
+    struct ProjectionResult: Codable {
+        let session_id: String
+        let status: String
+        let count: Int
+        let total_area_m2: Double
+        let coverage: Double
+        let main_obj: MeshFileInfo?
+        let files: [MeshFileInfo]
+    }
+
+    /// Avvia il bake cloud. Il timeout della singola richiesta è esteso perché
+    /// selezione foto, raster e upload del bundle avvengono nello stesso job.
+    func projectPlanes(sessionId: String) async throws -> ProjectionResult {
+        let url = baseURL.appendingPathComponent("/facade-sessions/\(sessionId)/project")
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 600
+        let (data, resp) = try await urlSession.data(for: req)
+        try assertHTTPOK(resp, data: data)
+        return try JSONDecoder().decode(ProjectionResult.self, from: data)
+    }
+
     /// Scarica le zone fuori-piano proposte dal backend (pre-marcatura
     /// automatica: balconi/aggetti oltre `sogliaM` dal piano facciata).
     /// Ritorna i Data del documento JSON nello schema di marcatura (lo

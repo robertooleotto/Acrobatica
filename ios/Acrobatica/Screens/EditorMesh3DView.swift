@@ -81,6 +81,39 @@ struct EditorMesh3DView: View {
         }
     }
 
+    private func proiettaTextureSuPiani() {
+        guard let sid = sessionId, !caricandoCloud else { return }
+        let nome = model.nome.replacingOccurrences(of: " ", with: "_")
+        guard let obj = model.esportaMeshRipulita(nomeBase: nome).first,
+              let planes = model.esportaPianiPayload() else {
+            toastCloud = "Servono mesh e piani validi"; return
+        }
+        caricandoCloud = true
+        toastCloud = "Proietto le foto sui piani…"
+        Task {
+            do {
+                _ = try await BackendAPIClient.shared.uploadMesh(
+                    sessionId: sid, fileURL: obj, kind: "clean")
+                _ = try await BackendAPIClient.shared.uploadPlanes(
+                    sessionId: sid, jsonData: planes)
+                let result = try await BackendAPIClient.shared.projectPlanes(sessionId: sid)
+                let bundle = try await BackendAPIClient.shared.downloadMeshBundle(result.files)
+                guard let main = result.main_obj, let url = bundle[main.name] else {
+                    throw NSError(
+                        domain: "AcrobaticaProjection", code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: "OBJ texturizzato non ricevuto"])
+                }
+                try model.caricaPianiTexturizzati(url)
+                toastCloud = String(
+                    format: "Texture pronta: %d piani, copertura %.0f%% ✓",
+                    result.count, result.coverage * 100)
+            } catch {
+                toastCloud = "Proiezione fallita: \(error.localizedDescription)"
+            }
+            caricandoCloud = false
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             barraSuperiore
@@ -189,6 +222,10 @@ struct EditorMesh3DView: View {
                         Label("Salva piani sul cloud", systemImage: "cloud.and.arrow.up")
                     }
                     .disabled(model.facce.isEmpty || caricandoCloud)
+                    Button { proiettaTextureSuPiani() } label: {
+                        Label("Proietta texture sui piani", systemImage: "photo.on.rectangle.angled")
+                    }
+                    .disabled(model.facce.isEmpty || model.numTriangoli == 0 || caricandoCloud)
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")
@@ -2209,6 +2246,7 @@ private struct MultipianoJSON: Codable {
 private struct PianoUploadJSON: Codable {
     let id: Int; let nome: String; let tipo: String; let priorita: Int
     let punto: [Float]; let normale: [Float]
+    let corners: [[Float]]
     let n_triangoli: Int; let triangoli: [Int]
 }
 private struct PianiUploadDoc: Codable {
@@ -2580,6 +2618,7 @@ final class Mesh3DModel: ObservableObject {
     private let assiManualiNode = SCNNode() // linee manuali per il frame editor
     private let cursoreNode = SCNNode()   // mirino 3D d'ispezione
     private let revisionePianiNode = SCNNode() // riferimenti utente per il rifit dei piani
+    private let pianiTexturizzatiNode = SCNNode()
 
     @Published var numVertici = 0
     @Published var numTriangoli = 0
@@ -3314,6 +3353,7 @@ final class Mesh3DModel: ObservableObject {
         markersNode.addChildNode(lineNode)
         scene.rootNode.addChildNode(markersNode)
         contentNode.addChildNode(revisionePianiNode)
+        contentNode.addChildNode(pianiTexturizzatiNode)
 
         // Key light direzionale + ambient soft: stacco di rilievo sulle
         // sporgenze. La camera la gestisce il defaultCameraController (orbit).
@@ -3351,6 +3391,7 @@ final class Mesh3DModel: ObservableObject {
     /// (Ri)costruisce la geometria SceneKit dalla mesh editabile + overlay selezione.
     private func renderMesh() {
         adiacenzaCache = nil   // la mesh è cambiata: invalida l'adiacenza in cache
+        pianiTexturizzatiNode.childNodes.forEach { $0.removeFromParentNode() }
         contentNode.geometry = mesh.scnGeometry(colore: Self.coloreMesh)
         numVertici = mesh.vertexCount
         numTriangoli = mesh.triangleCount
@@ -3511,6 +3552,47 @@ final class Mesh3DModel: ObservableObject {
             cursoreInfo = "Texture OC non caricabile: \(error.localizedDescription)"
             return false
         }
+    }
+
+    /// Installa il bundle OBJ/MTL/PNG prodotto dal baker cloud nello stesso frame
+    /// della mesh OC. Il poligono dei piani resta invariato: cambiano solo UV e materiali.
+    func caricaPianiTexturizzati(_ url: URL) throws {
+        let loaded = try SCNScene(url: url, options: nil)
+        let directory = url.deletingLastPathComponent()
+        var textureCount = 0
+        pianiTexturizzatiNode.childNodes.forEach { $0.removeFromParentNode() }
+        for child in loaded.rootNode.childNodes {
+            child.enumerateHierarchy { node, _ in
+                node.categoryBitMask = 2
+                node.geometry?.materials.forEach { material in
+                    // SceneKit conserva spesso map_Kd come stringa. Risolviamo
+                    // esplicitamente ogni PNG, necessario quando i piani sono molti.
+                    if let path = material.diffuse.contents as? String {
+                        let imageURL = directory.appendingPathComponent(
+                            URL(fileURLWithPath: path).lastPathComponent)
+                        if let image = UIImage(contentsOfFile: imageURL.path) {
+                            material.diffuse.contents = image
+                            textureCount += 1
+                        }
+                    } else if material.diffuse.contents is UIImage {
+                        textureCount += 1
+                    }
+                    material.lightingModel = .constant
+                    material.isDoubleSided = true
+                }
+            }
+            pianiTexturizzatiNode.addChildNode(child)
+        }
+        guard textureCount > 0 else {
+            pianiTexturizzatiNode.childNodes.forEach { $0.removeFromParentNode() }
+            throw NSError(
+                domain: "AcrobaticaProjection", code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "PNG delle texture non leggibili"])
+        }
+        pianiTexturizzatiNode.isHidden = false
+        mostraPiani = false
+        mostraProxy = false
+        cursoreInfo = "Piani texturizzati caricati"
     }
 
     /// Conserva sorgenti, materiali e triangoli originali del livello OC. Gli
@@ -7086,14 +7168,18 @@ final class Mesh3DModel: ObservableObject {
     /// nessun piano valido. Include i triangoli per la maschera sulla mesh pulita.
     func esportaPianiPayload() -> Data? {
         assicuraPiani()   // fitta i piani mancanti senza toccare le rifiniture
+        for f in facce where f.poligono == nil && !f.triangoli.isEmpty {
+            generaPoligono(perFaccia: f.id)
+        }
         let pb: PianoBaseJSON? = haPianoBase ? PianoBaseJSON(
             origine: pianoBaseOrigine.lista, normale: pianoBaseNormale.lista,
             right: pianoBaseRight.lista, up: pianoBaseUp.lista) : nil
         let planes: [PianoUploadJSON] = facce.compactMap { f in
-            guard let p = f.pianoPunto, let n = f.pianoNormale else { return nil }
+            guard let p = f.pianoPunto, let n = f.pianoNormale,
+                  let polygon = f.poligono, polygon.count >= 3 else { return nil }
             return PianoUploadJSON(
                 id: f.id, nome: f.nome, tipo: f.tipo.rawValue, priorita: f.priorita,
-                punto: p.lista, normale: n.lista,
+                punto: p.lista, normale: n.lista, corners: polygon.map(\.lista),
                 n_triangoli: f.triangoli.count, triangoli: f.triangoli.sorted())
         }
         guard !planes.isEmpty else { return nil }

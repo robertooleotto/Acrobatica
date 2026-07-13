@@ -455,13 +455,24 @@ class ProjectionInput(BaseModel):
 
 
 class ProjectionScaffoldResult(BaseModel):
-    """Esito del controllo di prontezza della proiezione foto→piani (scaffold).
-    `ready` = tutti e 4 gli input scaricabili da storage; `missing` = quali mancano."""
+    """Esito del controllo di prontezza della proiezione foto→piani."""
     session_id: str
     ready: bool
     status: str
     inputs: list[ProjectionInput] = []
     missing: list[str] = []
+
+
+class ProjectionResult(BaseModel):
+    """Mesh dei piani texturizzata prodotta dalla proiezione cloud."""
+    session_id: str
+    status: str
+    count: int
+    total_area_m2: float
+    coverage: float
+    main_obj: Optional[MeshFileInfo] = None
+    files: list[MeshFileInfo] = []
+    planes: list[dict] = []
 
 
 class ZonaMarcataModel(BaseModel):

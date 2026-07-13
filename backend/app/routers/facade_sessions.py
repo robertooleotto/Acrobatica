@@ -52,6 +52,7 @@ from ..models import (
     DetectPlanesResult,
     PlanesDataResult,
     PlanesSaveResult,
+    ProjectionResult,
     ProjectionScaffoldResult,
     ProcessRequest,
     ProcessResult,
@@ -1140,16 +1141,18 @@ def get_planes_data(session_id: str):
 
 # ─── Proiezione foto → piani (passo 8) ──────────────────────────────────────
 
-@router.post("/{session_id}/project", response_model=ProjectionScaffoldResult)
+@router.post("/{session_id}/project", response_model=ProjectionResult)
 def project_session(session_id: str):
-    """Proiezione foto→piani. SCAFFOLD: raccoglie e verifica i 4 input scaricandoli
-    da storage (foto, mesh pulita, pose OC, piani) e riporta la prontezza. Non
-    esegue ancora il mosaico né cambia lo stato — serve a validare il plumbing
-    'tutto dal cloud' prima di innestare l'algoritmo."""
-    report = projection_service.gather_inputs(session_id)
-    if report is None:
+    """Proietta le foto OC sui piani revisionati e restituisce OBJ/MTL/PNG."""
+    if session_store.get_session(session_id) is None:
         raise HTTPException(404, "Sessione non trovata")
-    return ProjectionScaffoldResult(session_id=session_id, **report)
+    try:
+        result = projection_service.project(session_id)
+    except projection_service.InputsMissing as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except projection_service.ProjectionError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return ProjectionResult(session_id=session_id, **result)
 
 
 # ─── Rilevamento automatico piani (istogrammi BCS, dal detector python) ──────

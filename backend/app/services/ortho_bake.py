@@ -78,6 +78,8 @@ class Camera:
     fy: float
     cx: float
     cy: float
+    image_width: int
+    image_height: int
     optical: np.ndarray = field(default=None)   # direzione di vista nel mondo
 
     def __post_init__(self):
@@ -90,8 +92,10 @@ def load_cameras(poses: dict) -> list[Camera]:
     for k in keys:
         p = poses[k]
         fx, fy, cx, cy = p["intrinsics_fx_fy_cx_cy"]
+        size = p.get("image_width_height") or [round(cx * 2), round(cy * 2)]
         cams.append(Camera(k, np.asarray(p["translation"], float),
-                           qR(*p["rotation_wxyz"]), fx, fy, cx, cy))
+                           qR(*p["rotation_wxyz"]), fx, fy, cx, cy,
+                           max(int(size[0]), 1), max(int(size[1]), 1)))
     return cams
 
 
@@ -111,17 +115,24 @@ class PlaneFrame:
     origin: np.ndarray       # angolo (min_u, min_v) sul piano, nel mondo
     u: np.ndarray            # asse orizzontale (unitario)
     v: np.ndarray            # asse verticale/gravità (unitario)
+    corners: np.ndarray      # poligono reale, in coordinate mesh
+    polygon_uv: np.ndarray   # coordinate nel rettangolo [0..1]
+    width_world: float
+    height_world: float
     width_m: float
     height_m: float
+    area_m2: float
     tex_w: int
     tex_h: int
     texel_m: float
 
 
 def plane_frame(plane: dict, up_world: np.ndarray, V: np.ndarray,
-                faces: np.ndarray, texel_m: float) -> PlaneFrame | None:
+                faces: np.ndarray, texel_m: float,
+                scale_m_per_mesh_unit: float = 1.0) -> PlaneFrame | None:
     """Costruisce il frame ortho del piano: assi u/v (v = verticale) ed estensione
-    dai triangoli del piano proiettati su u/v. `None` se il piano è degenere."""
+    dal poligono revisionato (`corners`), con fallback ai triangoli. I triangoli
+    sono supporto di riconoscimento e non devono ridimensionare il piano."""
     n = _unit(np.asarray(plane["normale"], float))
     if np.linalg.norm(n) < 1e-6:
         return None
@@ -133,7 +144,10 @@ def plane_frame(plane: dict, up_world: np.ndarray, V: np.ndarray,
     v = _unit(v)
     u = _unit(np.cross(n, v))   # orizzontale nel piano
 
-    pts = _plane_vertices(V, faces, plane.get("triangoli", []))
+    raw_corners = plane.get("corners")
+    pts = np.asarray(raw_corners, float) if isinstance(raw_corners, list) else np.empty((0, 3))
+    if pts.ndim != 2 or pts.shape[1:] != (3,) or len(pts) < 3:
+        pts = _plane_vertices(V, faces, plane.get("triangoli", []))
     if len(pts) < 3:
         return None
     origin0 = np.asarray(plane["punto"], float)
@@ -141,9 +155,16 @@ def plane_frame(plane: dict, up_world: np.ndarray, V: np.ndarray,
     dv = (pts - origin0) @ v
     umin, umax = float(du.min()), float(du.max())
     vmin, vmax = float(dv.min()), float(dv.max())
-    width_m = max(umax - umin, 1e-3)
-    height_m = max(vmax - vmin, 1e-3)
+    width_world = max(umax - umin, 1e-6)
+    height_world = max(vmax - vmin, 1e-6)
+    width_m = width_world * scale_m_per_mesh_unit
+    height_m = height_world * scale_m_per_mesh_unit
     origin = origin0 + u * umin + v * vmin
+    pu = np.column_stack(((du - umin) / width_world, (dv - vmin) / height_world))
+    area_world = 0.5 * abs(float(
+        np.dot(pu[:, 0] * width_world, np.roll(pu[:, 1] * height_world, -1))
+        - np.dot(pu[:, 1] * height_world, np.roll(pu[:, 0] * width_world, -1))))
+    area_m2 = area_world * scale_m_per_mesh_unit ** 2
 
     tw = int(round(width_m / texel_m))
     th = int(round(height_m / texel_m))
@@ -154,7 +175,8 @@ def plane_frame(plane: dict, up_world: np.ndarray, V: np.ndarray,
         th = int(th / s)
     tw = min(max(tw, _TEX_CLAMP[0]), _TEX_CLAMP[1])
     th = min(max(th, _TEX_CLAMP[0]), _TEX_CLAMP[1])
-    return PlaneFrame(origin, u, v, width_m, height_m, tw, th, texel_m)
+    return PlaneFrame(origin, u, v, pts, pu, width_world, height_world,
+                      width_m, height_m, area_m2, tw, th, texel_m)
 
 
 class Occluder:
@@ -205,98 +227,252 @@ def _sample(img, u, v):
     return out
 
 
-def _score(cam: Camera, pts, u_px, v_px, W, H, diag):
-    """Score per-punto (assialità/centralità/prossimità), come project_photos_to_mesh
-    più il bonus di assialità orizzontale del viewer."""
+def _polygon_mask(width: int, height: int, polygon_uv: np.ndarray) -> np.ndarray:
+    xy = np.column_stack((polygon_uv[:, 0] * width,
+                          (1.0 - polygon_uv[:, 1]) * height))
+    mask = np.zeros((height, width), np.uint8)
+    cv2.fillPoly(mask, [np.round(xy).astype(np.int32)], 1)
+    return mask.astype(bool)
+
+
+def _project(cam: Camera, pts: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    pc = (pts - cam.C) @ cam.R
+    z = -pc[:, 2]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        x = cam.fx * pc[:, 0] / z + cam.cx
+        # Convenzione OC validata sui JPEG originali (pixel con origine in alto).
+        y = cam.fy * pc[:, 1] / z + cam.cy
+    return x, y, z
+
+
+def _cell_score(cam: Camera, pts: np.ndarray, x: np.ndarray, y: np.ndarray,
+                W: int, H: int, normal: np.ndarray, up: np.ndarray,
+                proximity_scale: float) -> tuple[np.ndarray, np.ndarray]:
     dirs = pts - cam.C
     dist = np.linalg.norm(dirs, axis=1)
     view = dirs / np.maximum(dist, 1e-6)[:, None]
-    cosang = cam.optical @ view.T            # facing camera-punto (viewer: -viewDir)
-    nx = (u_px - W * 0.5) / (W * 0.5)
-    ny = (v_px - H * 0.5) / (H * 0.5)
-    centrality = 1.0 - np.clip(np.sqrt(nx * nx + ny * ny), 0, 1.4) / 1.4
-    prox = 1.0 / np.maximum(dist, 1e-3 * diag)
-    prox = prox / (prox.max() + 1e-9)
-    return (2.0 * centrality + 1.2 * np.clip(cosang, 0, 1) + 0.35 * prox).astype(np.float32)
+    facing = (-view) @ normal
+    forward = view @ cam.optical
+    plane_h = np.cross(up, normal)
+    hlen = np.linalg.norm(plane_h)
+    if hlen > 1e-6:
+        plane_h /= hlen
+        tan_h = np.abs((-view) @ plane_h) / np.maximum(facing, 0.05)
+        axial = 1.0 / (1.0 + 2.0 * tan_h)
+    else:
+        axial = np.ones(len(pts))
+    cx = x / W
+    cy = y / H
+    centrality = np.maximum(0.0, 1.0 - np.maximum(np.abs(cx * 2 - 1),
+                                                  np.abs(cy * 2 - 1)))
+    proximity = 1.0 / (1.0 + dist / max(proximity_scale, 1e-6))
+    score = 2.0 * axial + 0.4 * facing + 0.8 * centrality + 0.35 * proximity
+    return score.astype(np.float32), (forward > 0.05)
+
+
+def _insert_top(top_scores: np.ndarray, top_cams: np.ndarray,
+                scores: np.ndarray, camera_index: int) -> None:
+    combined_scores = np.column_stack((top_scores, scores))
+    combined_cams = np.column_stack(
+        (top_cams, np.full(len(scores), camera_index, np.int32)))
+    keep = np.argpartition(combined_scores, -6, axis=1)[:, -6:]
+    top_scores[:] = np.take_along_axis(combined_scores, keep, axis=1)
+    top_cams[:] = np.take_along_axis(combined_cams, keep, axis=1)
+    order = np.argsort(top_scores, axis=1)[:, ::-1]
+    top_scores[:] = np.take_along_axis(top_scores, order, axis=1)
+    top_cams[:] = np.take_along_axis(top_cams, order, axis=1)
+
+
+def _select_cameras(top_cams: np.ndarray, valid: np.ndarray,
+                    camera_count: int, max_photos: int,
+                    min_area_fraction: float = 0.02) -> np.ndarray:
+    kept = np.zeros(camera_count, bool)
+    covered = ~valid.copy()
+    min_cells = max(1, int(valid.sum() * min_area_fraction))
+    for _ in range(max_photos):
+        rows = np.where(~covered)[0]
+        if len(rows) == 0:
+            break
+        candidates = top_cams[rows].reshape(-1)
+        candidates = candidates[candidates >= 0]
+        if len(candidates) == 0:
+            break
+        counts = np.bincount(candidates, minlength=camera_count)
+        counts[kept] = 0
+        best = int(np.argmax(counts))
+        if counts[best] < min_cells:
+            break
+        kept[best] = True
+        covered[rows[np.any(top_cams[rows] == best, axis=1)]] = True
+    if not kept.any():
+        first = top_cams[valid, 0]
+        first = first[first >= 0]
+        if len(first):
+            kept[int(np.bincount(first, minlength=camera_count).argmax())] = True
+    return kept
+
+
+def _relax_labels(labels: np.ndarray, top_cams: np.ndarray,
+                  top_scores: np.ndarray, valid: np.ndarray,
+                  width: int, height: int, margin: float = 0.20) -> np.ndarray:
+    grid_valid = valid.reshape(height, width)
+    for _ in range(6):
+        grid = labels.reshape(height, width)
+        neighbors = [grid]
+        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            shifted = np.full_like(grid, -1)
+            ys = slice(max(0, dy), min(height, height + dy))
+            xs = slice(max(0, dx), min(width, width + dx))
+            sy = slice(max(0, -dy), min(height, height - dy))
+            sx = slice(max(0, -dx), min(width, width - dx))
+            shifted[ys, xs] = grid[sy, sx]
+            neighbors.append(shifted)
+        stack = np.stack(neighbors, axis=-1).reshape(-1, 5)
+        counts = np.stack([(stack == stack[:, i:i + 1]).sum(axis=1)
+                           for i in range(5)], axis=1)
+        dominant = stack[np.arange(len(stack)), counts.argmax(axis=1)]
+        matches = top_cams == dominant[:, None]
+        candidate_score = np.where(matches, top_scores, -np.inf).max(axis=1)
+        adopt = valid & (dominant >= 0) & \
+            (candidate_score >= top_scores[:, 0] * (1.0 - margin))
+        updated = labels.copy()
+        updated[adopt] = dominant[adopt]
+        updated[~grid_valid.reshape(-1)] = -1
+        if np.array_equal(updated, labels):
+            break
+        labels = updated
+    return labels
 
 
 def bake_plane(pf: PlaneFrame, cams: list[Camera], photos_dir: str, diag: float,
-               occ: Occluder, plane_normal: np.ndarray,
-               facing_min=0.20, max_photos=80, crop=0.9) -> tuple[np.ndarray, float]:
-    """Ritorna (immagine RGB HxWx3 uint8, copertura 0..1) per un piano."""
-    tw, th = pf.tex_w, pf.tex_h
-    # griglia texel → punti mondo. y-flip: riga 0 = alto (v massimo).
-    xs = (np.arange(tw) + 0.5) / tw * pf.width_m
-    ys = (1.0 - (np.arange(th) + 0.5) / th) * pf.height_m
-    gu, gv = np.meshgrid(xs, ys)                       # (th, tw)
-    world = (pf.origin[None, None, :]
-             + gu[..., None] * pf.u[None, None, :]
-             + gv[..., None] * pf.v[None, None, :]).reshape(-1, 3)
-    N = world.shape[0]
+               occ: Occluder, plane_normal: np.ndarray, up_world: np.ndarray,
+               facing_min=0.342, max_photos=60, crop=0.9,
+               cell_m=0.055,
+               scale_m_per_mesh_unit=1.0) -> tuple[np.ndarray, float, list[int]]:
+    """Bake con lo stesso schema del viewer locale: scelta su celle, copertura
+    greedy, regolarizzazione di continuità e raster finale ad alta risoluzione."""
+    cw = max(2, int(np.ceil(pf.width_m / cell_m)))
+    ch = max(2, int(np.ceil(pf.height_m / cell_m)))
+    if cw * ch > 250_000:
+        factor = np.sqrt(cw * ch / 250_000.0)
+        cw, ch = max(2, int(cw / factor)), max(2, int(ch / factor))
+    mask = _polygon_mask(cw, ch, pf.polygon_uv)
+    cols, rows = np.meshgrid(np.arange(cw), np.arange(ch))
+    gu = (cols.reshape(-1) + 0.5) / cw * pf.width_world
+    gv = (1.0 - (rows.reshape(-1) + 0.5) / ch) * pf.height_world
+    world = pf.origin + gu[:, None] * pf.u + gv[:, None] * pf.v
+    valid_poly = mask.reshape(-1)
 
-    n = _unit(plane_normal)
-    best = np.full(N, -1e9, np.float32)
-    col = np.zeros((N, 3), np.float32)
-    src = np.full(N, -1, np.int32)
-
-    # ordina le camere per quanto guardano frontalmente il piano; scarta le radenti.
-    order = []
-    for ci, cam in enumerate(cams):
-        facing = abs(float(cam.optical @ n))
-        if facing >= facing_min:
-            order.append((facing, ci))
-    order.sort(reverse=True)
-    order = [ci for _, ci in order[:max_photos]]
-
+    n = _unit(np.asarray(plane_normal, float))
+    camera_direction = sum((_unit(cam.C - pf.corners.mean(axis=0)) for cam in cams),
+                           np.zeros(3))
+    if np.dot(n, camera_direction) < 0:
+        n = -n
+    top_scores = np.full((len(world), 6), -np.inf, np.float32)
+    top_cams = np.full((len(world), 6), -1, np.int32)
     cmin, cmax = (1 - crop) * 0.5, 1 - (1 - crop) * 0.5
-    for ci in order:
-        cam = cams[ci]
-        Pc = (world - cam.C) @ cam.R
-        z = -Pc[:, 2]
-        with np.errstate(divide="ignore", invalid="ignore"):
-            u = cam.fx * Pc[:, 0] / z + cam.cx
-            v = cam.fy * Pc[:, 1] / z + cam.cy
-        pth = photo_path(photos_dir, cam.key)
-        if pth is None:
+    proximity_scale = max(diag * 0.1, 1e-4)
+
+    for ci, cam in enumerate(cams):
+        path = photo_path(photos_dir, cam.key)
+        if path is None:
             continue
-        img = cv2.imread(pth)
+        W, H = cam.image_width, cam.image_height
+        x, y, z = _project(cam, world)
+        score, forward = _cell_score(cam, world, x, y, W, H, n,
+                                     up_world, proximity_scale)
+        dirs = world - cam.C
+        view = dirs / np.maximum(np.linalg.norm(dirs, axis=1), 1e-6)[:, None]
+        facing = (-view) @ n
+        good = valid_poly & forward & (facing >= facing_min) & (z > 0.01) & \
+            (x >= cmin * W) & (x <= cmax * W) & \
+            (y >= cmin * H) & (y <= cmax * H)
+        if good.any() and occ.enabled:
+            ids = np.where(good)[0]
+            good[ids] &= occ.visible_mask(world[ids], cam.C)
+        score[~good] = -np.inf
+        _insert_top(top_scores, top_cams, score, ci)
+
+    candidate_valid = valid_poly & (top_cams[:, 0] >= 0)
+    kept = _select_cameras(top_cams, candidate_valid, len(cams), max_photos)
+    allowed = np.where(top_cams >= 0, kept[np.maximum(top_cams, 0)], False)
+    kept_scores = np.where(allowed, top_scores, -np.inf)
+    choice = kept_scores.argmax(axis=1)
+    labels = top_cams[np.arange(len(world)), choice]
+    labels[~np.isfinite(kept_scores.max(axis=1))] = -1
+    relax_cams = np.where(allowed, top_cams, -1)
+    relax_scores = np.where(allowed, top_scores, -np.inf)
+    relax_valid = valid_poly & np.any(allowed, axis=1)
+    labels = _relax_labels(labels, relax_cams, relax_scores, relax_valid, cw, ch)
+    holes = candidate_valid & (labels < 0)
+    labels[holes] = top_cams[holes, 0]
+
+    full_labels = cv2.resize(labels.reshape(ch, cw).astype(np.int32),
+                             (pf.tex_w, pf.tex_h), interpolation=cv2.INTER_NEAREST)
+    full_mask = _polygon_mask(pf.tex_w, pf.tex_h, pf.polygon_uv)
+    full_labels[~full_mask] = -1
+    out = np.zeros((pf.tex_h, pf.tex_w, 4), np.uint8)
+    out[..., 3] = np.where(full_mask, 255, 0).astype(np.uint8)
+    painted = np.zeros((pf.tex_h, pf.tex_w), bool)
+    for ci in sorted(set(full_labels[full_labels >= 0].tolist())):
+        rr, cc = np.where(full_labels == ci)
+        if len(rr) == 0:
+            continue
+        cam = cams[ci]
+        path = photo_path(photos_dir, cam.key)
+        img = cv2.imread(path) if path else None
         if img is None:
             continue
+        gu = (cc + 0.5) / pf.tex_w * pf.width_world
+        gv = (1.0 - (rr + 0.5) / pf.tex_h) * pf.height_world
+        pts = pf.origin + gu[:, None] * pf.u + gv[:, None] * pf.v
+        x, y, z = _project(cam, pts)
         H, W = img.shape[:2]
-        # dentro il crop centrale dell'immagine
-        infront = (z > 0.02) & (u >= cmin * W) & (v >= cmin * H) & \
-                  (u < cmax * W) & (v < cmax * H)
-        idx = np.where(infront)[0]
-        if len(idx) == 0:
+        good = (z > 0.01) & (x >= 0) & (x < W) & (y >= 0) & (y < H)
+        if not good.any():
             continue
-        if occ.enabled:
-            vis = occ.visible_mask(world[idx], cam.C)
-            idx = idx[vis]
-            if len(idx) == 0:
-                continue
-        sc = _score(cam, world[idx], u[idx], v[idx], W, H, diag)
-        upd = sc > best[idx]
-        if not upd.any():
-            continue
-        sel = idx[upd]
-        samp = _sample(img, u[sel], v[sel])
-        col[sel] = samp[:, ::-1].astype(np.float32)     # BGR→RGB
-        best[sel] = sc[upd]
-        src[sel] = int(cam.key)
-
-    cov = float((src >= 0).mean())
-    out = col.reshape(th, tw, 3).clip(0, 255).astype(np.uint8)
-    return out, cov
+        rgb = _sample(img, x[good], y[good])[:, ::-1]
+        out[rr[good], cc[good], :3] = rgb
+        painted[rr[good], cc[good]] = True
+    coverage = float(painted[full_mask].mean()) if full_mask.any() else 0.0
+    used = sorted(set(full_labels[painted].tolist()))
+    return out, coverage, used
 
 
 def _sanitize(name: str) -> str:
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in name)[:40] or "piano"
 
 
+def _write_textured_mesh(out_dir: str, frames: list[tuple[int, str, str, PlaneFrame]]) -> tuple[str, str]:
+    obj_name = "planes_textured.obj"
+    mtl_name = "planes_textured.mtl"
+    obj = ["# Acrobatica textured planes", f"mtllib {mtl_name}"]
+    mtl = ["# Acrobatica projected materials"]
+    vertex_offset = 1
+    uv_offset = 1
+    for index, name, texture, pf in frames:
+        material = f"plane_{index}_{_sanitize(name)}"
+        obj += [f"o {material}", f"g {material}", f"usemtl {material}"]
+        obj += [f"v {p[0]:.9g} {p[1]:.9g} {p[2]:.9g}" for p in pf.corners]
+        obj += [f"vt {uv[0]:.9g} {uv[1]:.9g}" for uv in pf.polygon_uv]
+        for k in range(1, len(pf.corners) - 1):
+            ids = (0, k, k + 1)
+            obj.append("f " + " ".join(
+                f"{vertex_offset + q}/{uv_offset + q}" for q in ids))
+        mtl += [f"newmtl {material}", "Ka 1 1 1", "Kd 1 1 1",
+                "illum 1", f"map_Kd {texture}", ""]
+        vertex_offset += len(pf.corners)
+        uv_offset += len(pf.corners)
+    Path(out_dir, obj_name).write_text("\n".join(obj) + "\n")
+    Path(out_dir, mtl_name).write_text("\n".join(mtl) + "\n")
+    return obj_name, mtl_name
+
+
 def bake_planes(mesh_path: str, poses: dict, photos_dir: str, planes_doc: dict,
                 out_dir: str, texel_mm: float = 8.0, max_photos: int = 80,
                 occlusion: bool = False, facing_min: float = 0.20,
-                crop: float = 0.9, log=print) -> dict:
+                crop: float = 0.9, scale_m_per_mesh_unit: float = 1.0,
+                log=print) -> dict:
     """Bake di tutti i piani del documento. Ritorna un riepilogo (piani, aree, file).
     Scrive PNG per piano + _superfici.txt in `out_dir`."""
     os.makedirs(out_dir, exist_ok=True)
@@ -315,21 +491,23 @@ def bake_planes(mesh_path: str, poses: dict, photos_dir: str, planes_doc: dict,
         f"texel {texel_mm}mm · occlusione {'on' if occ.enabled else 'off'}")
 
     results = []
+    frames: list[tuple[int, str, str, PlaneFrame]] = []
     total_area = 0.0
     lines = [f"Superfici piani — bake ortografico {texel_mm:.0f} mm/texel", ""]
     for i, plane in enumerate(planes, 1):
         nome = plane.get("nome") or plane.get("tipo") or f"piano{i}"
-        pf = plane_frame(plane, up_world, V, faces, texel_m)
+        pf = plane_frame(plane, up_world, V, faces, texel_m,
+                         scale_m_per_mesh_unit=scale_m_per_mesh_unit)
         if pf is None:
             log(f"  piano {i} ({nome}): degenere/senza triangoli → salto")
             continue
-        img, cov = bake_plane(pf, cams, photos_dir, diag, occ,
-                              np.asarray(plane["normale"], float),
+        img, cov, used = bake_plane(pf, cams, photos_dir, diag, occ,
+                              np.asarray(plane["normale"], float), up_world,
                               facing_min=facing_min, max_photos=max_photos, crop=crop)
-        area = pf.width_m * pf.height_m
+        area = pf.area_m2
         total_area += area
         fname = f"plane_{i}_{_sanitize(nome)}.png"
-        cv2.imwrite(os.path.join(out_dir, fname), img[:, :, ::-1])   # RGB→BGR per cv2
+        cv2.imwrite(os.path.join(out_dir, fname), cv2.cvtColor(img, cv2.COLOR_RGBA2BGRA))
         log(f"  piano {i} ({nome}): {pf.tex_w}x{pf.tex_h}px  "
             f"{pf.width_m:.2f}x{pf.height_m:.2f}m  area {area:.2f} m²  copertura {cov*100:.0f}%")
         lines.append(f"plane_{i}_{nome:<16.16s} {pf.width_m:6.2f} x {pf.height_m:6.2f} m "
@@ -337,10 +515,16 @@ def bake_planes(mesh_path: str, poses: dict, photos_dir: str, planes_doc: dict,
         results.append({"index": i, "nome": nome, "file": fname,
                         "width_m": round(pf.width_m, 3), "height_m": round(pf.height_m, 3),
                         "tex_w": pf.tex_w, "tex_h": pf.tex_h,
-                        "area_m2": round(area, 2), "coverage": round(cov, 3)})
+                        "area_m2": round(area, 2), "coverage": round(cov, 3),
+                        "photos_used": len(used)})
+        frames.append((i, nome, fname, pf))
     lines += ["", f"TOTALE {total_area:8.2f} m²"]
     with open(os.path.join(out_dir, "_superfici.txt"), "w") as fh:
         fh.write("\n".join(lines) + "\n")
 
+    main_obj, _ = _write_textured_mesh(out_dir, frames)
+    coverage = (sum(p["coverage"] * p["area_m2"] for p in results) / total_area
+                if total_area > 0 else 0.0)
     return {"planes": results, "total_area_m2": round(total_area, 2),
+            "coverage": round(coverage, 3), "main_obj": main_obj,
             "out_dir": out_dir, "count": len(results)}

@@ -1,25 +1,41 @@
 """Proiezione foto → piani facciata (passo 8).
 
-SCAFFOLD. Questo modulo raccoglie e verifica gli input della proiezione
-**scaricandoli da storage** (R2/Supabase), senza dipendere da file locali:
+Questo modulo raccoglie gli input da R2/Supabase e orchestra il baker headless:
 
     sessions/<id>/photos/*.jpg            ← foto (tabella facade_photos)
     sessions/<id>/out/mesh/clean/*        ← mesh PULITA (dall'editor)
     sessions/<id>/out/mesh/raw/oc_poses.json  ← pose Object Capture
     sessions/<id>/out/planes.json         ← piani decisi nell'editor
 
-`gather_inputs()` valida che ci sia tutto e ne fa un riepilogo. L'algoritmo di
-mosaico (assialità H, occlusione BVH, copertura) verrà innestato qui, portato
-headless dal NativePoseMeshViewer. Finché non c'è, `project()` si ferma al
-controllo di prontezza e non altera lo stato della sessione.
+`gather_inputs()` valida la disponibilità; `project()` scarica, esegue il mosaico
+validato nel NativePoseMeshViewer e pubblica OBJ/MTL/PNG in `out/projection`.
 """
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Optional
 
-from . import session_store, storage_service
+from . import ortho_bake, session_state, session_store, storage_service
+
+
+class InputsMissing(RuntimeError):
+    pass
+
+
+class ProjectionError(RuntimeError):
+    pass
+
+
+_CONTENT_TYPES = {
+    ".obj": "model/obj",
+    ".mtl": "model/mtl",
+    ".png": "image/png",
+    ".txt": "text/plain",
+    ".json": "application/json",
+}
 
 
 def _mesh_entry(result: dict | None, kind: str) -> dict:
@@ -116,3 +132,135 @@ def gather_inputs(session_id: str) -> Optional[dict]:
         "inputs": inputs,
         "missing": missing,
     }
+
+
+def _download_inputs(session_id: str, sess: dict, root: Path) -> dict:
+    result = sess.get("result") or {}
+    clean = _mesh_entry(result, "clean")
+    mesh_path = _mesh_main_path(clean)
+    poses_path = _file_in(_mesh_entry(result, "raw"), "oc_poses.json")
+    planes_path = (result.get("planes") or {}).get("path")
+    photos = session_store.list_photos(session_id)
+    missing = []
+    if not mesh_path:
+        missing.append("mesh_clean")
+    if not poses_path:
+        missing.append("poses")
+    if not planes_path:
+        missing.append("planes")
+    if not photos:
+        missing.append("photos")
+    if missing:
+        raise InputsMissing("Input mancanti per la proiezione: " + ", ".join(missing))
+
+    mesh = root / "mesh.obj"
+    mesh.write_bytes(storage_service.download_bytes(mesh_path))
+    poses = json.loads(storage_service.download_bytes(poses_path))
+    planes = json.loads(storage_service.download_bytes(planes_path))
+    if not planes.get("planes"):
+        raise InputsMissing("Il documento dei piani non contiene piani proiettabili")
+
+    photos_dir = root / "photos"
+    photos_dir.mkdir()
+    for photo in photos:
+        index = int(photo["order_index"])
+        metadata = photo.get("metadata") or {}
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except ValueError:
+                metadata = {}
+        pose = poses.get(str(index))
+        if pose is not None and metadata.get("image_width") and metadata.get("image_height"):
+            pose["image_width_height"] = [
+                int(metadata["image_width"]), int(metadata["image_height"])]
+        (photos_dir / f"{index:04d}.jpg").write_bytes(
+            storage_service.download_bytes(photo["storage_path"])
+        )
+    return {"mesh": mesh, "poses": poses, "planes": planes,
+            "photos": photos_dir, "photo_count": len(photos)}
+
+
+def project(session_id: str) -> dict:
+    """Esegue il mosaico e pubblica il bundle texturizzato dei piani."""
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        raise InputsMissing("Sessione non trovata")
+
+    try:
+        current = sess.get("status") or ""
+        if current in {session_state.PLANES_READY, session_state.COMPLETED}:
+            session_store.update_status(session_id, session_state.MAPPING)
+
+        with tempfile.TemporaryDirectory(prefix="acro_projection_") as td:
+            root = Path(td)
+            inp = _download_inputs(session_id, sess, root)
+            out_dir = root / "output"
+            scale = float(inp["planes"].get(
+                "scale_m_per_mesh_unit",
+                os.environ.get("ACRO_OC_SCALE", "6.0927"),
+            ))
+            summary = ortho_bake.bake_planes(
+                str(inp["mesh"]), inp["poses"], str(inp["photos"]),
+                inp["planes"], str(out_dir), texel_mm=8.0,
+                max_photos=60, occlusion=False, facing_min=0.342,
+                crop=0.9, scale_m_per_mesh_unit=scale,
+            )
+            if summary["count"] == 0:
+                raise ProjectionError("Nessun piano ha prodotto una texture")
+
+            files = []
+            for local in sorted(out_dir.iterdir()):
+                if not local.is_file():
+                    continue
+                remote = storage_service.out_path(
+                    session_id, f"projection/{local.name}")
+                storage_service.upload_bytes(
+                    remote, local.read_bytes(),
+                    _CONTENT_TYPES.get(local.suffix.lower(), "application/octet-stream"),
+                )
+                files.append({"name": local.name, "path": remote,
+                              "size": local.stat().st_size})
+
+            manifest = {
+                "main_obj": summary["main_obj"],
+                "files": files,
+                "planes": summary["planes"],
+                "total_area_m2": summary["total_area_m2"],
+                "coverage": summary["coverage"],
+                "photo_count": inp["photo_count"],
+                "scale_m_per_mesh_unit": scale,
+            }
+            latest = session_store.get_session(session_id) or sess
+            result = latest.get("result") or {}
+            result["projection"] = manifest
+            session_store.update_session(session_id, {"result": result})
+
+        try:
+            row = session_store.update_status(session_id, session_state.COMPLETED)
+            status = row.get("status", session_state.COMPLETED)
+        except Exception:
+            status = (session_store.get_session(session_id) or {}).get("status", "")
+
+        public_files = [
+            {
+                "name": f["name"],
+                "url": storage_service.signed_url(f["path"], expires_in_sec=3600),
+                "size_bytes": f["size"],
+            }
+            for f in files
+        ]
+        main = next((f for f in public_files if f["name"] == summary["main_obj"]), None)
+        return {
+            "status": status,
+            "count": summary["count"],
+            "total_area_m2": summary["total_area_m2"],
+            "coverage": summary["coverage"],
+            "main_obj": main,
+            "files": public_files,
+            "planes": summary["planes"],
+        }
+    except (InputsMissing, ProjectionError):
+        raise
+    except Exception as exc:
+        raise ProjectionError(f"Proiezione non riuscita: {exc}") from exc
