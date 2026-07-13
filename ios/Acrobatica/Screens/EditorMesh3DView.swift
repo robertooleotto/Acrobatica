@@ -2579,6 +2579,9 @@ final class Mesh3DModel: ObservableObject {
 
     // Selezione + taglio (T1)
     private(set) var mesh = EditableMesh(vertices: [], triangles: [])
+    /// Cambia a ogni modifica distruttiva locale. Impedisce a un rilevamento
+    /// backend avviato prima del taglio di sovrascrivere i piani aggiornati.
+    private var meshRevision = 0
     /// Mesh come caricata (prima di crop/pulizia): per "riparti da zero".
     private var meshOriginale: EditableMesh?
     /// Adiacenza saldata in cache (ricostruita pigramente): velocizza ogni crescita.
@@ -3887,7 +3890,9 @@ final class Mesh3DModel: ObservableObject {
         guard !sel.isEmpty else { return }
         registraUndo()
         let remap = mesh.elimina(sel)
+        meshRevision += 1
         rimappaFacce(remap)
+        if !inverti { ritagliaPianiAlBox() }
         selezione = []
         renderMesh()
     }
@@ -3920,6 +3925,11 @@ final class Mesh3DModel: ObservableObject {
     private func aggiornaClip() {
         var materials = contentNode.geometry?.materials ?? []
         materials.append(contentsOf: ocTextureParts.flatMap(\.materials))
+        pianiNode.enumerateHierarchy { node, _ in
+            if let nodeMaterials = node.geometry?.materials {
+                materials.append(contentsOf: nodeMaterials)
+            }
+        }
         guard !materials.isEmpty else { return }
         let clipAttivo = strumento == .box
         let rt = boxRot.transpose
@@ -4030,6 +4040,7 @@ final class Mesh3DModel: ObservableObject {
         guard !selezione.isEmpty else { return }
         registraUndo()
         let remap = mesh.elimina(selezione)
+        meshRevision += 1
         rimappaFacce(remap)
         selezione = []
         if modoSelezione == .poligonale { resetLazoPoligonale() }
@@ -4047,6 +4058,7 @@ final class Mesh3DModel: ObservableObject {
         guard let (m, s, f) = undoStack.popLast() else { return }
         redoStack.append((mesh, selezione, facce))
         mesh = m; selezione = s; facce = f
+        meshRevision += 1
         puoUndo = !undoStack.isEmpty; puoRedo = true
         renderMesh()
     }
@@ -4055,6 +4067,7 @@ final class Mesh3DModel: ObservableObject {
         guard let (m, s, f) = redoStack.popLast() else { return }
         undoStack.append((mesh, selezione, facce))
         mesh = m; selezione = s; facce = f
+        meshRevision += 1
         puoUndo = true; puoRedo = !redoStack.isEmpty
         renderMesh()
     }
@@ -4255,6 +4268,7 @@ final class Mesh3DModel: ObservableObject {
     func riconosciPianiAuto(sessionId: String) async {
         guard !segmentando, !mesh.triangles.isEmpty else { return }
         segmentando = true
+        let revisionAtStart = meshRevision
         cursoreInfo = "Riconosco i piani…"
         // La gravità della mesh OC/ARKit è l'asse Y del suo frame. NON passare l'up
         // stimato (assiNav.u): esce inclinato → i piani vengono RUOTATI. La gravità
@@ -4262,7 +4276,9 @@ final class Mesh3DModel: ObservableObject {
         do {
             let r = try await BackendAPIClient.shared.detectPlanes(
                 sessionId: sessionId, up: [0, 1, 0])
-            applicaPianiRilevati(r.planes)
+            applicaPianiRilevati(
+                r.planes,
+                adattaAllaMeshCorrente: meshRevision != revisionAtStart)
             cursoreInfo = "Piani riconosciuti: \(facce.count)"
         } catch {
             cursoreInfo = "Riconoscimento fallito: \(error.localizedDescription)"
@@ -4271,7 +4287,10 @@ final class Mesh3DModel: ObservableObject {
     }
 
     /// Sostituisce le facce coi piani rilevati dal backend (quad + tipo).
-    func applicaPianiRilevati(_ planes: [BackendAPIClient.DetectedPlane]) {
+    func applicaPianiRilevati(
+        _ planes: [BackendAPIClient.DetectedPlane],
+        adattaAllaMeshCorrente: Bool = false
+    ) {
         registraUndo()
         facce.removeAll(); facceSelezionate.removeAll(); facciaAttivaId = nil
         for p in planes {
@@ -4291,6 +4310,13 @@ final class Mesh3DModel: ObservableObject {
             }
             if let tri = p.triangoli { f.triangoli = Set(tri) }   // maschera per la proiezione
             facce.append(f)
+        }
+        if adattaAllaMeshCorrente {
+            for i in facce.indices where facce[i].triangoli.isEmpty {
+                facce[i].triangoli = trovaSupportoPiano(facce[i])
+            }
+            facce.removeAll { $0.triangoli.isEmpty }
+            for id in facce.map(\.id) { generaPoligono(perFaccia: id) }
         }
         facciaAttivaId = facce.first?.id
         pianiGenerati = facce.count
@@ -6563,6 +6589,65 @@ final class Mesh3DModel: ObservableObject {
         pianiGenerati = facce.filter { $0.pianoNormale != nil }.count
         ridisegnaFacce()
         ridisegnaPiani()
+    }
+
+    /// Interseca esattamente i poligoni dei piani con il box orientato. Il
+    /// supporto sui triangoli evita piani obsoleti; questo passaggio elimina
+    /// anche il piccolo sbordo dovuto al rettangolo/percentili del detector.
+    private func ritagliaPianiAlBox() {
+        func clip(
+            _ input: [SIMD3<Float>],
+            axis: Int,
+            boundary: Float,
+            keepGreater: Bool
+        ) -> [SIMD3<Float>] {
+            guard let last = input.last else { return [] }
+            var output: [SIMD3<Float>] = []
+            var previous = last
+            var previousInside = keepGreater
+                ? previous[axis] >= boundary
+                : previous[axis] <= boundary
+            for current in input {
+                let currentInside = keepGreater
+                    ? current[axis] >= boundary
+                    : current[axis] <= boundary
+                if currentInside != previousInside {
+                    let denominator = current[axis] - previous[axis]
+                    if abs(denominator) > 1e-8 {
+                        let t = (boundary - previous[axis]) / denominator
+                        output.append(previous + (current - previous) * t)
+                    }
+                }
+                if currentInside { output.append(current) }
+                previous = current
+                previousInside = currentInside
+            }
+            return output
+        }
+
+        let worldToBox = boxRot.transpose
+        var removed: Set<Int> = []
+        for i in facce.indices {
+            guard let polygon = facce[i].poligono, polygon.count >= 3 else { continue }
+            var local = polygon.map { worldToBox * ($0 - frameOrigin) }
+            for axis in 0..<3 {
+                local = clip(local, axis: axis, boundary: boxLo[axis], keepGreater: true)
+                local = clip(local, axis: axis, boundary: boxHi[axis], keepGreater: false)
+                if local.count < 3 { break }
+            }
+            if local.count >= 3 {
+                facce[i].poligono = local.map { frameOrigin + boxRot * $0 }
+            } else {
+                removed.insert(facce[i].id)
+            }
+        }
+        guard !removed.isEmpty else { return }
+        facce.removeAll { removed.contains($0.id) }
+        facceSelezionate.subtract(removed)
+        if let active = facciaAttivaId, removed.contains(active) {
+            facciaAttivaId = facce.last?.id
+        }
+        pianiGenerati = facce.filter { $0.pianoNormale != nil }.count
     }
 
     /// Trova i triangoli della mesh residua appartenenti a un piano descritto
