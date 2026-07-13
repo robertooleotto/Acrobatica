@@ -135,6 +135,33 @@ struct EditorMesh3DView: View {
         }
     }
 
+    private func caricaUltimaTexture() {
+        guard let sid = sessionId, !caricandoCloud else { return }
+        caricandoCloud = true
+        toastCloud = "Scarico i piani texturizzati…"
+        Task {
+            do {
+                let result = try await BackendAPIClient.shared.projectionStatus(sessionId: sid)
+                guard result.state == "complete", let main = result.main_obj else {
+                    throw NSError(
+                        domain: "AcrobaticaProjection", code: 5,
+                        userInfo: [NSLocalizedDescriptionKey: "Nessuna texture completata"])
+                }
+                let bundle = try await BackendAPIClient.shared.downloadMeshBundle(result.files)
+                guard let url = bundle[main.name] else {
+                    throw NSError(
+                        domain: "AcrobaticaProjection", code: 6,
+                        userInfo: [NSLocalizedDescriptionKey: "OBJ texturizzato non ricevuto"])
+                }
+                try model.caricaPianiTexturizzati(url)
+                toastCloud = "Texture calcolata caricata ✓"
+            } catch {
+                toastCloud = "Download fallito: \(error.localizedDescription)"
+            }
+            caricandoCloud = false
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             barraSuperiore
@@ -247,6 +274,10 @@ struct EditorMesh3DView: View {
                         Label("Proietta texture sui piani", systemImage: "photo.on.rectangle.angled")
                     }
                     .disabled(model.facce.isEmpty || model.numTriangoli == 0 || caricandoCloud)
+                    Button { caricaUltimaTexture() } label: {
+                        Label("Carica texture calcolata", systemImage: "arrow.down.square")
+                    }
+                    .disabled(caricandoCloud)
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")
@@ -3585,22 +3616,28 @@ final class Mesh3DModel: ObservableObject {
         for child in loaded.rootNode.childNodes {
             child.enumerateHierarchy { node, _ in
                 node.categoryBitMask = 2
-                node.geometry?.materials.forEach { material in
-                    // SceneKit conserva spesso map_Kd come stringa. Risolviamo
-                    // esplicitamente ogni PNG, necessario quando i piani sono molti.
-                    if let path = material.diffuse.contents as? String {
-                        let imageURL = directory.appendingPathComponent(
-                            URL(fileURLWithPath: path).lastPathComponent)
+                guard let geometry = node.geometry else { return }
+                let materials = geometry.materials.map { imported -> SCNMaterial in
+                    // I materiali creati dall'importer OBJ possono conservare la
+                    // texture MTL nella pipeline interna anche dopo aver cambiato
+                    // diffuse.contents. Un materiale nuovo forza l'upload della PNG.
+                    let material = SCNMaterial()
+                    material.name = imported.name
+                    let textureName = (imported.diffuse.contents as? String)
+                        .map { URL(fileURLWithPath: $0).lastPathComponent }
+                        ?? imported.name.map { "\($0).png" }
+                    if let textureName {
+                        let imageURL = directory.appendingPathComponent(textureName)
                         if let image = UIImage(contentsOfFile: imageURL.path) {
                             material.diffuse.contents = image
                             textureCount += 1
                         }
-                    } else if material.diffuse.contents is UIImage {
-                        textureCount += 1
                     }
                     material.lightingModel = .constant
                     material.isDoubleSided = true
+                    return material
                 }
+                geometry.materials = materials
             }
             pianiTexturizzatiNode.addChildNode(child)
         }
@@ -3611,6 +3648,10 @@ final class Mesh3DModel: ObservableObject {
                 userInfo: [NSLocalizedDescriptionKey: "PNG delle texture non leggibili"])
         }
         pianiTexturizzatiNode.isHidden = false
+        // I piani coincidono quasi con la superficie OC: se la mesh resta opaca
+        // davanti, l'utente vede il modello bianco invece delle ortofoto.
+        mostraTexturaOC = false
+        mostraMesh = false
         mostraPiani = false
         mostraProxy = false
         cursoreInfo = "Piani texturizzati caricati"
