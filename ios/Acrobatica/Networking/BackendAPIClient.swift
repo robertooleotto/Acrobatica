@@ -396,6 +396,10 @@ actor BackendAPIClient {
         let coverage: Double
         let main_obj: MeshFileInfo?
         let files: [MeshFileInfo]
+        let state: String
+        let progress: Double
+        let message: String
+        let error: String
     }
 
     /// Avvia il bake cloud. Il timeout della singola richiesta è esteso perché
@@ -405,6 +409,16 @@ actor BackendAPIClient {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.timeoutInterval = 600
+        let (data, resp) = try await urlSession.data(for: req)
+        try assertHTTPOK(resp, data: data)
+        return try JSONDecoder().decode(ProjectionResult.self, from: data)
+    }
+
+    func projectionStatus(sessionId: String) async throws -> ProjectionResult {
+        let url = baseURL.appendingPathComponent("/facade-sessions/\(sessionId)/projection")
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.timeoutInterval = 60
         let (data, resp) = try await urlSession.data(for: req)
         try assertHTTPOK(resp, data: data)
         return try JSONDecoder().decode(ProjectionResult.self, from: data)
@@ -486,7 +500,9 @@ actor BackendAPIClient {
         body.append(fileData)
         body.appendString(crlf)
         body.appendString("--\(boundary)--\(crlf)")
-        let (data, resp) = try await urlSession.upload(for: req, from: body)
+        req.httpBody = body
+        req.timeoutInterval = 120
+        let (data, resp) = try await urlSession.data(for: req)
         try assertHTTPOK(resp, data: data)
         return try JSONDecoder().decode(MeshUploadResult.self, from: data)
     }

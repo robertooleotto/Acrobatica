@@ -19,7 +19,7 @@ from typing import Optional
 
 import cv2
 import numpy as np
-from fastapi import APIRouter, Body, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Body, File, Form, HTTPException, UploadFile
 
 from ..models import (
     ARMetadata,
@@ -52,7 +52,7 @@ from ..models import (
     DetectPlanesResult,
     PlanesDataResult,
     PlanesSaveResult,
-    ProjectionResult,
+    ProjectionJobResult,
     ProjectionScaffoldResult,
     ProcessRequest,
     ProcessResult,
@@ -1033,6 +1033,20 @@ async def upload_mesh(
     existing["mesh"] = meshes
     session_store.update_session(session_id, {"result": existing})
 
+    # L'upload della mesh pulita conclude davvero il passo di pulizia. Le vecchie
+    # sessioni demo possono essere ancora `mesh_ready`, quindi attraversiamo i
+    # due stati previsti invece di lasciare i salvataggi successivi fuori flusso.
+    if kind == "clean":
+        try:
+            current = (session_store.get_session(session_id) or {}).get("status", "")
+            if current in {session_state.MESH_READY, session_state.COMPLETED}:
+                session_store.update_status(session_id, session_state.CLEANING)
+                current = session_state.CLEANING
+            if current == session_state.CLEANING:
+                session_store.update_status(session_id, session_state.CLEAN_UPLOADED)
+        except Exception:
+            pass
+
     return MeshUploadResult(session_id=session_id, files=infos)
 
 
@@ -1141,18 +1155,27 @@ def get_planes_data(session_id: str):
 
 # ─── Proiezione foto → piani (passo 8) ──────────────────────────────────────
 
-@router.post("/{session_id}/project", response_model=ProjectionResult)
-def project_session(session_id: str):
-    """Proietta le foto OC sui piani revisionati e restituisce OBJ/MTL/PNG."""
+@router.post("/{session_id}/project", response_model=ProjectionJobResult)
+def project_session(session_id: str, background_tasks: BackgroundTasks):
+    """Accoda la proiezione e ritorna subito; il client interroga `/projection`."""
     if session_store.get_session(session_id) is None:
         raise HTTPException(404, "Sessione non trovata")
     try:
-        result = projection_service.project(session_id)
+        result, should_start = projection_service.start_project(session_id)
     except projection_service.InputsMissing as exc:
         raise HTTPException(409, str(exc)) from exc
-    except projection_service.ProjectionError as exc:
-        raise HTTPException(422, str(exc)) from exc
-    return ProjectionResult(session_id=session_id, **result)
+    if should_start:
+        background_tasks.add_task(projection_service.run_project_job, session_id)
+    return ProjectionJobResult(session_id=session_id, **result)
+
+
+@router.get("/{session_id}/projection", response_model=ProjectionJobResult)
+def projection_status(session_id: str):
+    """Stato e, a completamento, URL firmati del bundle texturizzato."""
+    result = projection_service.project_status(session_id)
+    if result is None:
+        raise HTTPException(404, "Sessione non trovata")
+    return ProjectionJobResult(session_id=session_id, **result)
 
 
 # ─── Rilevamento automatico piani (istogrammi BCS, dal detector python) ──────

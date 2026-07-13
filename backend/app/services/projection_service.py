@@ -162,8 +162,10 @@ def _download_inputs(session_id: str, sess: dict, root: Path) -> dict:
 
     photos_dir = root / "photos"
     photos_dir.mkdir()
+    photo_paths: dict[str, str] = {}
     for photo in photos:
         index = int(photo["order_index"])
+        photo_paths[str(index)] = photo["storage_path"]
         metadata = photo.get("metadata") or {}
         if isinstance(metadata, str):
             try:
@@ -174,11 +176,82 @@ def _download_inputs(session_id: str, sess: dict, root: Path) -> dict:
         if pose is not None and metadata.get("image_width") and metadata.get("image_height"):
             pose["image_width_height"] = [
                 int(metadata["image_width"]), int(metadata["image_height"])]
-        (photos_dir / f"{index:04d}.jpg").write_bytes(
-            storage_service.download_bytes(photo["storage_path"])
-        )
     return {"mesh": mesh, "poses": poses, "planes": planes,
-            "photos": photos_dir, "photo_count": len(photos)}
+            "photos": photos_dir, "photo_paths": photo_paths,
+            "photo_count": len(photos)}
+
+
+def _set_job(session_id: str, state: str, progress: float,
+             message: str, error: str = "") -> None:
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        return
+    result = sess.get("result") or {}
+    result["projection_job"] = {
+        "state": state,
+        "progress": min(max(float(progress), 0.0), 1.0),
+        "message": message,
+        "error": error,
+    }
+    session_store.update_session(session_id, {"result": result})
+
+
+def _public_result(sess: dict) -> dict:
+    result = sess.get("result") or {}
+    job = result.get("projection_job") or {}
+    manifest = result.get("projection") or {}
+    public_files = [
+        {
+            "name": f["name"],
+            "url": storage_service.signed_url(f["path"], expires_in_sec=3600),
+            "size_bytes": f["size"],
+        }
+        for f in manifest.get("files", [])
+    ]
+    main_name = manifest.get("main_obj")
+    main = next((f for f in public_files if f["name"] == main_name), None)
+    return {
+        "state": job.get("state", "complete" if main else "idle"),
+        "progress": float(job.get("progress", 1.0 if main else 0.0)),
+        "message": job.get("message", "Texture pronta" if main else "Non avviata"),
+        "error": job.get("error", ""),
+        "status": sess.get("status") or "",
+        "count": len(manifest.get("planes", [])),
+        "total_area_m2": float(manifest.get("total_area_m2", 0.0)),
+        "coverage": float(manifest.get("coverage", 0.0)),
+        "main_obj": main,
+        "files": public_files,
+        "planes": manifest.get("planes", []),
+    }
+
+
+def start_project(session_id: str) -> tuple[dict, bool]:
+    """Valida gli input e marca il job come accodato. Ritorna anche se avviarlo."""
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        raise InputsMissing("Sessione non trovata")
+    job = ((sess.get("result") or {}).get("projection_job") or {})
+    if job.get("state") in {"queued", "running"}:
+        return _public_result(sess), False
+    report = gather_inputs(session_id)
+    if not report or not report["ready"]:
+        raise InputsMissing("Input mancanti per la proiezione: " +
+                            ", ".join((report or {}).get("missing", [])))
+    _set_job(session_id, "queued", 0.0, "Proiezione accodata")
+    return _public_result(session_store.get_session(session_id) or sess), True
+
+
+def project_status(session_id: str) -> Optional[dict]:
+    sess = session_store.get_session(session_id)
+    return _public_result(sess) if sess is not None else None
+
+
+def run_project_job(session_id: str) -> None:
+    """Entry point del BackgroundTask: registra sempre completamento o errore."""
+    try:
+        project(session_id)
+    except Exception as exc:
+        _set_job(session_id, "failed", 1.0, "Proiezione non riuscita", str(exc)[:500])
 
 
 def project(session_id: str) -> dict:
@@ -188,6 +261,7 @@ def project(session_id: str) -> dict:
         raise InputsMissing("Sessione non trovata")
 
     try:
+        _set_job(session_id, "running", 0.02, "Preparo gli input")
         current = sess.get("status") or ""
         if current in {session_state.PLANES_READY, session_state.COMPLETED}:
             session_store.update_status(session_id, session_state.MAPPING)
@@ -200,17 +274,38 @@ def project(session_id: str) -> dict:
                 "scale_m_per_mesh_unit",
                 os.environ.get("ACRO_OC_SCALE", "6.0927"),
             ))
+            downloaded = [0]
+
+            def resolve_photo(key: str) -> str | None:
+                remote = inp["photo_paths"].get(str(int(key)))
+                if not remote:
+                    return None
+                local = inp["photos"] / f"{int(key):04d}.jpg"
+                if not local.exists():
+                    local.write_bytes(storage_service.download_bytes(remote))
+                    downloaded[0] += 1
+                    _set_job(
+                        session_id, "running", 0.12,
+                        f"Scarico foto selezionate: {downloaded[0]}")
+                return str(local)
+
             summary = ortho_bake.bake_planes(
                 str(inp["mesh"]), inp["poses"], str(inp["photos"]),
                 inp["planes"], str(out_dir), texel_mm=8.0,
                 max_photos=60, occlusion=False, facing_min=0.342,
                 crop=0.9, scale_m_per_mesh_unit=scale,
+                photo_resolver=resolve_photo,
+                available_photo_keys=set(inp["photo_paths"]),
+                progress=lambda done, total, name: _set_job(
+                    session_id, "running", 0.15 + 0.65 * done / max(total, 1),
+                    f"Proietto piano {done}/{total}: {name}"),
             )
             if summary["count"] == 0:
                 raise ProjectionError("Nessun piano ha prodotto una texture")
 
             files = []
-            for local in sorted(out_dir.iterdir()):
+            output_files = [p for p in sorted(out_dir.iterdir()) if p.is_file()]
+            for file_index, local in enumerate(output_files, 1):
                 if not local.is_file():
                     continue
                 remote = storage_service.out_path(
@@ -221,6 +316,10 @@ def project(session_id: str) -> dict:
                 )
                 files.append({"name": local.name, "path": remote,
                               "size": local.stat().st_size})
+                _set_job(
+                    session_id, "running",
+                    0.80 + 0.18 * file_index / max(len(output_files), 1),
+                    f"Carico risultato {file_index}/{len(output_files)}")
 
             manifest = {
                 "main_obj": summary["main_obj"],
@@ -237,29 +336,12 @@ def project(session_id: str) -> dict:
             session_store.update_session(session_id, {"result": result})
 
         try:
-            row = session_store.update_status(session_id, session_state.COMPLETED)
-            status = row.get("status", session_state.COMPLETED)
+            session_store.update_status(session_id, session_state.COMPLETED)
         except Exception:
-            status = (session_store.get_session(session_id) or {}).get("status", "")
+            pass
 
-        public_files = [
-            {
-                "name": f["name"],
-                "url": storage_service.signed_url(f["path"], expires_in_sec=3600),
-                "size_bytes": f["size"],
-            }
-            for f in files
-        ]
-        main = next((f for f in public_files if f["name"] == summary["main_obj"]), None)
-        return {
-            "status": status,
-            "count": summary["count"],
-            "total_area_m2": summary["total_area_m2"],
-            "coverage": summary["coverage"],
-            "main_obj": main,
-            "files": public_files,
-            "planes": summary["planes"],
-        }
+        _set_job(session_id, "complete", 1.0, "Texture pronta")
+        return _public_result(session_store.get_session(session_id) or sess)
     except (InputsMissing, ProjectionError):
         raise
     except Exception as exc:

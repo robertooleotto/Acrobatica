@@ -475,6 +475,14 @@ class ProjectionResult(BaseModel):
     planes: list[dict] = []
 
 
+class ProjectionJobResult(ProjectionResult):
+    """Stato interrogabile del job di proiezione asincrono."""
+    state: str
+    progress: float = 0.0
+    message: str = ""
+    error: str = ""
+
+
 class ZonaMarcataModel(BaseModel):
     """Singola zona marcata dall'operatore sull'ortofoto (schema concordato
     con l'editor iOS — i campi/rawValue NON vanno cambiati).

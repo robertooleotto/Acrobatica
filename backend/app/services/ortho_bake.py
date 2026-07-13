@@ -272,15 +272,13 @@ def _cell_score(cam: Camera, pts: np.ndarray, x: np.ndarray, y: np.ndarray,
 
 def _insert_top(top_scores: np.ndarray, top_cams: np.ndarray,
                 scores: np.ndarray, camera_index: int) -> None:
-    combined_scores = np.column_stack((top_scores, scores))
-    combined_cams = np.column_stack(
-        (top_cams, np.full(len(scores), camera_index, np.int32)))
-    keep = np.argpartition(combined_scores, -6, axis=1)[:, -6:]
-    top_scores[:] = np.take_along_axis(combined_scores, keep, axis=1)
-    top_cams[:] = np.take_along_axis(combined_cams, keep, axis=1)
-    order = np.argsort(top_scores, axis=1)[:, ::-1]
-    top_scores[:] = np.take_along_axis(top_scores, order, axis=1)
-    top_cams[:] = np.take_along_axis(top_cams, order, axis=1)
+    # Sostituisce solo il minimo corrente. Ordinare a ogni camera costava O(N)
+    # allocazioni enormi sulle sessioni da 300+ foto; basta ordinare una volta.
+    rows = np.arange(len(scores))
+    slots = np.argmin(top_scores, axis=1)
+    better = scores > top_scores[rows, slots]
+    top_scores[rows[better], slots[better]] = scores[better]
+    top_cams[rows[better], slots[better]] = camera_index
 
 
 def _select_cameras(top_cams: np.ndarray, valid: np.ndarray,
@@ -348,7 +346,8 @@ def bake_plane(pf: PlaneFrame, cams: list[Camera], photos_dir: str, diag: float,
                occ: Occluder, plane_normal: np.ndarray, up_world: np.ndarray,
                facing_min=0.342, max_photos=60, crop=0.9,
                cell_m=0.055,
-               scale_m_per_mesh_unit=1.0) -> tuple[np.ndarray, float, list[int]]:
+               scale_m_per_mesh_unit=1.0, photo_resolver=None,
+               available_photo_keys=None) -> tuple[np.ndarray, float, list[int]]:
     """Bake con lo stesso schema del viewer locale: scelta su celle, copertura
     greedy, regolarizzazione di continuità e raster finale ad alta risoluzione."""
     cw = max(2, int(np.ceil(pf.width_m / cell_m)))
@@ -374,8 +373,10 @@ def bake_plane(pf: PlaneFrame, cams: list[Camera], photos_dir: str, diag: float,
     proximity_scale = max(diag * 0.1, 1e-4)
 
     for ci, cam in enumerate(cams):
-        path = photo_path(photos_dir, cam.key)
-        if path is None:
+        if available_photo_keys is not None:
+            if str(int(cam.key)) not in available_photo_keys:
+                continue
+        elif photo_path(photos_dir, cam.key) is None:
             continue
         W, H = cam.image_width, cam.image_height
         x, y, z = _project(cam, world)
@@ -392,6 +393,10 @@ def bake_plane(pf: PlaneFrame, cams: list[Camera], photos_dir: str, diag: float,
             good[ids] &= occ.visible_mask(world[ids], cam.C)
         score[~good] = -np.inf
         _insert_top(top_scores, top_cams, score, ci)
+
+    order = np.argsort(top_scores, axis=1)[:, ::-1]
+    top_scores = np.take_along_axis(top_scores, order, axis=1)
+    top_cams = np.take_along_axis(top_cams, order, axis=1)
 
     candidate_valid = valid_poly & (top_cams[:, 0] >= 0)
     kept = _select_cameras(top_cams, candidate_valid, len(cams), max_photos)
@@ -419,7 +424,8 @@ def bake_plane(pf: PlaneFrame, cams: list[Camera], photos_dir: str, diag: float,
         if len(rr) == 0:
             continue
         cam = cams[ci]
-        path = photo_path(photos_dir, cam.key)
+        path = (photo_resolver(cam.key) if photo_resolver
+                else photo_path(photos_dir, cam.key))
         img = cv2.imread(path) if path else None
         if img is None:
             continue
@@ -472,7 +478,8 @@ def bake_planes(mesh_path: str, poses: dict, photos_dir: str, planes_doc: dict,
                 out_dir: str, texel_mm: float = 8.0, max_photos: int = 80,
                 occlusion: bool = False, facing_min: float = 0.20,
                 crop: float = 0.9, scale_m_per_mesh_unit: float = 1.0,
-                log=print) -> dict:
+                log=print, progress=None, photo_resolver=None,
+                available_photo_keys=None) -> dict:
     """Bake di tutti i piani del documento. Ritorna un riepilogo (piani, aree, file).
     Scrive PNG per piano + _superfici.txt in `out_dir`."""
     os.makedirs(out_dir, exist_ok=True)
@@ -503,7 +510,9 @@ def bake_planes(mesh_path: str, poses: dict, photos_dir: str, planes_doc: dict,
             continue
         img, cov, used = bake_plane(pf, cams, photos_dir, diag, occ,
                               np.asarray(plane["normale"], float), up_world,
-                              facing_min=facing_min, max_photos=max_photos, crop=crop)
+                              facing_min=facing_min, max_photos=max_photos, crop=crop,
+                              photo_resolver=photo_resolver,
+                              available_photo_keys=available_photo_keys)
         area = pf.area_m2
         total_area += area
         fname = f"plane_{i}_{_sanitize(nome)}.png"
@@ -518,6 +527,8 @@ def bake_planes(mesh_path: str, poses: dict, photos_dir: str, planes_doc: dict,
                         "area_m2": round(area, 2), "coverage": round(cov, 3),
                         "photos_used": len(used)})
         frames.append((i, nome, fname, pf))
+        if progress:
+            progress(i, len(planes), nome)
     lines += ["", f"TOTALE {total_area:8.2f} m²"]
     with open(os.path.join(out_dir, "_superfici.txt"), "w") as fh:
         fh.write("\n".join(lines) + "\n")

@@ -89,14 +89,35 @@ struct EditorMesh3DView: View {
             toastCloud = "Servono mesh e piani validi"; return
         }
         caricandoCloud = true
-        toastCloud = "Proietto le foto sui piani…"
+        toastCloud = "Carico la mesh pulita…"
         Task {
             do {
                 _ = try await BackendAPIClient.shared.uploadMesh(
                     sessionId: sid, fileURL: obj, kind: "clean")
+                toastCloud = "Carico i piani revisionati…"
                 _ = try await BackendAPIClient.shared.uploadPlanes(
                     sessionId: sid, jsonData: planes)
-                let result = try await BackendAPIClient.shared.projectPlanes(sessionId: sid)
+                toastCloud = "Avvio la proiezione…"
+                var result = try await BackendAPIClient.shared.projectPlanes(sessionId: sid)
+                var polls = 0
+                while result.state == "queued" || result.state == "running" {
+                    let percent = Int((result.progress * 100).rounded())
+                    toastCloud = "\(result.message) · \(percent)%"
+                    try await Task.sleep(nanoseconds: 2_000_000_000)
+                    result = try await BackendAPIClient.shared.projectionStatus(sessionId: sid)
+                    polls += 1
+                    if polls >= 450 {
+                        throw NSError(
+                            domain: "AcrobaticaProjection", code: 3,
+                            userInfo: [NSLocalizedDescriptionKey: "Tempo massimo superato"])
+                    }
+                }
+                if result.state == "failed" {
+                    throw NSError(
+                        domain: "AcrobaticaProjection", code: 4,
+                        userInfo: [NSLocalizedDescriptionKey:
+                            result.error.isEmpty ? "Errore nel calcolo cloud" : result.error])
+                }
                 let bundle = try await BackendAPIClient.shared.downloadMeshBundle(result.files)
                 guard let main = result.main_obj, let url = bundle[main.name] else {
                     throw NSError(

@@ -53,7 +53,8 @@ def test_bake_writes_textured_plane_bundle(tmp_path):
     photos.mkdir()
     image = np.zeros((128, 128, 3), np.uint8)
     image[:] = (0, 0, 255)
-    cv2.imwrite(str(photos / "0000.jpg"), image)
+    source_photo = tmp_path / "source.jpg"
+    cv2.imwrite(str(source_photo), image)
     poses = {
         "0": {
             "translation": [0, 0, 1],
@@ -62,13 +63,21 @@ def test_bake_writes_textured_plane_bundle(tmp_path):
         }
     }
     out = tmp_path / "out"
+    resolved = []
+
+    def resolve(key):
+        resolved.append(key)
+        return str(source_photo)
+
     result = ortho_bake.bake_planes(
         str(mesh), poses, str(photos),
         {"piano_base": {"up": [0, 1, 0]}, "planes": [_plane()]},
         str(out), texel_mm=20, max_photos=4,
+        photo_resolver=resolve, available_photo_keys={"0"},
     )
     assert result["count"] == 1
     assert result["coverage"] > 0.98
+    assert resolved == ["0"]
     assert (out / "planes_textured.obj").exists()
     assert (out / "planes_textured.mtl").exists()
     texture = cv2.imread(str(out / result["planes"][0]["file"]), cv2.IMREAD_UNCHANGED)
