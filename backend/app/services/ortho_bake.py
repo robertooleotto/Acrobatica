@@ -15,8 +15,8 @@ Input: mesh (occlusore + estensione piani), pose OC, foto, documento piani
 (schema acro.planes/v1 dell'editor: planes[].punto/normale/triangoli + piano_base).
 Output: PNG per piano + _superfici.txt (aree m²). Niente path hardcoded.
 
-Convenzione proiezione (identica a project_photos_to_mesh.py):
-    Pc = (G - C) @ R ; z = -Pc[2] ; u = fx*Pc0/z + cx ; v = fy*Pc1/z + cy
+Convenzione proiezione (identica al NativePoseMeshViewer):
+    Pc = (G - C) @ R ; z = -Pc[2] ; u = fx*Pc0/z + cx ; v = cy - fy*Pc1/z
 """
 from __future__ import annotations
 
@@ -31,6 +31,7 @@ import numpy as np
 # Limite prudente di texel per piano: oltre, si abbassa la risoluzione (memoria).
 _MAX_TEXELS = 6_000_000
 _TEX_CLAMP = (8, 8000)          # come il viewer: min/max lato in texel
+_TOP_CAMERA_SLOTS = 12
 
 
 def qR(w, x, y, z):
@@ -240,8 +241,8 @@ def _project(cam: Camera, pts: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.n
     z = -pc[:, 2]
     with np.errstate(divide="ignore", invalid="ignore"):
         x = cam.fx * pc[:, 0] / z + cam.cx
-        # Convenzione OC validata sui JPEG originali (pixel con origine in alto).
-        y = cam.fy * pc[:, 1] / z + cam.cy
+        # Il frame camera OC ha Y verso l'alto, i pixel JPEG verso il basso.
+        y = cam.cy - cam.fy * pc[:, 1] / z
     return x, y, z
 
 
@@ -283,7 +284,7 @@ def _insert_top(top_scores: np.ndarray, top_cams: np.ndarray,
 
 def _select_cameras(top_cams: np.ndarray, valid: np.ndarray,
                     camera_count: int, max_photos: int,
-                    min_area_fraction: float = 0.02) -> np.ndarray:
+                    min_area_fraction: float = 0.005) -> np.ndarray:
     kept = np.zeros(camera_count, bool)
     covered = ~valid.copy()
     min_cells = max(1, int(valid.sum() * min_area_fraction))
@@ -345,7 +346,7 @@ def _relax_labels(labels: np.ndarray, top_cams: np.ndarray,
 def bake_plane(pf: PlaneFrame, cams: list[Camera], photos_dir: str, diag: float,
                occ: Occluder, plane_normal: np.ndarray, up_world: np.ndarray,
                facing_min=0.342, max_photos=60, crop=0.9,
-               cell_m=0.055,
+               cell_m=0.15,
                scale_m_per_mesh_unit=1.0, photo_resolver=None,
                available_photo_keys=None) -> tuple[np.ndarray, float, list[int]]:
     """Bake con lo stesso schema del viewer locale: scelta su celle, copertura
@@ -367,8 +368,8 @@ def bake_plane(pf: PlaneFrame, cams: list[Camera], photos_dir: str, diag: float,
                            np.zeros(3))
     if np.dot(n, camera_direction) < 0:
         n = -n
-    top_scores = np.full((len(world), 6), -np.inf, np.float32)
-    top_cams = np.full((len(world), 6), -1, np.int32)
+    top_scores = np.full((len(world), _TOP_CAMERA_SLOTS), -np.inf, np.float32)
+    top_cams = np.full((len(world), _TOP_CAMERA_SLOTS), -1, np.int32)
     cmin, cmax = (1 - crop) * 0.5, 1 - (1 - crop) * 0.5
     proximity_scale = max(diag * 0.1, 1e-4)
 
@@ -409,8 +410,6 @@ def bake_plane(pf: PlaneFrame, cams: list[Camera], photos_dir: str, diag: float,
     relax_scores = np.where(allowed, top_scores, -np.inf)
     relax_valid = valid_poly & np.any(allowed, axis=1)
     labels = _relax_labels(labels, relax_cams, relax_scores, relax_valid, cw, ch)
-    holes = candidate_valid & (labels < 0)
-    labels[holes] = top_cams[holes, 0]
 
     full_labels = cv2.resize(labels.reshape(ch, cw).astype(np.int32),
                              (pf.tex_w, pf.tex_h), interpolation=cv2.INTER_NEAREST)

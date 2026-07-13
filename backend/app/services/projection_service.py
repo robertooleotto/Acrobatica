@@ -291,8 +291,8 @@ def project(session_id: str) -> dict:
 
             summary = ortho_bake.bake_planes(
                 str(inp["mesh"]), inp["poses"], str(inp["photos"]),
-                inp["planes"], str(out_dir), texel_mm=8.0,
-                max_photos=60, occlusion=False, facing_min=0.342,
+                inp["planes"], str(out_dir), texel_mm=12.0,
+                max_photos=20, occlusion=False, facing_min=0.342,
                 crop=0.9, scale_m_per_mesh_unit=scale,
                 photo_resolver=resolve_photo,
                 available_photo_keys=set(inp["photo_paths"]),

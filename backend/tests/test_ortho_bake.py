@@ -31,6 +31,34 @@ def _plane():
     }
 
 
+def test_project_flips_camera_y_into_pixel_y():
+    cam = ortho_bake.Camera(
+        key="0",
+        C=np.array([0.0, 0.0, 1.0]),
+        R=np.eye(3),
+        fx=100.0,
+        fy=100.0,
+        cx=64.0,
+        cy=64.0,
+        image_width=128,
+        image_height=128,
+    )
+    x, y, z = ortho_bake._project(cam, np.array([[0.0, 0.2, 0.0]]))
+    assert x[0] == pytest.approx(64.0)
+    assert y[0] == pytest.approx(44.0)
+    assert z[0] == pytest.approx(1.0)
+
+
+def test_camera_selection_honors_photo_limit():
+    top_cams = np.tile(np.arange(12, dtype=np.int32), (100, 1))
+    valid = np.ones(100, dtype=bool)
+    kept = ortho_bake._select_cameras(
+        top_cams, valid, camera_count=12, max_photos=4,
+        min_area_fraction=0.0,
+    )
+    assert int(kept.sum()) <= 4
+
+
 def test_plane_frame_prefers_reviewed_corners_over_support_triangles(tmp_path):
     mesh = tmp_path / "mesh.obj"
     _write_mesh(mesh)

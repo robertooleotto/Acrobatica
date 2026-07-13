@@ -8,8 +8,8 @@ con occlusione (raycast Open3D). Output: PLY a colori-per-vertice.
 Nota qualità: il per-vertice è "morbido" (1 colore per vertice). Per piena
 risoluzione serve un bake nell'atlante UV (per-texel) — qui non implementato.
 
-Proiezione pinhole OC (convenzione validata, vedi project_planes_photos.py):
-    Pc = (G - C) @ R ; z = -Pc[2] ; u = fx*Pc0/z + cx ; v = fy*Pc1/z + cy
+Proiezione pinhole OC (convenzione validata nel NativePoseMeshViewer):
+    Pc = (G - C) @ R ; z = -Pc[2] ; u = fx*Pc0/z + cx ; v = cy - fy*Pc1/z
 
 Uso:
     python project_photos_to_mesh.py \
@@ -93,7 +93,7 @@ def main():
         z = -Pc[..., 2]
         with np.errstate(divide="ignore", invalid="ignore"):
             u = fx * Pc[..., 0] / z + cx
-            v = fy * Pc[..., 1] / z + cy
+            v = cy - fy * Pc[..., 1] / z
         pth = photo_path(args.photos, k)
         if pth is None:
             continue
