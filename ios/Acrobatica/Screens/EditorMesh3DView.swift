@@ -20,6 +20,9 @@ struct EditorMesh3DView: View {
     @State private var caricandoCloud = false
     @State private var toastCloud: String?
     @State private var autoRiconoscimentoFatto = false
+    /// Strumenti del vecchio flusso di costruzione/rifinitura manuale. Restano
+    /// implementati, ma non occupano il pannello del flusso automatico corrente.
+    private let abilitaControlliManualiPiani = false
 
     /// `meshFile` nil → mesh demo procedurale. `sessionId` presente → abilita il
     /// salvataggio della mesh RIPULITA sul backend (kind=clean).
@@ -794,48 +797,50 @@ struct EditorMesh3DView: View {
                 // Riconoscimento dal pennello + revisione multipunto dei piani.
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
-                    ChipSelezione("Nuovo layer", "plus.square.on.square") {
-                        model.nuovaFaccia()
-                    }
-                    ChipSelezione("Crea facce layer", "square.stack.3d.up.fill") {
-                        model.generaPianiDaLayer()
-                    }
-                    ChipSelezione("Crea spalla", "rectangle.connected.to.line.below") {
-                        model.creaSpallaDaPianiSelezionati()
-                    }
-                    ChipSelezione("Espandi al piano", "arrow.up.backward.and.arrow.down.forward") {
-                        model.espandiAlPiano()
-                    }
-                    Button { model.attivaPuntoZero() } label: {
-                        Label("Rivedi piani", systemImage: "scope")
-                            .font(Theme.Typo.caption(11, .semibold))
-                            .foregroundStyle(model.attendePuntoZero ? .white : EditorTheme.testo)
-                            .padding(.horizontal, 10).padding(.vertical, 7)
-                            .background(model.attendePuntoZero ? EditorTheme.accento : EditorTheme.panelAlt,
-                                        in: RoundedRectangle(cornerRadius: 8))
-                    }
-                    if model.attendePuntoZero {
-                        Text("\(model.numPuntiRevisione) punti")
-                            .font(Theme.Typo.caption(10)).foregroundStyle(EditorTheme.accento)
-                        Button { model.applicaRevisionePiani() } label: {
-                            Image(systemName: "checkmark").frame(width: 28, height: 28)
+                        if abilitaControlliManualiPiani {
+                            ChipSelezione("Nuovo layer", "plus.square.on.square") {
+                                model.nuovaFaccia()
+                            }
+                            ChipSelezione("Crea facce layer", "square.stack.3d.up.fill") {
+                                model.generaPianiDaLayer()
+                            }
+                            ChipSelezione("Crea spalla", "rectangle.connected.to.line.below") {
+                                model.creaSpallaDaPianiSelezionati()
+                            }
+                            ChipSelezione("Espandi al piano", "arrow.up.backward.and.arrow.down.forward") {
+                                model.espandiAlPiano()
+                            }
                         }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(model.numPuntiRevisione > 0 ? EditorTheme.accento : EditorTheme.testoMuto)
-                        .disabled(model.numPuntiRevisione == 0)
-                        .help("Adatta e salda i piani")
-                        Button { model.annullaRevisionePiani() } label: {
-                            Image(systemName: "xmark").frame(width: 28, height: 28)
+                        Button { model.attivaPuntoZero() } label: {
+                            Label("Rivedi piani", systemImage: "scope")
+                                .font(Theme.Typo.caption(11, .semibold))
+                                .foregroundStyle(model.attendePuntoZero ? .white : EditorTheme.testo)
+                                .padding(.horizontal, 10).padding(.vertical, 7)
+                                .background(model.attendePuntoZero ? EditorTheme.accento : EditorTheme.panelAlt,
+                                            in: RoundedRectangle(cornerRadius: 8))
                         }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(EditorTheme.testoMuto)
-                        .help("Annulla revisione")
-                    }
-                    Spacer()
+                        if model.attendePuntoZero {
+                            Text("\(model.numPuntiRevisione) punti")
+                                .font(Theme.Typo.caption(10)).foregroundStyle(EditorTheme.accento)
+                            Button { model.applicaRevisionePiani() } label: {
+                                Image(systemName: "checkmark").frame(width: 28, height: 28)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(model.numPuntiRevisione > 0 ? EditorTheme.accento : EditorTheme.testoMuto)
+                            .disabled(model.numPuntiRevisione == 0)
+                            .help("Adatta e salda i piani")
+                            Button { model.annullaRevisionePiani() } label: {
+                                Image(systemName: "xmark").frame(width: 28, height: 28)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(EditorTheme.testoMuto)
+                            .help("Annulla revisione")
+                        }
+                        Spacer()
                     }
                 }
                 // Rifinitura piano (§6): squadra/verticale/orizzontale/offset.
-                if fa.pianoNormale != nil {
+                if abilitaControlliManualiPiani, fa.pianoNormale != nil {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 6) {
                             ChipSelezione("Squadra", "square.dashed") { model.squadraPiano(fa.id) }
@@ -6273,17 +6278,19 @@ final class Mesh3DModel: ObservableObject {
         guard let index = facce.firstIndex(where: { $0.id == id }), !riferimenti.isEmpty else { return false }
         if facce[index].poligono == nil { generaPoligono(perFaccia: id) }
         guard let oldPoint = facce[index].pianoPunto,
-              let oldNormal0 = facce[index].pianoNormale else { return false }
+              let oldNormal0 = facce[index].pianoNormale,
+              let polygon = facce[index].poligono,
+              polygon.count >= 3 else { return false }
         let oldNormal = simd_normalize(oldNormal0)
         let su = simd_normalize(gravitaSu)
         let anchorMean = riferimenti.map(\.punto).reduce(SIMD3<Float>(repeating: 0), +)
             / Float(riferimenti.count)
         let anchorQuota = mediana(riferimenti.map { simd_dot($0.punto, su) })
-        let polygon = facce[index].poligono ?? []
 
         var oldRight = simd_cross(su, oldNormal)
         if simd_length(oldRight) < 1e-5 { oldRight = simd_cross(SIMD3<Float>(1, 0, 0), oldNormal) }
         oldRight = simd_normalize(oldRight)
+        let oldUp = simd_normalize(simd_cross(oldNormal, oldRight))
         let oldXs = polygon.map { simd_dot($0 - oldPoint, oldRight) }
         let oldMinX = (oldXs.min() ?? -estensioneMesh) - estensioneMesh * 0.06
         let oldMaxX = (oldXs.max() ?? estensioneMesh) + estensioneMesh * 0.06
@@ -6317,8 +6324,10 @@ final class Mesh3DModel: ObservableObject {
         // Tutti i riferimenti hanno peso uguale sull'offset: la mediana evita che
         // un singolo tocco accidentale sposti l'intera facciata.
         let anchorOffset = mediana(riferimenti.map { simd_dot($0.punto, fittedNormal) })
-        let fittedPoint = anchorMean + fittedNormal
-            * (anchorOffset - simd_dot(anchorMean, fittedNormal))
+        // Il punto rappresentativo precedente viene proiettato sul nuovo piano:
+        // in questo modo i riferimenti non introducono traslazioni nel piano.
+        let fittedPoint = oldPoint + fittedNormal
+            * (anchorOffset - simd_dot(oldPoint, fittedNormal))
 
         var right = simd_cross(su, fittedNormal)
         if simd_length(right) < 1e-5 { right = simd_cross(SIMD3<Float>(1, 0, 0), fittedNormal) }
@@ -6340,41 +6349,20 @@ final class Mesh3DModel: ObservableObject {
         if support.count < 8 { support = orientationSupport }
         guard !support.isEmpty else { return false }
 
-        var xs: [Float] = []
-        var ys: [Float] = []
-        xs.reserveCapacity(support.count * 3)
-        ys.reserveCapacity(support.count * 3)
-        for triangleIndex in support {
-            let triangle = mesh.triangles[triangleIndex]
-            for vertex in [mesh.vertices[Int(triangle.x)], mesh.vertices[Int(triangle.y)], mesh.vertices[Int(triangle.z)]] {
-                xs.append(simd_dot(vertex - fittedPoint, right))
-                ys.append(simd_dot(vertex - fittedPoint, up))
-            }
+        // Conserva forma, dimensioni e numero di vertici del poligono. Cambiano
+        // soltanto il piano su cui vive e il suo orientamento nello spazio.
+        let transformedPolygon = polygon.map { vertex -> SIMD3<Float> in
+            let local = vertex - oldPoint
+            let x = simd_dot(local, oldRight)
+            let y = simd_dot(local, oldUp)
+            return fittedPoint + right * x + up * y
         }
-        xs.sort(); ys.sort()
-        guard xs.count >= 3, ys.count >= 3 else { return false }
-        func percentile(_ values: [Float], _ fraction: Float) -> Float {
-            values[min(values.count - 1, max(0, Int((Float(values.count - 1) * fraction).rounded())))]
-        }
-        let minX = percentile(xs, 0.006)
-        let maxX = percentile(xs, 0.994)
-        let anchorY = mediana(riferimenti.map { simd_dot($0.punto - fittedPoint, up) })
-        let supportMinY = percentile(ys, 0.006)
-        let minY = min(anchorY, percentile(ys, 0.08)) >= supportMinY - estensioneMesh * 0.03
-            ? anchorY : supportMinY
-        let maxY = percentile(ys, 0.996)
-        guard maxX - minX > estensioneMesh * 0.002,
-              maxY - minY > estensioneMesh * 0.002 else { return false }
-        func point(_ x: Float, _ y: Float) -> SIMD3<Float> { fittedPoint + right * x + up * y }
 
         facce[index].pianoPunto = fittedPoint
         facce[index].pianoNormale = fittedNormal
         facce[index].triangoli = support
         facce[index].erroreRms = mesh.rmsDalPiano(support, punto: fittedPoint, normale: fittedNormal)
-        facce[index].poligono = [
-            point(minX, minY), point(maxX, minY),
-            point(maxX, maxY), point(minX, maxY),
-        ]
+        facce[index].poligono = transformedPolygon
         return true
     }
 
@@ -6432,9 +6420,11 @@ final class Mesh3DModel: ObservableObject {
                           let edgeA = edgeVicino(polygonA, linePoint: linePoint, lineDirection: direction),
                           let edgeB = edgeVicino(polygonB, linePoint: linePoint, lineDirection: direction),
                           edgeA.distance <= maxDistance, edgeB.distance <= maxDistance else { continue }
-                    let low = max(edgeA.minT, edgeB.minT)
-                    let high = min(edgeA.maxT, edgeB.maxT)
-                    guard high - low >= minOverlap else { continue }
+                    let overlapLow = max(edgeA.minT, edgeB.minT)
+                    let overlapHigh = min(edgeA.maxT, edgeB.maxT)
+                    guard overlapHigh - overlapLow >= minOverlap else { continue }
+                    let low = min(edgeA.minT, edgeB.minT)
+                    let high = max(edgeA.maxT, edgeB.maxT)
                     let sharedLow = linePoint + direction * low
                     let sharedHigh = linePoint + direction * high
 
