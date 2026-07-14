@@ -473,6 +473,8 @@ class ProjectionResult(BaseModel):
     main_obj: Optional[MeshFileInfo] = None
     files: list[MeshFileInfo] = []
     planes: list[dict] = []
+    projection_mode: str = ""
+    fallback_reason: str = ""
 
 
 class ProjectionJobResult(ProjectionResult):

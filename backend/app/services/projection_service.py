@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -57,6 +58,53 @@ def _file_in(entry: dict, name: str) -> Optional[str]:
 def _mesh_main_path(entry: dict) -> Optional[str]:
     main = entry.get("main_obj")
     return _file_in(entry, main) if main else None
+
+
+def _download_raw_reference(result: dict, root: Path) -> Optional[dict[str, Path]]:
+    """Scarica solo OBJ, MTL e immagini necessarie al riferimento OC."""
+    raw = _mesh_entry(result, "raw")
+    files = [item for item in raw.get("files", []) if isinstance(item, dict)]
+    main_name = Path(raw.get("main_obj") or "").name
+    obj_item = next((item for item in files
+                     if Path(item.get("name", "")).name == main_name
+                     and Path(main_name).suffix.lower() == ".obj"), None)
+    if obj_item is None:
+        obj_item = next((item for item in files
+                         if Path(item.get("name", "")).suffix.lower() == ".obj"), None)
+    mtl_items = [item for item in files
+                 if Path(item.get("name", "")).suffix.lower() == ".mtl"]
+    if not obj_item or not mtl_items:
+        return None
+
+    raw_dir = root / "raw_reference"
+    raw_dir.mkdir()
+    obj = raw_dir / Path(obj_item["name"]).name
+    obj.write_bytes(storage_service.download_bytes(obj_item["path"]))
+    referenced_mtl = None
+    for line in obj.read_text(errors="ignore").splitlines():
+        if line.lower().startswith("mtllib "):
+            referenced_mtl = Path(line.split(maxsplit=1)[1].strip()).name
+            break
+    mtl_item = next((item for item in mtl_items
+                     if Path(item.get("name", "")).name == referenced_mtl), mtl_items[0])
+    mtl = raw_dir / Path(mtl_item["name"]).name
+    mtl.write_bytes(storage_service.download_bytes(mtl_item["path"]))
+
+    image_suffixes = {".png", ".jpg", ".jpeg"}
+    for item in files:
+        name = Path(item.get("name", "")).name
+        if Path(name).suffix.lower() in image_suffixes:
+            (raw_dir / name).write_bytes(storage_service.download_bytes(item["path"]))
+
+    # L'upload appiattisce i path alla basename. Normalizziamo map_Kd allo stesso
+    # modo, così funzionano anche OBJ esportati con una sottocartella textures/.
+    normalized = []
+    for line in mtl.read_text(errors="ignore").splitlines():
+        if line.strip().lower().startswith("map_kd "):
+            line = f"map_Kd {Path(line.split()[-1]).name}"
+        normalized.append(line)
+    mtl.write_text("\n".join(normalized) + "\n")
+    return {"obj": obj, "mtl": mtl}
 
 
 def gather_inputs(session_id: str) -> Optional[dict]:
@@ -176,7 +224,12 @@ def _download_inputs(session_id: str, sess: dict, root: Path) -> dict:
         if pose is not None and metadata.get("image_width") and metadata.get("image_height"):
             pose["image_width_height"] = [
                 int(metadata["image_width"]), int(metadata["image_height"])]
+    try:
+        raw_reference = _download_raw_reference(result, root)
+    except Exception:
+        raw_reference = None
     return {"mesh": mesh, "poses": poses, "planes": planes,
+            "raw_reference": raw_reference,
             "photos": photos_dir, "photo_paths": photo_paths,
             "photo_count": len(photos)}
 
@@ -222,6 +275,8 @@ def _public_result(sess: dict) -> dict:
         "main_obj": main,
         "files": public_files,
         "planes": manifest.get("planes", []),
+        "projection_mode": manifest.get("projection_mode", ""),
+        "fallback_reason": manifest.get("fallback_reason", ""),
     }
 
 
@@ -289,17 +344,62 @@ def project(session_id: str) -> dict:
                         f"Scarico foto selezionate: {downloaded[0]}")
                 return str(local)
 
-            summary = ortho_bake.bake_planes(
-                str(inp["mesh"]), inp["poses"], str(inp["photos"]),
-                inp["planes"], str(out_dir), texel_mm=12.0,
-                max_photos=20, occlusion=False, facing_min=0.342,
-                crop=0.9, scale_m_per_mesh_unit=scale,
-                photo_resolver=resolve_photo,
-                available_photo_keys=set(inp["photo_paths"]),
-                progress=lambda done, total, name: _set_job(
-                    session_id, "running", 0.15 + 0.65 * done / max(total, 1),
-                    f"Proietto piano {done}/{total}: {name}"),
-            )
+            texel_mm = float(os.environ.get("ACRO_PROJECTION_TEXEL_MM", "20"))
+            max_photos = int(os.environ.get("ACRO_PROJECTION_REGISTER_PHOTOS", "20"))
+            coverage_photos = int(os.environ.get("ACRO_PROJECTION_COVERAGE_PHOTOS", "60"))
+            fallback_reason = ""
+            raw_reference = inp.get("raw_reference")
+            enhanced = bool(raw_reference) and os.environ.get(
+                "ACRO_OC_REFERENCE_BAKE", "1") not in {"0", "false", "False"}
+            if enhanced:
+                try:
+                    from . import oc_reference_bake
+
+                    _set_job(session_id, "running", 0.14,
+                             "Allineo le foto al riferimento Object Capture")
+                    summary = oc_reference_bake.bake_planes(
+                        str(inp["mesh"]), str(raw_reference["obj"]),
+                        str(raw_reference["mtl"]), inp["poses"],
+                        str(inp["photos"]), inp["planes"], str(out_dir),
+                        texel_mm=texel_mm, max_photos=max_photos,
+                        coverage_photos=coverage_photos, crop=0.9,
+                        scale_m_per_mesh_unit=scale,
+                        photo_resolver=resolve_photo,
+                        progress=lambda done, total, name: _set_job(
+                            session_id, "running", 0.15 + 0.65 * done / max(total, 1),
+                            f"Registro piano {done}/{total}: {name}"),
+                    )
+                except Exception as exc:
+                    fallback_reason = str(exc)[:300]
+                    shutil.rmtree(out_dir, ignore_errors=True)
+                    _set_job(session_id, "running", 0.14,
+                             "Riferimento OC non utilizzabile, applico le pose")
+                    summary = ortho_bake.bake_planes(
+                        str(inp["mesh"]), inp["poses"], str(inp["photos"]),
+                        inp["planes"], str(out_dir), texel_mm=texel_mm,
+                        max_photos=max_photos, occlusion=False, facing_min=0.342,
+                        crop=0.9, scale_m_per_mesh_unit=scale,
+                        photo_resolver=resolve_photo,
+                        available_photo_keys=set(inp["photo_paths"]),
+                        progress=lambda done, total, name: _set_job(
+                            session_id, "running", 0.15 + 0.65 * done / max(total, 1),
+                            f"Proietto piano {done}/{total}: {name}"),
+                    )
+                    summary["projection_mode"] = "pose_only_fallback"
+            else:
+                fallback_reason = "mesh OC testurizzata non disponibile"
+                summary = ortho_bake.bake_planes(
+                    str(inp["mesh"]), inp["poses"], str(inp["photos"]),
+                    inp["planes"], str(out_dir), texel_mm=texel_mm,
+                    max_photos=max_photos, occlusion=False, facing_min=0.342,
+                    crop=0.9, scale_m_per_mesh_unit=scale,
+                    photo_resolver=resolve_photo,
+                    available_photo_keys=set(inp["photo_paths"]),
+                    progress=lambda done, total, name: _set_job(
+                        session_id, "running", 0.15 + 0.65 * done / max(total, 1),
+                        f"Proietto piano {done}/{total}: {name}"),
+                )
+                summary["projection_mode"] = "pose_only_fallback"
             if summary["count"] == 0:
                 raise ProjectionError("Nessun piano ha prodotto una texture")
 
@@ -329,6 +429,8 @@ def project(session_id: str) -> dict:
                 "coverage": summary["coverage"],
                 "photo_count": inp["photo_count"],
                 "scale_m_per_mesh_unit": scale,
+                "projection_mode": summary.get("projection_mode", "pose_only"),
+                "fallback_reason": fallback_reason,
             }
             latest = session_store.get_session(session_id) or sess
             result = latest.get("result") or {}
