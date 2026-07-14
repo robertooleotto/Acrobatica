@@ -2790,8 +2790,36 @@ final class OcclusionTester {
 
 struct ContentView: View {
     @StateObject private var model = ViewerModel()
+    @State private var workspace = 1
+    @State private var viewerLoaded = false
 
     var body: some View {
+        VStack(spacing: 0) {
+            Picker("Area", selection: $workspace) {
+                Label("Viewer 3D", systemImage: "cube.transparent").tag(0)
+                Label("Compositing", systemImage: "square.3.layers.3d").tag(1)
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 300)
+            .padding(8)
+
+            Divider()
+
+            if workspace == 0 {
+                viewerWorkspace
+            } else {
+                CompositingWorkspaceView()
+            }
+        }
+        .frame(minWidth: 1120, minHeight: 760)
+        .onChange(of: workspace) { value in
+            guard value == 0, !viewerLoaded else { return }
+            viewerLoaded = true
+            model.reload()
+        }
+    }
+
+    private var viewerWorkspace: some View {
         HStack(spacing: 0) {
             sidebar
             NativeSceneView(
@@ -2807,8 +2835,6 @@ struct ContentView: View {
             )
             .background(Color.black)
         }
-        .frame(minWidth: 1120, minHeight: 760)
-        .onAppear { model.reload() }
     }
 
     private var sidebar: some View {

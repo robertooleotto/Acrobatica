@@ -4,6 +4,18 @@ import numpy as np
 
 from app.services import oc_reference_bake
 from app.services import ortho_bake
+from scripts import run_oc_reference_registration_local as registration
+
+
+def test_diagnostic_overlay_accepts_an_empty_overlap():
+    reference = np.full((12, 8, 3), 90, np.uint8)
+    source = np.full((12, 8, 3), 220, np.uint8)
+
+    output = registration._overlay(
+        reference, source, np.zeros((12, 8), bool),
+    )
+
+    assert np.array_equal(output, reference)
 
 
 def test_compose_plane_uses_registered_photo_and_preserves_alpha(monkeypatch, tmp_path):

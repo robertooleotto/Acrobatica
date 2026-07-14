@@ -390,7 +390,11 @@ def register_residual(
 
 def _overlay(reference: np.ndarray, source: np.ndarray, mask: np.ndarray) -> np.ndarray:
     output = reference.copy()
-    output[mask] = cv2.addWeighted(reference[mask], 0.5, source[mask], 0.5, 0)
+    if not mask.any():
+        return output
+    blended = cv2.addWeighted(reference[mask], 0.5, source[mask], 0.5, 0)
+    if blended is not None:
+        output[mask] = blended
     return output
 
 
@@ -832,8 +836,9 @@ def main() -> None:
     for mask in compositing_masks:
         coverage_union |= mask
     coverage_limit = max(args.max_photos, args.coverage_photos)
+    filler_start = args.max_photos if accepted_images else 0
     for rank, candidate in enumerate(
-        ranked[args.max_photos:coverage_limit], args.max_photos + 1,
+        ranked[filler_start:coverage_limit], filler_start + 1,
     ):
         key = str(candidate["key"])
         path = _photo_path(args.photos, key)
@@ -883,6 +888,9 @@ def main() -> None:
     registered_union = np.zeros(reference_mask.shape, bool)
     for mask in compositing_masks:
         registered_union |= mask
+    coverage_target = planar_reference
+    if not coverage_target.any():
+        coverage_target = ob._polygon_mask(pf.tex_w, pf.tex_h, pf.polygon_uv)
     accepted_regs = [
         item["registration"] for item in photo_reports
         if isinstance(item.get("registration"), dict)
@@ -916,7 +924,7 @@ def main() -> None:
         "oc_reference_coverage": round(float(reference_mask.mean()), 4),
         "planar_reference_coverage": round(float(planar_reference.mean()), 4),
         "registered_planar_coverage": round(
-            float(registered_union[planar_reference].mean()) if planar_reference.any() else 0.0,
+            float(registered_union[coverage_target].mean()) if coverage_target.any() else 0.0,
             4,
         ),
         "accepted_photos": len(accepted_images),

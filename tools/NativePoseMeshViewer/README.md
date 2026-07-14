@@ -1,5 +1,21 @@
 # NativePoseMeshViewer
 
+## Compositing locale
+
+La vista `Compositing` usa la texture OC come riferimento metrico e registra le
+foto a partire dalle pose. Le foto accettate vengono poi allineate globalmente
+tra loro con un grafo di overlap, match reciproci e un least-squares robusto,
+vincolato a non spostare il gruppo rispetto all'atlas OC. La modalita `Regola`
+applica una micro-correzione residua per foto (traslazione, rotazione e scala). `Salva` scrive
+`compositing_adjustments.json` e rigenera soltanto `Blend` e `Best`, senza
+ripetere il calcolo del riferimento OC o la registrazione automatica.
+
+Il composito finale assegna ogni regione a una foto dominante e sfuma soltanto
+una fascia stretta sui raccordi. Le zone senza copertura fotografica restano
+trasparenti: la texture OC non viene usata come riempimento del risultato.
+Per il preset locale vengono allineate globalmente 20 foto; le candidate fino
+alla sessantesima sono usate solo per riempire eventuali bordi ancora scoperti.
+
 Visore macOS (SwiftUI + SceneKit) per ispezionare la proiezione delle foto della
 sessione Object Capture sui piani BCS della facciata, usando le **pose OC native**
 (frame OC). Serve a mettere a punto e diagnosticare il mosaico foto→piani prima di
