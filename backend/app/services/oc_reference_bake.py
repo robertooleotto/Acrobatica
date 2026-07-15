@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import gc
 import json
+import math
 import os
 from pathlib import Path
 
@@ -31,6 +32,118 @@ def _identity_correction() -> dict[str, object]:
     }
 
 
+def adaptive_registration_budget(
+    pf: ob.PlaneFrame,
+    base_photos: int = 12,
+    max_photos: int = 32,
+) -> int:
+    """Dimensiona il tetto di registrazione dalla superficie reale del piano."""
+    span_need = math.ceil(pf.width_m / 3.0)
+    area_need = math.ceil(pf.area_m2 / 40.0)
+    return min(max(max_photos, base_photos), max(base_photos, span_need, area_need))
+
+
+def _select_registration_candidates(
+    pf: ob.PlaneFrame,
+    normal: np.ndarray,
+    cams: list[ob.Camera],
+    ranked: list[dict],
+    *,
+    crop: float,
+    base_photos: int,
+    max_photos: int,
+) -> tuple[list[dict], dict]:
+    """Seleziona viste distribuite finche il piano ha due coperture frontali."""
+    budget = adaptive_registration_budget(pf, base_photos, max_photos)
+    if not ranked or budget <= 0:
+        return [], {"budget": budget, "selected": 0}
+
+    grid_w = min(180, max(24, int(math.ceil(pf.width_m / 0.25))))
+    grid_h = min(180, max(24, int(math.ceil(pf.height_m / 0.25))))
+    cols, rows = np.meshgrid(np.arange(grid_w), np.arange(grid_h))
+    gu = (cols.reshape(-1) + 0.5) / grid_w * pf.width_world
+    gv = (1.0 - (rows.reshape(-1) + 0.5) / grid_h) * pf.height_world
+    world = pf.origin + gu[:, None] * pf.u + gv[:, None] * pf.v
+    polygon = ob._polygon_mask(grid_w, grid_h, pf.polygon_uv).reshape(-1)
+    polygon_cells = max(int(polygon.sum()), 1)
+    quality_margin = max((1.0 - crop) * 0.5, 0.12)
+    camera_by_key = {str(int(cam.key)): cam for cam in cams}
+    masks: list[np.ndarray] = []
+    usable_ranked: list[dict] = []
+    n = ob._unit(np.asarray(normal, float))
+
+    for candidate in ranked[:120]:
+        cam = camera_by_key.get(str(candidate["key"]))
+        if cam is None:
+            continue
+        x, y, z = ob._project(cam, world)
+        to_camera = cam.C - world
+        distance = np.linalg.norm(to_camera, axis=1)
+        facing = (to_camera / np.maximum(distance[:, None], 1e-6)) @ n
+        mask = (
+            polygon
+            & (z > 0.01)
+            & (facing >= 0.342)
+            & (x >= quality_margin * cam.image_width)
+            & (x <= (1.0 - quality_margin) * cam.image_width)
+            & (y >= quality_margin * cam.image_height)
+            & (y <= (1.0 - quality_margin) * cam.image_height)
+        )
+        if mask.any():
+            usable_ranked.append(candidate)
+            masks.append(mask)
+
+    selected: list[dict] = []
+    selected_ids: set[int] = set()
+    coverage_count = np.zeros(len(world), np.uint8)
+    minimum = min(base_photos, len(usable_ranked))
+
+    while len(selected) < min(budget, len(usable_ranked)):
+        deficit = polygon & (coverage_count < 2)
+        best_index = -1
+        best_gain = -1
+        best_overlap = -1
+        covered = coverage_count > 0
+        for index, mask in enumerate(masks):
+            if index in selected_ids:
+                continue
+            gain = int((mask & deficit).sum())
+            overlap = int((mask & covered).sum()) if selected else 0
+            if gain > best_gain or (gain == best_gain and overlap > best_overlap):
+                best_index, best_gain, best_overlap = index, gain, overlap
+        if best_index < 0:
+            break
+        single_coverage = float((coverage_count[polygon] >= 1).mean())
+        double_coverage = float((coverage_count[polygon] >= 2).mean())
+        if (len(selected) >= minimum and single_coverage >= 0.995
+                and double_coverage >= 0.95):
+            break
+        if len(selected) >= minimum and best_gain < max(1, int(polygon_cells * 0.002)):
+            break
+        selected_ids.add(best_index)
+        selected.append(usable_ranked[best_index])
+        coverage_count[masks[best_index]] += 1
+
+    # Mantiene il baseline anche quando le maschere centrali sono troppo severe.
+    selected_keys = {str(item["key"]) for item in selected}
+    for candidate in ranked:
+        if len(selected) >= min(base_photos, len(ranked)) or len(selected) >= budget:
+            break
+        if str(candidate["key"]) not in selected_keys:
+            selected.append(candidate)
+            selected_keys.add(str(candidate["key"]))
+
+    single_coverage = float((coverage_count[polygon] >= 1).mean())
+    double_coverage = float((coverage_count[polygon] >= 2).mean())
+    return selected, {
+        "budget": budget,
+        "selected": len(selected),
+        "single_coverage": round(single_coverage, 4),
+        "double_coverage": round(double_coverage, 4),
+        "grid": [grid_w, grid_h],
+    }
+
+
 def _compose_plane(
     textured_mesh: registration.TexturedMesh,
     pf: ob.PlaneFrame,
@@ -40,6 +153,7 @@ def _compose_plane(
     *,
     scale_m_per_mesh_unit: float,
     max_photos: int,
+    registration_ceiling: int,
     coverage_photos: int,
     crop: float,
     depth_m: float,
@@ -75,7 +189,15 @@ def _compose_plane(
     accepted_keys: list[str] = []
     photo_reports: list[dict[str, object]] = []
 
-    registration_candidates = ranked[:max_photos] if can_register else []
+    if can_register:
+        registration_candidates, selection_report = _select_registration_candidates(
+            pf, normal, cams, ranked, crop=crop,
+            base_photos=max_photos, max_photos=registration_ceiling,
+        )
+    else:
+        registration_candidates, selection_report = [], {
+            "budget": 0, "selected": 0, "reason": "riferimento planare insufficiente",
+        }
     for rank, candidate in enumerate(registration_candidates, 1):
         key = str(candidate["key"])
         resolved = photo_resolver(key)
@@ -127,7 +249,7 @@ def _compose_plane(
 
     # Se il riferimento OC non ha feature sufficienti, conserva comunque il
     # risultato metrico delle pose invece di produrre una texture vuota.
-    filler_start = max_photos if accepted_images else 0
+    filler_start = 0
     filler_limit = max(max_photos, coverage_photos)
     for rank, candidate in enumerate(ranked[filler_start:filler_limit], filler_start + 1):
         key = str(candidate["key"])
@@ -176,6 +298,7 @@ def _compose_plane(
         if polygon.any() else 0.0,
         "accepted_photos": len(accepted_images),
         "registered_photos": len(corrections),
+        "registration_selection": selection_report,
         "global_alignment": global_report,
         "photos": photo_reports,
     }
@@ -193,6 +316,7 @@ def bake_planes(
     *,
     texel_mm: float = 20.0,
     max_photos: int = 20,
+    registration_ceiling: int = 32,
     coverage_photos: int = 60,
     crop: float = 0.9,
     scale_m_per_mesh_unit: float = 1.0,
@@ -232,6 +356,7 @@ def bake_planes(
             textured_mesh, pf, plane, cams, photo_resolver,
             scale_m_per_mesh_unit=scale_m_per_mesh_unit,
             max_photos=max_photos,
+            registration_ceiling=registration_ceiling,
             coverage_photos=coverage_photos,
             crop=crop,
             depth_m=2.0,
@@ -249,6 +374,7 @@ def bake_planes(
             "tex_w": pf.tex_w, "tex_h": pf.tex_h,
             "area_m2": round(area, 2), "coverage": round(coverage, 3),
             "photos_used": len(used), "registered_photos": report["registered_photos"],
+            "registration_budget": report["registration_selection"].get("budget", 0),
             "projection_mode": "oc_reference_registered",
         }
         results.append(result)

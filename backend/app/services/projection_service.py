@@ -391,6 +391,8 @@ def project(session_id: str) -> dict:
 
             texel_mm = float(os.environ.get("ACRO_PROJECTION_TEXEL_MM", "20"))
             max_photos = int(os.environ.get("ACRO_PROJECTION_REGISTER_PHOTOS", "12"))
+            registration_ceiling = int(os.environ.get(
+                "ACRO_PROJECTION_MAX_REGISTER_PHOTOS", "32"))
             coverage_photos = int(os.environ.get("ACRO_PROJECTION_COVERAGE_PHOTOS", "60"))
             fallback_reason = ""
             raw_reference = inp.get("raw_reference")
@@ -407,6 +409,7 @@ def project(session_id: str) -> dict:
                         str(raw_reference["mtl"]), inp["poses"],
                         str(inp["photos"]), inp["planes"], str(out_dir),
                         texel_mm=texel_mm, max_photos=max_photos,
+                        registration_ceiling=registration_ceiling,
                         coverage_photos=coverage_photos, crop=0.9,
                         scale_m_per_mesh_unit=scale,
                         photo_resolver=resolve_photo,
