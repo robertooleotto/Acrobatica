@@ -21,7 +21,6 @@ struct EditorMesh3DView: View {
     @State private var caricandoCloud = false
     @State private var toastCloud: String?
     @State private var autoRiconoscimentoFatto = false
-    @State private var autoTextureDebugFatta = false
     /// Strumenti del vecchio flusso di costruzione/rifinitura manuale. Restano
     /// implementati, ma non occupano il pannello del flusso automatico corrente.
     private let abilitaControlliManualiPiani = false
@@ -185,16 +184,6 @@ struct EditorMesh3DView: View {
             barraSuperiore
             ZStack(alignment: .topTrailing) {
                 SceneKitContainer(model: model)
-                if model.haPianiTexturizzati {
-                    Picker("Vista piani", selection: $model.mostraSviluppoPiani) {
-                        Label("3D", systemImage: "cube").tag(false)
-                        Label("Sviluppo", systemImage: "rectangle.split.3x1").tag(true)
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: 210)
-                    .padding(.top, 180)
-                    .frame(maxWidth: .infinity, alignment: .top)
-                }
                 if model.modoPerimetro && model.perimetroTraccia { PannelloPerimetro(model: model) }
                 hud
                 NavGizmo(model: model).padding(.top, 8).padding(.trailing, 62)
@@ -226,13 +215,6 @@ struct EditorMesh3DView: View {
                 autoRiconoscimentoFatto = true
                 Task { await model.riconosciPianiAuto(sessionId: sid) }
             }
-            #if DEBUG
-            if n > 0, sessionId != nil, !autoTextureDebugFatta,
-               ProcessInfo.processInfo.environment["DEBUG_AUTO_PROJECTION"] == "1" {
-                autoTextureDebugFatta = true
-                caricaUltimaTexture()
-            }
-            #endif
         }
         .sheet(isPresented: Binding(
             get: { !urlsExport.isEmpty },
@@ -3696,7 +3678,6 @@ final class Mesh3DModel: ObservableObject {
                 domain: "AcrobaticaProjection", code: 2,
                 userInfo: [NSLocalizedDescriptionKey: "PNG delle texture non leggibili"])
         }
-        costruisciSviluppoPiani(objURL: url)
         haPianiTexturizzati = !pianiTexturizzatiNode.childNodes.isEmpty
         // I piani coincidono quasi con la superficie OC: se la mesh resta opaca
         // davanti, l'utente vede il modello bianco invece delle ortofoto.
@@ -3704,10 +3685,8 @@ final class Mesh3DModel: ObservableObject {
         mostraMesh = false
         mostraPiani = false
         mostraProxy = false
-        mostraSviluppoPiani = !sviluppoPianiNode.childNodes.isEmpty
-        cursoreInfo = mostraSviluppoPiani
-            ? "Sviluppo piani texturizzati"
-            : "Piani texturizzati caricati"
+        mostraSviluppoPiani = false
+        cursoreInfo = "Piani texturizzati caricati"
     }
 
     /// Porta i piani texturizzati su XY conservando misure, poligoni e UV.

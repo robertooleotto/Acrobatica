@@ -45,7 +45,10 @@ struct AppFlowView: View {
     var body: some View {
         Group {
             #if DEBUG
-            if let sessionId = ProcessInfo.processInfo.environment["DEBUG_EDITOR_SESSION"],
+            if let sessionId = ProcessInfo.processInfo.environment["DEBUG_COMPUTO_SESSION"],
+               !sessionId.isEmpty {
+                ComputoMetricoView(sessionId: sessionId, onChiudi: {})
+            } else if let sessionId = ProcessInfo.processInfo.environment["DEBUG_EDITOR_SESSION"],
                !sessionId.isEmpty {
                 EditorMesh3DCaricamentoView(sessionId: sessionId, onChiudi: {})
             } else {

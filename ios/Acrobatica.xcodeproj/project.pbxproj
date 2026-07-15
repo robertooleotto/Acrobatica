@@ -49,6 +49,7 @@
 		BB12C3D4E5F6071829304181 /* EditableMesh.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB12C3D4E5F6071829304180 /* EditableMesh.swift */; };
 		BB12C3D4E5F6071829304153 /* MarcaturaFacciataView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB12C3D4E5F6071829304152 /* MarcaturaFacciataView.swift */; };
 		BB12C3D4E5F6071829304161 /* EditorMesh3DView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB12C3D4E5F6071829304160 /* EditorMesh3DView.swift */; };
+		CC23D4E5F607182930416201 /* ComputoMetricoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC23D4E5F607182930416200 /* ComputoMetricoView.swift */; };
 		BB12C3D4E5F6071829304155 /* EditorGestureView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB12C3D4E5F6071829304154 /* EditorGestureView.swift */; };
 /* End PBXBuildFile section */
 
@@ -97,6 +98,7 @@
 		AB12C3D4E5F6071829304180 /* EditableMesh.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditableMesh.swift; sourceTree = "<group>"; };
 		AB12C3D4E5F6071829304152 /* MarcaturaFacciataView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarcaturaFacciataView.swift; sourceTree = "<group>"; };
 		AB12C3D4E5F6071829304160 /* EditorMesh3DView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorMesh3DView.swift; sourceTree = "<group>"; };
+		AC23D4E5F607182930416200 /* ComputoMetricoView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputoMetricoView.swift; sourceTree = "<group>"; };
 		AB12C3D4E5F6071829304154 /* EditorGestureView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorGestureView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -188,6 +190,7 @@
 				9BB324F04816C2F0232B916F /* ListaPreventiviView.swift */,
 				AB12C3D4E5F6071829304152 /* MarcaturaFacciataView.swift */,
 				AB12C3D4E5F6071829304160 /* EditorMesh3DView.swift */,
+				AC23D4E5F607182930416200 /* ComputoMetricoView.swift */,
 				863870D7CB1F9B497A9F7501 /* MeasureScaleView.swift */,
 				5FACDED47CEB242E07978EE6 /* PDFPreventivoView.swift */,
 				57FEA8EBFAA241D57DF68DA8 /* RectifyFacadeView.swift */,
@@ -314,6 +317,7 @@
 				BB12C3D4E5F6071829304155 /* EditorGestureView.swift in Sources */,
 				BB12C3D4E5F6071829304153 /* MarcaturaFacciataView.swift in Sources */,
 				BB12C3D4E5F6071829304161 /* EditorMesh3DView.swift in Sources */,
+				CC23D4E5F607182930416201 /* ComputoMetricoView.swift in Sources */,
 				BB12C3D4E5F6071829304151 /* ZonaFacciata.swift in Sources */,
 				BB12C3D4E5F6071829304181 /* EditableMesh.swift in Sources */,
 				870811DCDE5C135871522F3E /* FirmaClienteView.swift in Sources */,

@@ -15,6 +15,7 @@ struct RisultatoPanoramaView: View {
     @State private var showMeasureScale = false
     @State private var showMarcatura = false      // editor marcatura zone (m²)
     @State private var showEditor3D = false        // editor 3D mesh (pulizia + piani)
+    @State private var showComputoMetrico = false  // sviluppo 2D e superfici dei piani
     @State private var rectifiedFacadeUrl: URL?
     @State private var metersPerPixel: Double?
     @State private var orthoComposite: URL?
@@ -101,6 +102,12 @@ struct RisultatoPanoramaView: View {
                                             onChiudi: { showEditor3D = false })
             } else {
                 EditorMesh3DView(onChiudi: { showEditor3D = false })
+            }
+        }
+        .fullScreenCover(isPresented: $showComputoMetrico) {
+            if let sid = rilievo.sessionId {
+                ComputoMetricoView(sessionId: sid,
+                                   onChiudi: { showComputoMetrico = false })
             }
         }
         .fullScreenCover(isPresented: $showTapPiano) {
@@ -248,6 +255,12 @@ struct RisultatoPanoramaView: View {
                         kind: .secondary) {
                 showEditor3D = true
             }
+
+            BrandButton(title: "Computo metrico", systemImage: "ruler",
+                        kind: .secondary) {
+                showComputoMetrico = true
+            }
+            .disabled(rilievo.sessionId == nil)
 
             BrandButton(title: "Segna zone (escluse / da rifare)", systemImage: "square.on.square.dashed",
                         kind: .secondary) {
