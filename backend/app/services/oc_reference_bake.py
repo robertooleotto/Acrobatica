@@ -57,11 +57,15 @@ def _compose_plane(
     reference = reference_rgba[..., :3]
     planar_reference = reference_mask & np.isfinite(depth) & (np.abs(depth) <= 0.35)
 
-    sift = cv2.SIFT_create(nfeatures=5000, contrastThreshold=0.025, edgeThreshold=12)
-    reference_points, reference_descriptors = sift.detectAndCompute(
-        registration._normalized_gray(reference),
-        planar_reference.astype(np.uint8) * 255,
-    )
+    can_register = int(planar_reference.sum()) >= 8_000
+    if can_register:
+        sift = cv2.SIFT_create(nfeatures=5000, contrastThreshold=0.025, edgeThreshold=12)
+        reference_points, reference_descriptors = sift.detectAndCompute(
+            registration._normalized_gray(reference),
+            planar_reference.astype(np.uint8) * 255,
+        )
+    else:
+        reference_points, reference_descriptors = [], None
     ranked = registration.rank_candidates(pf, normal, cams, crop=crop)
     camera_by_key = {str(int(cam.key)): cam for cam in cams}
 
@@ -71,7 +75,8 @@ def _compose_plane(
     accepted_keys: list[str] = []
     photo_reports: list[dict[str, object]] = []
 
-    for rank, candidate in enumerate(ranked[:max_photos], 1):
+    registration_candidates = ranked[:max_photos] if can_register else []
+    for rank, candidate in enumerate(registration_candidates, 1):
         key = str(candidate["key"])
         resolved = photo_resolver(key)
         item: dict[str, object] = {
@@ -128,19 +133,19 @@ def _compose_plane(
         key = str(candidate["key"])
         if key in accepted_keys:
             continue
+        cam = camera_by_key[key]
+        predicted_mask = registration.photo_coverage_mask(cam, pf)
+        new_pixels = predicted_mask & ~covered
+        if int(new_pixels.sum()) < 200:
+            continue
         resolved = photo_resolver(key)
         if not resolved:
             continue
-        posed, posed_mask = registration.warp_photo_to_plane(
-            Path(resolved), camera_by_key[key], pf,
-        )
-        new_pixels = posed_mask & ~covered
-        if int(new_pixels.sum()) < 200:
-            continue
+        posed, posed_mask = registration.warp_photo_to_plane(Path(resolved), cam, pf)
         accepted_images.append(posed)
         compositing_masks.append(posed_mask)
         accepted_keys.append(key)
-        photo_reports.append({
+        filler_report = {
             "rank": rank, **candidate, "photo_found": True,
             "registration": {
                 "accepted": True,
@@ -148,7 +153,15 @@ def _compose_plane(
                 "pose_only_filler": True,
                 "global_correction": _identity_correction(),
             },
-        })
+        }
+        existing = next(
+            (report for report in photo_reports if str(report.get("key")) == key),
+            None,
+        )
+        if existing is None:
+            photo_reports.append(filler_report)
+        else:
+            existing.update(filler_report)
         covered |= posed_mask
 
     rgba = coverage_rgba(mosaic(accepted_images, compositing_masks, reference),

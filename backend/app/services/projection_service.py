@@ -16,6 +16,7 @@ import json
 import os
 import shutil
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -37,6 +38,29 @@ _CONTENT_TYPES = {
     ".txt": "text/plain",
     ".json": "application/json",
 }
+
+_ACTIVE_JOB_STATES = {"queued", "running"}
+_JOB_STALE_SECONDS = 15 * 60
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _job_is_stale(job: dict, now: datetime | None = None) -> bool:
+    if job.get("state") not in _ACTIVE_JOB_STATES:
+        return False
+    raw = job.get("updated_at")
+    if not raw:
+        return True
+    try:
+        updated = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return True
+    current = now or datetime.now(timezone.utc)
+    return (current - updated).total_seconds() > _JOB_STALE_SECONDS
 
 
 def _mesh_entry(result: dict | None, kind: str) -> dict:
@@ -240,11 +264,18 @@ def _set_job(session_id: str, state: str, progress: float,
     if sess is None:
         return
     result = sess.get("result") or {}
+    previous = result.get("projection_job") or {}
+    now = _now_iso()
+    started_at = previous.get("started_at")
+    if state == "queued" or not started_at:
+        started_at = now
     result["projection_job"] = {
         "state": state,
         "progress": min(max(float(progress), 0.0), 1.0),
         "message": message,
         "error": error,
+        "started_at": started_at,
+        "updated_at": now,
     }
     session_store.update_session(session_id, {"result": result})
 
@@ -286,8 +317,14 @@ def start_project(session_id: str) -> tuple[dict, bool]:
     if sess is None:
         raise InputsMissing("Sessione non trovata")
     job = ((sess.get("result") or {}).get("projection_job") or {})
-    if job.get("state") in {"queued", "running"}:
-        return _public_result(sess), False
+    if job.get("state") in _ACTIVE_JOB_STATES:
+        if not _job_is_stale(job):
+            return _public_result(sess), False
+        _set_job(
+            session_id, "failed", 1.0, "Proiezione interrotta",
+            "Il processo precedente non e piu attivo; avvia nuovamente la proiezione.",
+        )
+        sess = session_store.get_session(session_id) or sess
     report = gather_inputs(session_id)
     if not report or not report["ready"]:
         raise InputsMissing("Input mancanti per la proiezione: " +
@@ -298,6 +335,14 @@ def start_project(session_id: str) -> tuple[dict, bool]:
 
 def project_status(session_id: str) -> Optional[dict]:
     sess = session_store.get_session(session_id)
+    if sess is not None:
+        job = ((sess.get("result") or {}).get("projection_job") or {})
+        if _job_is_stale(job):
+            _set_job(
+                session_id, "failed", 1.0, "Proiezione interrotta",
+                "Il server e stato riavviato durante il calcolo; rilancia la proiezione.",
+            )
+            sess = session_store.get_session(session_id) or sess
     return _public_result(sess) if sess is not None else None
 
 
@@ -345,7 +390,7 @@ def project(session_id: str) -> dict:
                 return str(local)
 
             texel_mm = float(os.environ.get("ACRO_PROJECTION_TEXEL_MM", "20"))
-            max_photos = int(os.environ.get("ACRO_PROJECTION_REGISTER_PHOTOS", "20"))
+            max_photos = int(os.environ.get("ACRO_PROJECTION_REGISTER_PHOTOS", "12"))
             coverage_photos = int(os.environ.get("ACRO_PROJECTION_COVERAGE_PHOTOS", "60"))
             fallback_reason = ""
             raw_reference = inp.get("raw_reference")

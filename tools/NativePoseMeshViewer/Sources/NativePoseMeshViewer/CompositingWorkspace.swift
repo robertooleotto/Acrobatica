@@ -289,12 +289,12 @@ final class CompositingWorkspaceModel: ObservableObject {
             let decoded = try decoder.decode(CompositingReport.self, from: data)
             report = decoded
             imageCache.removeAll()
-            corrections = Dictionary(uniqueKeysWithValues: decoded.photos.map {
-                ($0.key, ManualPhotoCorrection(
-                    enabled: $0.registration?.accepted ?? false,
+            corrections = decoded.photos.reduce(into: [:]) { values, photo in
+                values[photo.key] = ManualPhotoCorrection(
+                    enabled: photo.registration?.accepted ?? false,
                     offsetX: 0, offsetY: 0, rotationDeg: 0, scale: 1
-                ))
-            })
+                )
+            }
             loadSavedAdjustments()
             let first = decoded.photos.first(where: { $0.photoFound })?.key
             selectPhoto(selectedPhotoKey.flatMap { key in

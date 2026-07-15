@@ -146,12 +146,15 @@ def render_oc_reference(
     depth_m: float,
     scale_m_per_mesh_unit: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    legacy = o3d.geometry.TriangleMesh(
-        o3d.utility.Vector3dVector(mesh.vertices.astype(np.float64)),
-        o3d.utility.Vector3iVector(mesh.faces),
-    )
-    scene = o3d.t.geometry.RaycastingScene()
-    scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(legacy))
+    scene = getattr(mesh, "_raycast_scene", None)
+    if scene is None:
+        legacy = o3d.geometry.TriangleMesh(
+            o3d.utility.Vector3dVector(mesh.vertices.astype(np.float64)),
+            o3d.utility.Vector3iVector(mesh.faces),
+        )
+        scene = o3d.t.geometry.RaycastingScene()
+        scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(legacy))
+        mesh._raycast_scene = scene
 
     world, polygon = _pixel_world(pf)
     diag = float(np.linalg.norm(mesh.vertices.max(0) - mesh.vertices.min(0)))
@@ -272,6 +275,20 @@ def warp_photo_to_plane(
     mask &= (map_x >= 0) & (map_x < w - 1) & (map_y >= 0) & (map_y < h - 1)
     warped[~mask] = 0
     return warped, mask
+
+
+def photo_coverage_mask(cam: ob.Camera, pf: ob.PlaneFrame) -> np.ndarray:
+    """Copertura geometrica della foto senza leggerne o decodificarne i pixel."""
+    world, polygon = _pixel_world(pf)
+    x, y, z = ob._project(cam, world.reshape(-1, 3))
+    map_x = x.reshape(pf.tex_h, pf.tex_w)
+    map_y = y.reshape(pf.tex_h, pf.tex_w)
+    return (
+        polygon
+        & (z.reshape(pf.tex_h, pf.tex_w) > 0.01)
+        & (map_x >= 0) & (map_x < cam.image_width - 1)
+        & (map_y >= 0) & (map_y < cam.image_height - 1)
+    )
 
 
 def _normalized_gray(image: np.ndarray) -> np.ndarray:
@@ -758,14 +775,19 @@ def main() -> None:
     photo_reports: list[dict[str, object]] = []
     planar_reference = reference_mask & np.isfinite(depth) & (np.abs(depth) <= 0.35)
     cv2.imwrite(str(args.out / "02b_planar_mask.png"), planar_reference.astype(np.uint8) * 255)
-    registration_sift = cv2.SIFT_create(
-        nfeatures=5000, contrastThreshold=0.025, edgeThreshold=12,
-    )
-    reference_points, reference_descriptors = registration_sift.detectAndCompute(
-        _normalized_gray(reference), planar_reference.astype(np.uint8) * 255,
-    )
+    can_register = int(planar_reference.sum()) >= 8_000
+    if can_register:
+        registration_sift = cv2.SIFT_create(
+            nfeatures=5000, contrastThreshold=0.025, edgeThreshold=12,
+        )
+        reference_points, reference_descriptors = registration_sift.detectAndCompute(
+            _normalized_gray(reference), planar_reference.astype(np.uint8) * 255,
+        )
+    else:
+        reference_points, reference_descriptors = [], None
 
-    for rank, candidate in enumerate(ranked[:args.max_photos], 1):
+    registration_candidates = ranked[:args.max_photos] if can_register else []
+    for rank, candidate in enumerate(registration_candidates, 1):
         key = str(candidate["key"])
         path = _photo_path(args.photos, key)
         item: dict[str, object] = {"rank": rank, **candidate, "photo_found": path is not None}
@@ -841,13 +863,15 @@ def main() -> None:
         ranked[filler_start:coverage_limit], filler_start + 1,
     ):
         key = str(candidate["key"])
+        cam = camera_by_key[key]
+        predicted_mask = photo_coverage_mask(cam, pf)
+        new_pixels = predicted_mask & ~coverage_union
+        if int(new_pixels.sum()) < 200:
+            continue
         path = _photo_path(args.photos, key)
         if path is None:
             continue
-        posed, posed_mask = warp_photo_to_plane(path, camera_by_key[key], pf)
-        new_pixels = posed_mask & ~coverage_union
-        if int(new_pixels.sum()) < 200:
-            continue
+        posed, posed_mask = warp_photo_to_plane(path, cam, pf)
         print(f"Foto {key}: riempimento copertura da posa")
         identity_correction = {
             "offset_x": 0.0, "offset_y": 0.0,
@@ -876,7 +900,14 @@ def main() -> None:
                     _overlay(reference, posed, posed_mask & planar_reference))
         accepted_images.append(posed)
         compositing_masks.append(posed_mask)
-        photo_reports.append(item)
+        existing = next(
+            (report for report in photo_reports if str(report.get("key")) == key),
+            None,
+        )
+        if existing is None:
+            photo_reports.append(item)
+        else:
+            existing.update(item)
         coverage_union |= posed_mask
 
     registered_mosaic = mosaic(accepted_images, compositing_masks, reference)

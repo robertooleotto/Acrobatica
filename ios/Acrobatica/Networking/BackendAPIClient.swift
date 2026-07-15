@@ -418,7 +418,9 @@ actor BackendAPIClient {
         let url = baseURL.appendingPathComponent("/facade-sessions/\(sessionId)/projection")
         var req = URLRequest(url: url)
         req.httpMethod = "GET"
-        req.timeoutInterval = 60
+        // Il bake usa CPU intensivamente. Una richiesta di stato deve fallire
+        // presto e lasciare al chiamante la possibilita di riprovare.
+        req.timeoutInterval = 15
         let (data, resp) = try await urlSession.data(for: req)
         try assertHTTPOK(resp, data: data)
         return try JSONDecoder().decode(ProjectionResult.self, from: data)

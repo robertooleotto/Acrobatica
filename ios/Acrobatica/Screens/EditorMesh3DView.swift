@@ -1,6 +1,7 @@
 import SwiftUI
 import SceneKit
 import simd
+import Foundation
 
 /// Editor 3D della mesh di facciata (Object Capture).
 ///
@@ -100,16 +101,32 @@ struct EditorMesh3DView: View {
                 toastCloud = "Avvio la proiezione…"
                 var result = try await BackendAPIClient.shared.projectPlanes(sessionId: sid)
                 var polls = 0
+                var erroriPollingConsecutivi = 0
                 while result.state == "queued" || result.state == "running" {
                     let percent = Int((result.progress * 100).rounded())
                     toastCloud = "\(result.message) · \(percent)%"
-                    try await Task.sleep(nanoseconds: 2_000_000_000)
-                    result = try await BackendAPIClient.shared.projectionStatus(sessionId: sid)
+                    try await Task.sleep(nanoseconds: 5_000_000_000)
+                    do {
+                        result = try await BackendAPIClient.shared.projectionStatus(sessionId: sid)
+                        erroriPollingConsecutivi = 0
+                    } catch let urlError as URLError {
+                        switch urlError.code {
+                        case .timedOut, .networkConnectionLost, .cannotConnectToHost,
+                             .notConnectedToInternet, .cannotFindHost:
+                            erroriPollingConsecutivi += 1
+                            if erroriPollingConsecutivi >= 12 { throw urlError }
+                            toastCloud = "Server occupato, continuo ad attendere…"
+                            continue
+                        default:
+                            throw urlError
+                        }
+                    }
                     polls += 1
-                    if polls >= 450 {
+                    if polls >= 360 {
                         throw NSError(
                             domain: "AcrobaticaProjection", code: 3,
-                            userInfo: [NSLocalizedDescriptionKey: "Tempo massimo superato"])
+                            userInfo: [NSLocalizedDescriptionKey:
+                                "La proiezione non si è conclusa entro 30 minuti"])
                     }
                 }
                 if result.state == "failed" {
