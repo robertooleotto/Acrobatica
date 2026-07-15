@@ -9,6 +9,7 @@ struct ComputoMetricoView: View {
     let onChiudi: () -> Void
 
     @StateObject private var model = ComputoMetricoModel()
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         VStack(spacing: 0) {
@@ -29,7 +30,7 @@ struct ComputoMetricoView: View {
 
     private var barraSuperiore: some View {
         HStack(spacing: 12) {
-            Button(action: onChiudi) {
+            Button(action: chiudi) {
                 Image(systemName: "xmark")
                     .font(.system(size: 16, weight: .semibold))
                     .frame(width: 38, height: 38)
@@ -64,6 +65,11 @@ struct ComputoMetricoView: View {
         .padding(.vertical, 8)
         .background(Theme.white)
         .overlay(alignment: .bottom) { Divider() }
+    }
+
+    private func chiudi() {
+        dismiss()
+        onChiudi()
     }
 
     private var caricamento: some View {

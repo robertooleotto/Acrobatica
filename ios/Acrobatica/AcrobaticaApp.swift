@@ -41,13 +41,20 @@ final class TabRouter: ObservableObject { @Published var selected: AppTab = .hom
 struct AppFlowView: View {
     @EnvironmentObject var app: AppState
     @EnvironmentObject var flow: AppFlow
+    #if DEBUG
+    @State private var debugComputoChiuso = false
+    #endif
 
     var body: some View {
         Group {
             #if DEBUG
             if let sessionId = ProcessInfo.processInfo.environment["DEBUG_COMPUTO_SESSION"],
-               !sessionId.isEmpty {
-                ComputoMetricoView(sessionId: sessionId, onChiudi: {})
+               !sessionId.isEmpty, !debugComputoChiuso {
+                ComputoMetricoView(sessionId: sessionId,
+                                   onChiudi: {
+                    flow.phase = .main
+                    debugComputoChiuso = true
+                })
             } else if let sessionId = ProcessInfo.processInfo.environment["DEBUG_EDITOR_SESSION"],
                !sessionId.isEmpty {
                 EditorMesh3DCaricamentoView(sessionId: sessionId, onChiudi: {})
