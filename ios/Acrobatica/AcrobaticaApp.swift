@@ -43,6 +43,22 @@ struct AppFlowView: View {
     @EnvironmentObject var flow: AppFlow
 
     var body: some View {
+        Group {
+            #if DEBUG
+            if let sessionId = ProcessInfo.processInfo.environment["DEBUG_EDITOR_SESSION"],
+               !sessionId.isEmpty {
+                EditorMesh3DCaricamentoView(sessionId: sessionId, onChiudi: {})
+            } else {
+                contenutoNormale
+            }
+            #else
+            contenutoNormale
+            #endif
+        }
+        .onAppear { app.caricaDemoSeInVuoto() }
+    }
+
+    @ViewBuilder private var contenutoNormale: some View {
         ZStack {
             switch flow.phase {
             case .splash: SplashView { flow.phase = .login }
@@ -50,7 +66,6 @@ struct AppFlowView: View {
             case .main:   RootTabView()
             }
         }
-        .onAppear { app.caricaDemoSeInVuoto() }
     }
 }
 

@@ -21,6 +21,7 @@ struct EditorMesh3DView: View {
     @State private var caricandoCloud = false
     @State private var toastCloud: String?
     @State private var autoRiconoscimentoFatto = false
+    @State private var autoTextureDebugFatta = false
     /// Strumenti del vecchio flusso di costruzione/rifinitura manuale. Restano
     /// implementati, ma non occupano il pannello del flusso automatico corrente.
     private let abilitaControlliManualiPiani = false
@@ -184,6 +185,16 @@ struct EditorMesh3DView: View {
             barraSuperiore
             ZStack(alignment: .topTrailing) {
                 SceneKitContainer(model: model)
+                if model.haPianiTexturizzati {
+                    Picker("Vista piani", selection: $model.mostraSviluppoPiani) {
+                        Label("3D", systemImage: "cube").tag(false)
+                        Label("Sviluppo", systemImage: "rectangle.split.3x1").tag(true)
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 210)
+                    .padding(.top, 180)
+                    .frame(maxWidth: .infinity, alignment: .top)
+                }
                 if model.modoPerimetro && model.perimetroTraccia { PannelloPerimetro(model: model) }
                 hud
                 NavGizmo(model: model).padding(.top, 8).padding(.trailing, 62)
@@ -215,6 +226,13 @@ struct EditorMesh3DView: View {
                 autoRiconoscimentoFatto = true
                 Task { await model.riconosciPianiAuto(sessionId: sid) }
             }
+            #if DEBUG
+            if n > 0, sessionId != nil, !autoTextureDebugFatta,
+               ProcessInfo.processInfo.environment["DEBUG_AUTO_PROJECTION"] == "1" {
+                autoTextureDebugFatta = true
+                caricaUltimaTexture()
+            }
+            #endif
         }
         .sheet(isPresented: Binding(
             get: { !urlsExport.isEmpty },
@@ -1367,19 +1385,19 @@ private struct SceneKitContainer: UIViewRepresentable {
         context.coordinator.lassoLayer = lasso
         v.delegate = context.coordinator   // per leggere l'orientamento camera (ViewCube)
         // Snap vista: callback diretto (affidabile anche a scena ferma).
-        let node = model.contentNode
-        model.richiediSnap = { [weak v] dir, up in
-            guard let v = v else { return }
-            Self.orientaCamera(v, contentNode: node, dir: dir, up: up,
+        model.richiediSnap = { [weak v, weak model] dir, up in
+            guard let v, let model else { return }
+            Self.orientaCamera(v, contentNode: model.nodoDaInquadrare,
+                               dir: dir, up: up,
                                ortografica: model.visteOrtografiche)
         }
-        model.richiediZoom = { [weak v] fattore in
-            guard let v = v else { return }
-            Self.zoomCamera(v, contentNode: node, fattore: fattore)
+        model.richiediZoom = { [weak v, weak model] fattore in
+            guard let v, let model else { return }
+            Self.zoomCamera(v, contentNode: model.nodoDaInquadrare, fattore: fattore)
         }
-        model.richiediProspettiva = { [weak v] in
-            guard let v = v else { return }
-            Self.usaProspettiva(v, contentNode: node)
+        model.richiediProspettiva = { [weak v, weak model] in
+            guard let v, let model else { return }
+            Self.usaProspettiva(v, contentNode: model.nodoDaInquadrare)
         }
         return v
     }
@@ -1395,7 +1413,7 @@ private struct SceneKitContainer: UIViewRepresentable {
 
         if context.coordinator.lastTick != model.reframeTick {
             context.coordinator.lastTick = model.reframeTick
-            let node = model.contentNode
+            let node = model.nodoDaInquadrare
             DispatchQueue.main.async { v.defaultCameraController.frameNodes([node]) }
         }
     }
@@ -2688,6 +2706,7 @@ final class Mesh3DModel: ObservableObject {
     private let cursoreNode = SCNNode()   // mirino 3D d'ispezione
     private let revisionePianiNode = SCNNode() // riferimenti utente per il rifit dei piani
     private let pianiTexturizzatiNode = SCNNode()
+    private let sviluppoPianiNode = SCNNode()
 
     @Published var numVertici = 0
     @Published var numTriangoli = 0
@@ -2695,6 +2714,14 @@ final class Mesh3DModel: ObservableObject {
     @Published var errore: String?
     /// Incrementato per chiedere alla vista una re-inquadratura (frameNodes).
     @Published var reframeTick = 0
+    @Published private(set) var haPianiTexturizzati = false
+    @Published var mostraSviluppoPiani = false {
+        didSet { aggiornaModalitaPianiTexturizzati() }
+    }
+
+    var nodoDaInquadrare: SCNNode {
+        mostraSviluppoPiani && haPianiTexturizzati ? sviluppoPianiNode : contentNode
+    }
 
     @Published var strumento: StrumentoMesh3D = .orbita {
         didSet {
@@ -3423,6 +3450,8 @@ final class Mesh3DModel: ObservableObject {
         scene.rootNode.addChildNode(markersNode)
         contentNode.addChildNode(revisionePianiNode)
         contentNode.addChildNode(pianiTexturizzatiNode)
+        sviluppoPianiNode.isHidden = true
+        contentNode.addChildNode(sviluppoPianiNode)
 
         // Key light direzionale + ambient soft: stacco di rilievo sulle
         // sporgenze. La camera la gestisce il defaultCameraController (orbit).
@@ -3461,6 +3490,9 @@ final class Mesh3DModel: ObservableObject {
     private func renderMesh() {
         adiacenzaCache = nil   // la mesh è cambiata: invalida l'adiacenza in cache
         pianiTexturizzatiNode.childNodes.forEach { $0.removeFromParentNode() }
+        sviluppoPianiNode.childNodes.forEach { $0.removeFromParentNode() }
+        haPianiTexturizzati = false
+        mostraSviluppoPiani = false
         contentNode.geometry = mesh.scnGeometry(colore: Self.coloreMesh)
         numVertici = mesh.vertexCount
         numTriangoli = mesh.triangleCount
@@ -3664,14 +3696,252 @@ final class Mesh3DModel: ObservableObject {
                 domain: "AcrobaticaProjection", code: 2,
                 userInfo: [NSLocalizedDescriptionKey: "PNG delle texture non leggibili"])
         }
-        pianiTexturizzatiNode.isHidden = false
+        costruisciSviluppoPiani(objURL: url)
+        haPianiTexturizzati = !pianiTexturizzatiNode.childNodes.isEmpty
         // I piani coincidono quasi con la superficie OC: se la mesh resta opaca
         // davanti, l'utente vede il modello bianco invece delle ortofoto.
         mostraTexturaOC = false
         mostraMesh = false
         mostraPiani = false
         mostraProxy = false
-        cursoreInfo = "Piani texturizzati caricati"
+        mostraSviluppoPiani = !sviluppoPianiNode.childNodes.isEmpty
+        cursoreInfo = mostraSviluppoPiani
+            ? "Sviluppo piani texturizzati"
+            : "Piani texturizzati caricati"
+    }
+
+    /// Porta i piani texturizzati su XY conservando misure, poligoni e UV.
+    /// L'ordine `plane_N` del bundle segue il perimetro saldato del detector.
+    private func costruisciSviluppoPiani(objURL: URL) {
+        struct VerticeOBJ: Hashable {
+            let posizione: Int
+            let texture: Int
+        }
+        struct GruppoOBJ {
+            var nome = ""
+            var materiale = ""
+            var riferimenti: [VerticeOBJ] = []
+        }
+        struct Piano {
+            let indice: Int
+            let materiale: String
+            let punti: [SIMD3<Float>]
+            let uv: [SIMD2<Float>]
+            let indici: [Int32]
+            var orizzontale: SIMD3<Float>
+            let verticale: SIMD3<Float>
+            var minX: Float
+            var maxX: Float
+            let minY: Float
+            let maxY: Float
+        }
+
+        sviluppoPianiNode.childNodes.forEach { $0.removeFromParentNode() }
+        sviluppoPianiNode.simdPosition = .zero
+        guard let text = try? String(contentsOf: objURL, encoding: .utf8) else { return }
+
+        var positions: [SIMD3<Float>] = []
+        var textureCoordinates: [SIMD2<Float>] = []
+        var groups: [GruppoOBJ] = []
+        var current = GruppoOBJ()
+        func appendCurrent() {
+            if !current.riferimenti.isEmpty { groups.append(current) }
+        }
+        func objIndex(_ raw: Int, count: Int) -> Int {
+            raw > 0 ? raw - 1 : count + raw
+        }
+        for rawLine in text.split(whereSeparator: \Character.isNewline) {
+            let parts = rawLine.split(whereSeparator: \Character.isWhitespace)
+            guard let command = parts.first else { continue }
+            switch command {
+            case "v" where parts.count >= 4:
+                if let x = Float(parts[1]), let y = Float(parts[2]), let z = Float(parts[3]) {
+                    positions.append(SIMD3(x, y, z))
+                }
+            case "vt" where parts.count >= 3:
+                if let u = Float(parts[1]), let v = Float(parts[2]) {
+                    textureCoordinates.append(SIMD2(u, v))
+                }
+            case "o" where parts.count >= 2:
+                appendCurrent()
+                current = GruppoOBJ(nome: String(parts[1]))
+            case "usemtl" where parts.count >= 2:
+                current.materiale = String(parts[1])
+            case "f" where parts.count >= 4:
+                for token in parts.dropFirst() {
+                    let refs = token.split(separator: "/", omittingEmptySubsequences: false)
+                    guard refs.count >= 2, let vi = Int(refs[0]), let ti = Int(refs[1]) else {
+                        continue
+                    }
+                    current.riferimenti.append(VerticeOBJ(
+                        posizione: objIndex(vi, count: positions.count),
+                        texture: objIndex(ti, count: textureCoordinates.count)))
+                }
+            default:
+                continue
+            }
+        }
+        appendCurrent()
+
+        let up = simd_normalize(assiNav.u)
+        var piani: [Piano] = []
+
+        for group in groups {
+            var localMap: [VerticeOBJ: Int32] = [:]
+            var points: [SIMD3<Float>] = []
+            var uv: [SIMD2<Float>] = []
+            var indices: [Int32] = []
+            for reference in group.riferimenti {
+                guard positions.indices.contains(reference.posizione),
+                      textureCoordinates.indices.contains(reference.texture) else { continue }
+                if let index = localMap[reference] {
+                    indices.append(index)
+                } else {
+                    let index = Int32(points.count)
+                    localMap[reference] = index
+                    points.append(positions[reference.posizione])
+                    uv.append(textureCoordinates[reference.texture])
+                    indices.append(index)
+                }
+            }
+            guard points.count >= 3, indices.count >= 3 else { continue }
+            let a = points[Int(indices[0])]
+            let b = points[Int(indices[1])]
+            let c = points[Int(indices[2])]
+            var normal = simd_cross(b - a, c - a)
+            guard simd_length(normal) > 1e-6 else { continue }
+            normal = simd_normalize(normal)
+
+            var vertical = up - normal * simd_dot(up, normal)
+            if simd_length(vertical) < 0.2 {
+                vertical = b - a
+            }
+            guard simd_length(vertical) > 1e-6 else { continue }
+            vertical = simd_normalize(vertical)
+            var horizontal = simd_cross(normal, vertical)
+            guard simd_length(horizontal) > 1e-6 else { continue }
+            horizontal = simd_normalize(horizontal)
+
+            if uv.count == points.count {
+                let meanU = uv.reduce(Float(0)) { $0 + $1.x } / Float(uv.count)
+                let meanX = points.reduce(Float(0)) {
+                    $0 + simd_dot($1, horizontal)
+                } / Float(points.count)
+                let covariance = zip(points, uv).reduce(Float(0)) { partial, pair in
+                    partial + (simd_dot(pair.0, horizontal) - meanX) * (pair.1.x - meanU)
+                }
+                if covariance < 0 { horizontal = -horizontal }
+            }
+
+            let xs = points.map { simd_dot($0, horizontal) }
+            let ys = points.map { simd_dot($0, vertical) }
+            let identifier = group.nome.isEmpty ? group.materiale : group.nome
+            let components = identifier.split(separator: "_")
+            let index = components.count > 1 ? Int(components[1]) ?? Int.max : Int.max
+            piani.append(Piano(
+                indice: index, materiale: group.materiale, punti: points,
+                uv: uv, indici: indices,
+                orizzontale: horizontal, verticale: vertical,
+                minX: xs.min() ?? 0, maxX: xs.max() ?? 0,
+                minY: ys.min() ?? 0, maxY: ys.max() ?? 0))
+        }
+        piani.sort { $0.indice < $1.indice }
+        guard !piani.isEmpty else { return }
+
+        // Se due piani consecutivi condividono uno spigolo, scegli il verso che
+        // porta lo spigolo comune a destra del precedente e a sinistra del nuovo.
+        for index in 1..<piani.count {
+            let previous = piani[index - 1]
+            let current = piani[index]
+            let prevRight = Self.centroBordo(
+                previous.punti, asse: previous.orizzontale,
+                estremoMassimo: true)
+            let directLeft = Self.centroBordo(
+                current.punti, asse: current.orizzontale,
+                estremoMassimo: false)
+            let flippedLeft = Self.centroBordo(
+                current.punti, asse: current.orizzontale,
+                estremoMassimo: true)
+            if simd_distance(prevRight, flippedLeft) + 1e-4
+                < simd_distance(prevRight, directLeft) {
+                piani[index].orizzontale = -current.orizzontale
+                piani[index].minX = -current.maxX
+                piani[index].maxX = -current.minX
+            }
+        }
+
+        var cursorX: Float = 0
+        var globalMinY = Float.greatestFiniteMagnitude
+        var globalMaxY = -Float.greatestFiniteMagnitude
+        for plane in piani {
+            globalMinY = min(globalMinY, plane.minY)
+            globalMaxY = max(globalMaxY, plane.maxY)
+        }
+
+        for plane in piani {
+            let developed = plane.punti.map { point -> SCNVector3 in
+                let x = cursorX + simd_dot(point, plane.orizzontale) - plane.minX
+                let y = simd_dot(point, plane.verticale) - globalMinY
+                return SCNVector3(x, y, 0)
+            }
+            let vertexSource = SCNGeometrySource(vertices: developed)
+            let textureSource = SCNGeometrySource(textureCoordinates: plane.uv.map {
+                CGPoint(x: CGFloat($0.x), y: CGFloat($0.y))
+            })
+            let element = SCNGeometryElement(
+                indices: plane.indici, primitiveType: .triangles)
+            let geometry = SCNGeometry(
+                sources: [vertexSource, textureSource], elements: [element])
+            let material = SCNMaterial()
+            material.name = plane.materiale
+            let imageURL = objURL.deletingLastPathComponent()
+                .appendingPathComponent("\(plane.materiale).png")
+            material.diffuse.contents = UIImage(contentsOfFile: imageURL.path)
+            material.lightingModel = .constant
+            material.isDoubleSided = true
+            geometry.materials = [material]
+            let node = SCNNode(geometry: geometry)
+            node.name = "sviluppo:\(plane.indice)"
+            node.categoryBitMask = 2
+            sviluppoPianiNode.addChildNode(node)
+            cursorX += max(plane.maxX - plane.minX, 0)
+        }
+        sviluppoPianiNode.simdPosition = SIMD3(-cursorX * 0.5,
+                                                -(globalMaxY - globalMinY) * 0.5,
+                                                0)
+    }
+
+    private static func centroBordo(
+        _ points: [SIMD3<Float>], asse: SIMD3<Float>, estremoMassimo: Bool
+    ) -> SIMD3<Float> {
+        let values = points.map { simd_dot($0, asse) }
+        guard let lo = values.min(), let hi = values.max() else { return .zero }
+        let target = estremoMassimo ? hi : lo
+        let tolerance = max((hi - lo) * 0.02, 1e-5)
+        let edge = zip(points, values).compactMap {
+            abs($0.1 - target) <= tolerance ? $0.0 : nil
+        }
+        return edge.reduce(.zero, +) / Float(max(edge.count, 1))
+    }
+
+    private func aggiornaModalitaPianiTexturizzati() {
+        guard haPianiTexturizzati else {
+            pianiTexturizzatiNode.isHidden = true
+            sviluppoPianiNode.isHidden = true
+            return
+        }
+        pianiTexturizzatiNode.isHidden = mostraSviluppoPiani
+        sviluppoPianiNode.isHidden = !mostraSviluppoPiani
+        guard mostraSviluppoPiani else {
+            inquadra()
+            return
+        }
+        visteOrtografiche = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.richiediSnap?(SIMD3<Float>(0, 0, 1), SIMD3<Float>(0, 1, 0))
+            self.richiediZoom?(1.7)
+        }
     }
 
     /// Conserva sorgenti, materiali e triangoli originali del livello OC. Gli
@@ -6848,8 +7118,9 @@ final class Mesh3DModel: ObservableObject {
     /// Quad colorato per ogni piano fittato (anteprima multipiano proxy).
     private func ridisegnaPiani() {
         pianiNode.childNodes.forEach { $0.removeFromParentNode() }
-        pianiNode.isHidden = !mostraPiani
-        guard mostraPiani else { return }
+        let visibili = mostraPiani && !mostraSviluppoPiani
+        pianiNode.isHidden = !visibili
+        guard visibili else { return }
         let upRef = assiRif.u
         for f in facce {
             if f.nascosto { continue }
@@ -7019,10 +7290,10 @@ final class Mesh3DModel: ObservableObject {
         let t: CGFloat = vistaValidazione == .soloProxy ? 0.04
             : (vistaValidazione == .soloScarti ? 0.18 : 1.0)
         // geometria grigia nascosta se l'utente la spegne o se mostra la texture
-        let mostraGrigia = mostraMesh && !mostraTexturaOC
+        let mostraGrigia = mostraMesh && !mostraTexturaOC && !mostraSviluppoPiani
         contentNode.geometry?.firstMaterial?.transparency = mostraGrigia ? t : 0
-        ocTextureNode?.isHidden = !mostraTexturaOC
-        facceProxyNode.isHidden = !mostraProxy
+        ocTextureNode?.isHidden = !mostraTexturaOC || mostraSviluppoPiani
+        facceProxyNode.isHidden = !mostraProxy || mostraSviluppoPiani
         ridisegnaFacce()
         ridisegnaPiani()   // i piani diventano pieni/trasparenti secondo la visibilità mesh
     }
@@ -7188,6 +7459,7 @@ final class Mesh3DModel: ObservableObject {
     /// Ricostruisce l'overlay colorato delle facce (una geometria per faccia).
     private func ridisegnaFacce() {
         facceProxyNode.childNodes.forEach { $0.removeFromParentNode() }
+        guard !mostraSviluppoPiani else { return }
         for f in facce where mostraFaccia(f) {
             guard let g = mesh.selezioneGeometry(f.triangoli, colore: f.colore.withAlphaComponent(0.6)) else { continue }
             facceProxyNode.addChildNode(SCNNode(geometry: g))
