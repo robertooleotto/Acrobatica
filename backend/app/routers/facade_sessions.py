@@ -48,6 +48,8 @@ from ..models import (
     ZoneMarkupResult,
     OrthorectifyPhotoResult,
     OrthorectifySessionResult,
+    OpeningDetectionResult,
+    OpeningReviewRequest,
     DetectedPlane,
     DetectPlanesResult,
     PlanesDataResult,
@@ -71,6 +73,7 @@ from ..models import (
 )
 from ..services import (
     measurement_service,
+    opening_detection_service,
     projection_service,
     rectification_service,
     segmentation_service,
@@ -1176,6 +1179,44 @@ def projection_status(session_id: str):
     if result is None:
         raise HTTPException(404, "Sessione non trovata")
     return ProjectionJobResult(session_id=session_id, **result)
+
+
+# ─── Aperture Grounding DINO + SAM2 (computo metrico) ──────────────────────
+
+@router.post("/{session_id}/detect-openings", response_model=OpeningDetectionResult)
+def detect_openings(session_id: str, background_tasks: BackgroundTasks):
+    """Accoda il rilevamento di finestre e porte sulle texture ortografiche."""
+    if session_store.get_session(session_id) is None:
+        raise HTTPException(404, "Sessione non trovata")
+    try:
+        result, should_start = opening_detection_service.start_detection(session_id)
+    except opening_detection_service.InputsMissing as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if should_start:
+        background_tasks.add_task(opening_detection_service.run_detection_job, session_id)
+    return OpeningDetectionResult(session_id=session_id, **result)
+
+
+@router.get("/{session_id}/openings", response_model=OpeningDetectionResult)
+def opening_status(session_id: str):
+    """Stato del job e aperture revisionate correnti."""
+    result = opening_detection_service.detection_status(session_id)
+    if result is None:
+        raise HTTPException(404, "Sessione non trovata")
+    return OpeningDetectionResult(session_id=session_id, **result)
+
+
+@router.put("/{session_id}/openings", response_model=OpeningDetectionResult)
+def review_openings(session_id: str, payload: OpeningReviewRequest):
+    """Salva inclusione/esclusione senza accettare geometrie alterate dal client."""
+    try:
+        result = opening_detection_service.save_review(
+            session_id, [item.model_dump() for item in payload.openings])
+    except opening_detection_service.InputsMissing as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except opening_detection_service.DetectionError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return OpeningDetectionResult(session_id=session_id, **result)
 
 
 # ─── Rilevamento automatico piani (istogrammi BCS, dal detector python) ──────

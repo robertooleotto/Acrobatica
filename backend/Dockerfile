@@ -25,7 +25,8 @@ WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.2.2+cpu \
+    && pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
+        torch==2.2.2+cpu torchvision==0.17.2+cpu \
     && pip install --no-cache-dir -r requirements.txt
 
 COPY . .
@@ -33,6 +34,8 @@ COPY --from=cgal-builder /src/build/regiongrow/rg /usr/local/bin/acro-regiongrow
 COPY --from=cgal-builder /src/build/slice_contours/slice_contours /usr/local/bin/acro-slice-contours
 
 ENV PYTHONUNBUFFERED=1 \
+    HF_HOME=/tmp/huggingface \
+    HF_HUB_DISABLE_XET=1 \
     ACRO_ENABLE_FUSED=1
 # Railway inietta PORT; default 8000 per l'uso locale.
 CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

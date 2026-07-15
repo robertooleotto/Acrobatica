@@ -5,6 +5,8 @@ pillow==11.0.0
 numpy==1.26.4
 opencv-contrib-python-headless==4.10.0.84
 torch==2.2.2
+torchvision==0.17.2
+transformers==4.57.6
 kornia==0.8.3
 laspy[lazrs]==2.7.0
 pydantic==2.10.4

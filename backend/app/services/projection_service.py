@@ -485,6 +485,10 @@ def project(session_id: str) -> dict:
             latest = session_store.get_session(session_id) or sess
             result = latest.get("result") or {}
             result["projection"] = manifest
+            # Le aperture sono derivate pixel-per-pixel da queste texture. Un
+            # nuovo bake invalida sempre geometria UV e computo precedenti.
+            result.pop("metric_openings", None)
+            result.pop("opening_detection_job", None)
             session_store.update_session(session_id, {"result": result})
 
         try:

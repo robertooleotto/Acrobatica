@@ -50,6 +50,18 @@ struct ComputoMetricoView: View {
             Spacer()
 
             Button {
+                Task { await model.avviaRilevamento(sessionId: sessionId) }
+            } label: {
+                Image(systemName: model.rilevamentoAttivo ? "hourglass" : "viewfinder")
+                    .font(.system(size: 16, weight: .semibold))
+                    .frame(width: 38, height: 38)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Theme.navy)
+            .disabled(model.stato != .pronto || model.rilevamentoAttivo)
+            .accessibilityLabel("Rileva aperture")
+
+            Button {
                 Task { await model.carica(sessionId: sessionId) }
             } label: {
                 Image(systemName: "arrow.clockwise")
@@ -103,17 +115,45 @@ struct ComputoMetricoView: View {
     private var contenuto: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
-                metrica(label: "Superficie", value: String(format: "%.1f m²", model.areaTotale))
+                metrica(label: "Lorda", value: String(format: "%.1f m²", model.areaTotale))
+                Divider().frame(height: 42)
+                metrica(label: "Aperture", value: String(format: "%.1f m²", model.areaEsclusa))
+                Divider().frame(height: 42)
+                metrica(label: "Netta", value: String(format: "%.1f m²", model.areaNetta))
                 Divider().frame(height: 42)
                 metrica(label: "Facce", value: "\(model.numeroPiani)")
-                Divider().frame(height: 42)
-                metrica(label: "Copertura", value: String(format: "%.0f%%", model.copertura * 100))
             }
             .padding(.vertical, 10)
             .background(Theme.white)
 
+            HStack(spacing: 12) {
+                if model.rilevamentoAttivo {
+                    ProgressView(value: model.progressoAperture)
+                        .frame(width: 72)
+                    Text(model.messaggioAperture)
+                        .lineLimit(1)
+                } else {
+                    Label("\(model.aperture.count) aperture", systemImage: "rectangle.dashed")
+                }
+                Spacer()
+                Label("Escluse", systemImage: "minus.square.fill")
+                    .foregroundStyle(Theme.danger)
+                Label("Incluse", systemImage: "plus.square.fill")
+                    .foregroundStyle(Theme.success)
+            }
+            .font(Theme.Typo.caption(11))
+            .foregroundStyle(Theme.muted)
+            .padding(.horizontal, 14)
+            .frame(height: 36)
+            .background(Theme.white)
+            .overlay(alignment: .bottom) { Divider() }
+
             if let documento = model.documento {
-                SviluppoFacciateSceneView(documento: documento)
+                SviluppoFacciateSceneView(
+                    documento: documento,
+                    onAperturaTap: { id in
+                        Task { await model.invertiApertura(id: id, sessionId: sessionId) }
+                    })
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
@@ -146,8 +186,14 @@ private final class ComputoMetricoModel: ObservableObject {
     @Published var messaggio = "Scarico i piani texturizzati…"
     @Published var documento: SviluppoFacciateDocumento?
     @Published var areaTotale = 0.0
+    @Published var areaEsclusa = 0.0
+    @Published var areaNetta = 0.0
     @Published var copertura = 0.0
     @Published var numeroPiani = 0
+    @Published var aperture: [BackendAPIClient.MetricOpening] = []
+    @Published var rilevamentoAttivo = false
+    @Published var progressoAperture = 0.0
+    @Published var messaggioAperture = ""
 
     func carica(sessionId: String) async {
         stato = .caricamento
@@ -178,12 +224,90 @@ private final class ComputoMetricoModel: ObservableObject {
                 correggiRossoBlu: vecchioBakeConCanaliInvertiti)
             documento = sviluppo
             areaTotale = risultato.total_area_m2
+            areaNetta = risultato.total_area_m2
             copertura = risultato.coverage
             numeroPiani = sviluppo.numeroPiani
+            if let detection = try? await BackendAPIClient.shared.openingStatus(
+                sessionId: sessionId) {
+                applica(detection)
+                if detection.state == "queued" || detection.state == "running" {
+                    rilevamentoAttivo = true
+                    Task { await attendiRilevamento(sessionId: sessionId) }
+                }
+            }
             stato = .pronto
         } catch {
             stato = .errore(error.localizedDescription)
         }
+    }
+
+    func avviaRilevamento(sessionId: String) async {
+        guard !rilevamentoAttivo else { return }
+        rilevamentoAttivo = true
+        progressoAperture = 0
+        messaggioAperture = "Accodo il rilevamento"
+        do {
+            let result = try await BackendAPIClient.shared.detectOpenings(sessionId: sessionId)
+            applica(result)
+            await attendiRilevamento(sessionId: sessionId)
+        } catch {
+            rilevamentoAttivo = false
+            messaggioAperture = error.localizedDescription
+        }
+    }
+
+    func invertiApertura(id: String, sessionId: String) async {
+        guard !rilevamentoAttivo,
+              let index = aperture.firstIndex(where: { $0.id == id }) else { return }
+        let precedente = aperture
+        aperture[index].excluded.toggle()
+        aggiornaOverlay()
+        do {
+            let result = try await BackendAPIClient.shared.reviewOpenings(
+                sessionId: sessionId, openings: aperture)
+            applica(result)
+        } catch {
+            aperture = precedente
+            aggiornaOverlay()
+            messaggioAperture = error.localizedDescription
+        }
+    }
+
+    private func attendiRilevamento(sessionId: String) async {
+        while rilevamentoAttivo && !Task.isCancelled {
+            do {
+                try await Task.sleep(for: .seconds(2))
+                let result = try await BackendAPIClient.shared.openingStatus(sessionId: sessionId)
+                applica(result)
+                if result.state == "complete" || result.state == "failed" {
+                    rilevamentoAttivo = false
+                    return
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                messaggioAperture = error.localizedDescription
+                try? await Task.sleep(for: .seconds(3))
+            }
+        }
+    }
+
+    private func applica(_ result: BackendAPIClient.OpeningDetectionResult) {
+        aperture = result.openings
+        progressoAperture = result.progress
+        messaggioAperture = result.error.isEmpty ? result.message : result.error
+        rilevamentoAttivo = result.state == "queued" || result.state == "running"
+        if result.state == "complete" {
+            areaTotale = result.gross_area_m2
+            areaEsclusa = result.excluded_area_m2
+            areaNetta = result.net_area_m2
+        }
+        aggiornaOverlay()
+    }
+
+    private func aggiornaOverlay() {
+        guard let documento else { return }
+        SviluppoFacciateBuilder.aggiornaAperture(aperture, in: documento)
     }
 }
 
@@ -193,6 +317,16 @@ private struct SviluppoFacciateDocumento {
     let larghezza: Float
     let altezza: Float
     let numeroPiani: Int
+    let piani: [PianoSviluppato]
+}
+
+private struct PianoSviluppato {
+    let indice: Int
+    let origineX: Float
+    let origineY: Float
+    let larghezza: Float
+    let altezza: Float
+    let invertiU: Bool
 }
 
 private enum SviluppoFacciateBuilder {
@@ -219,6 +353,7 @@ private enum SviluppoFacciateBuilder {
         var maxX: Float
         let minY: Float
         let maxY: Float
+        var invertiU: Bool
     }
 
     static func costruisci(
@@ -330,7 +465,8 @@ private enum SviluppoFacciateBuilder {
                 indice: indice, materiale: gruppo.materiale, punti: punti,
                 uv: uv, indici: indici, orizzontale: orizzontale, verticale: verticale,
                 minX: xs.min() ?? 0, maxX: xs.max() ?? 0,
-                minY: ys.min() ?? 0, maxY: ys.max() ?? 0))
+                minY: ys.min() ?? 0, maxY: ys.max() ?? 0,
+                invertiU: false))
         }
         piani.sort { $0.indice < $1.indice }
         guard !piani.isEmpty else {
@@ -359,6 +495,7 @@ private enum SviluppoFacciateBuilder {
                 // La faccia viene ribaltata per portare lo spigolo condiviso
                 // sul lato corretto: anche U deve seguire lo stesso ribaltamento.
                 piani[indice].uv = corrente.uv.map { SIMD2(1 - $0.x, $0.y) }
+                piani[indice].invertiU = true
             }
         }
 
@@ -369,8 +506,18 @@ private enum SviluppoFacciateBuilder {
         radice.name = "sviluppo-facciate"
         scena.rootNode.addChildNode(radice)
         var cursoreX: Float = 0
+        var pianiSviluppati: [PianoSviluppato] = []
 
         for piano in piani {
+            let larghezzaPiano = max(piano.maxX - piano.minX, 0)
+            let altezzaPiano = max(piano.maxY - piano.minY, 0)
+            pianiSviluppati.append(PianoSviluppato(
+                indice: piano.indice,
+                origineX: cursoreX,
+                origineY: piano.minY - minYGlobale,
+                larghezza: larghezzaPiano,
+                altezza: altezzaPiano,
+                invertiU: piano.invertiU))
             let sviluppati = piano.punti.map { punto -> SCNVector3 in
                 let x = cursoreX + simd_dot(punto, piano.orizzontale) - piano.minX
                 let y = simd_dot(punto, piano.verticale) - minYGlobale
@@ -409,7 +556,7 @@ private enum SviluppoFacciateBuilder {
             let nodo = SCNNode(geometry: geometria)
             nodo.name = "piano-\(piano.indice)"
             radice.addChildNode(nodo)
-            cursoreX += max(piano.maxX - piano.minX, 0)
+            cursoreX += larghezzaPiano
         }
 
         let altezza = max(maxYGlobale - minYGlobale, 0.01)
@@ -417,7 +564,56 @@ private enum SviluppoFacciateBuilder {
         return SviluppoFacciateDocumento(scena: scena, radice: radice,
                                          larghezza: max(cursoreX, 0.01),
                                          altezza: altezza,
-                                         numeroPiani: piani.count)
+                                         numeroPiani: piani.count,
+                                         piani: pianiSviluppati)
+    }
+
+    static func aggiornaAperture(
+        _ aperture: [BackendAPIClient.MetricOpening],
+        in documento: SviluppoFacciateDocumento
+    ) {
+        documento.radice.childNode(withName: "aperture-overlay", recursively: false)?
+            .removeFromParentNode()
+        guard !aperture.isEmpty else { return }
+        let contenitore = SCNNode()
+        contenitore.name = "aperture-overlay"
+        documento.radice.addChildNode(contenitore)
+
+        let piani = Dictionary(uniqueKeysWithValues: documento.piani.map { ($0.indice, $0) })
+        for apertura in aperture {
+            guard let piano = piani[apertura.plane_index], apertura.polygon_uv.count >= 3 else {
+                continue
+            }
+            let punti = apertura.polygon_uv.compactMap { uv -> CGPoint? in
+                guard uv.count >= 2 else { return nil }
+                let u = Float(min(max(uv[0], 0), 1))
+                let v = Float(min(max(uv[1], 0), 1))
+                let x = piano.origineX + (piano.invertiU ? 1 - u : u) * piano.larghezza
+                let y = piano.origineY + v * piano.altezza
+                return CGPoint(x: CGFloat(x), y: CGFloat(y))
+            }
+            guard punti.count >= 3 else { continue }
+
+            let path = UIBezierPath()
+            path.move(to: punti[0])
+            for punto in punti.dropFirst() { path.addLine(to: punto) }
+            path.close()
+            let shape = SCNShape(path: path, extrusionDepth: 0.002)
+            shape.chamferRadius = 0
+            let material = SCNMaterial()
+            let color = apertura.excluded
+                ? UIColor(red: 0.85, green: 0.20, blue: 0.17, alpha: 1)
+                : UIColor(red: 0.12, green: 0.62, blue: 0.45, alpha: 1)
+            material.diffuse.contents = color.withAlphaComponent(0.42)
+            material.emission.contents = color.withAlphaComponent(0.22)
+            material.lightingModel = .constant
+            material.isDoubleSided = true
+            shape.materials = [material]
+            let nodo = SCNNode(geometry: shape)
+            nodo.name = "apertura-\(apertura.id)"
+            nodo.position.z = 0.02
+            contenitore.addChildNode(nodo)
+        }
     }
 
     private static func centroBordo(
@@ -436,6 +632,7 @@ private enum SviluppoFacciateBuilder {
 
 private struct SviluppoFacciateSceneView: UIViewRepresentable {
     let documento: SviluppoFacciateDocumento
+    let onAperturaTap: (String) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -444,6 +641,7 @@ private struct SviluppoFacciateSceneView: UIViewRepresentable {
         view.backgroundColor = UIColor(red: 0.075, green: 0.082, blue: 0.09, alpha: 1)
         view.antialiasingMode = .multisampling4X
         view.rendersContinuously = false
+        context.coordinator.onAperturaTap = onAperturaTap
         context.coordinator.installa(in: view, documento: documento)
         return view
     }
@@ -454,12 +652,14 @@ private struct SviluppoFacciateSceneView: UIViewRepresentable {
         } else {
             context.coordinator.documento = documento
         }
+        context.coordinator.onAperturaTap = onAperturaTap
         DispatchQueue.main.async { context.coordinator.inquadra() }
     }
 
     final class Coordinator: NSObject {
         weak var view: SCNView?
         var documento: SviluppoFacciateDocumento?
+        var onAperturaTap: ((String) -> Void)?
         private var ultimaDimensione: CGSize = .zero
 
         func installa(in view: SCNView, documento: SviluppoFacciateDocumento) {
@@ -485,9 +685,12 @@ private struct SviluppoFacciateSceneView: UIViewRepresentable {
                 pan.maximumNumberOfTouches = 2
                 let doppioTap = UITapGestureRecognizer(target: self, action: #selector(reset(_:)))
                 doppioTap.numberOfTapsRequired = 2
+                let tap = UITapGestureRecognizer(target: self, action: #selector(tapApertura(_:)))
+                tap.require(toFail: doppioTap)
                 view.addGestureRecognizer(pinch)
                 view.addGestureRecognizer(pan)
                 view.addGestureRecognizer(doppioTap)
+                view.addGestureRecognizer(tap)
             }
             DispatchQueue.main.async { self.inquadra(forzato: true) }
         }
@@ -520,6 +723,24 @@ private struct SviluppoFacciateSceneView: UIViewRepresentable {
             cameraNode.position.x -= Float(Double(spostamento.x) * metriPerPixel)
             cameraNode.position.y += Float(Double(spostamento.y) * metriPerPixel)
             gesto.setTranslation(.zero, in: view)
+        }
+
+        @objc private func tapApertura(_ gesto: UITapGestureRecognizer) {
+            guard gesto.state == .ended, let view else { return }
+            let punto = gesto.location(in: view)
+            for hit in view.hitTest(punto, options: [
+                SCNHitTestOption.firstFoundOnly: true,
+                SCNHitTestOption.ignoreHiddenNodes: true,
+            ]) {
+                var nodo: SCNNode? = hit.node
+                while let corrente = nodo {
+                    if let nome = corrente.name, nome.hasPrefix("apertura-") {
+                        onAperturaTap?(String(nome.dropFirst("apertura-".count)))
+                        return
+                    }
+                    nodo = corrente.parent
+                }
+            }
         }
 
         @objc private func reset(_ gesto: UITapGestureRecognizer) {

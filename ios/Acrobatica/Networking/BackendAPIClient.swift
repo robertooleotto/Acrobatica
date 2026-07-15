@@ -428,6 +428,68 @@ actor BackendAPIClient {
         return try JSONDecoder().decode(ProjectionResult.self, from: data)
     }
 
+    struct MetricOpening: Codable, Identifiable, Equatable {
+        let id: String
+        let plane_index: Int
+        let type: String
+        let polygon_uv: [[Double]]
+        let confidence: Double
+        let area_m2: Double
+        var excluded: Bool
+        let source: String
+    }
+
+    struct OpeningDetectionResult: Codable {
+        let session_id: String
+        let state: String
+        let progress: Double
+        let message: String
+        let error: String
+        let count: Int
+        let openings: [MetricOpening]
+        let gross_area_m2: Double
+        let excluded_area_m2: Double
+        let net_area_m2: Double
+        let detector_model: String
+        let segmenter_model: String
+    }
+
+    func detectOpenings(sessionId: String) async throws -> OpeningDetectionResult {
+        let url = baseURL.appendingPathComponent(
+            "/facade-sessions/\(sessionId)/detect-openings")
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 30
+        let (data, resp) = try await urlSession.data(for: req)
+        try assertHTTPOK(resp, data: data)
+        return try JSONDecoder().decode(OpeningDetectionResult.self, from: data)
+    }
+
+    func openingStatus(sessionId: String) async throws -> OpeningDetectionResult {
+        let url = baseURL.appendingPathComponent("/facade-sessions/\(sessionId)/openings")
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.timeoutInterval = 15
+        let (data, resp) = try await urlSession.data(for: req)
+        try assertHTTPOK(resp, data: data)
+        return try JSONDecoder().decode(OpeningDetectionResult.self, from: data)
+    }
+
+    func reviewOpenings(
+        sessionId: String,
+        openings: [MetricOpening]
+    ) async throws -> OpeningDetectionResult {
+        let url = baseURL.appendingPathComponent("/facade-sessions/\(sessionId)/openings")
+        var req = URLRequest(url: url)
+        req.httpMethod = "PUT"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(["openings": openings])
+        req.timeoutInterval = 30
+        let (data, resp) = try await urlSession.data(for: req)
+        try assertHTTPOK(resp, data: data)
+        return try JSONDecoder().decode(OpeningDetectionResult.self, from: data)
+    }
+
     /// Scarica le zone fuori-piano proposte dal backend (pre-marcatura
     /// automatica: balconi/aggetti oltre `sogliaM` dal piano facciata).
     /// Ritorna i Data del documento JSON nello schema di marcatura (lo

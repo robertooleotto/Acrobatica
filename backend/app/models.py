@@ -486,6 +486,43 @@ class ProjectionJobResult(ProjectionResult):
     error: str = ""
 
 
+class MetricOpening(BaseModel):
+    """Apertura rilevata su una faccia dello sviluppo metrico.
+
+    `polygon_uv` usa UV canoniche del piano: origine in basso a sinistra e valori
+    normalizzati in [0, 1]. La dimensione del piano non viene mai modificata.
+    """
+    id: str
+    plane_index: int
+    type: Literal["window", "door", "shop_window", "unknown"]
+    polygon_uv: list[tuple[float, float]] = Field(..., min_length=3)
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    area_m2: float = Field(..., ge=0.0)
+    excluded: bool = True
+    source: Literal["grounded_sam2", "manual"] = "grounded_sam2"
+
+
+class OpeningDetectionResult(BaseModel):
+    """Stato del job e documento aperture revisionabile dal computo metrico."""
+    session_id: str
+    state: str
+    progress: float = 0.0
+    message: str = ""
+    error: str = ""
+    count: int = 0
+    openings: list[MetricOpening] = []
+    gross_area_m2: float = 0.0
+    excluded_area_m2: float = 0.0
+    net_area_m2: float = 0.0
+    detector_model: str = ""
+    segmenter_model: str = ""
+
+
+class OpeningReviewRequest(BaseModel):
+    """Documento completo dopo la revisione inclusa/esclusa dell'operatore."""
+    openings: list[MetricOpening]
+
+
 class ZonaMarcataModel(BaseModel):
     """Singola zona marcata dall'operatore sull'ortofoto (schema concordato
     con l'editor iOS — i campi/rawValue NON vanno cambiati).
