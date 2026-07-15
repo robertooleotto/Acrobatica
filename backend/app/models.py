@@ -474,6 +474,7 @@ class ProjectionResult(BaseModel):
     files: list[MeshFileInfo] = []
     planes: list[dict] = []
     projection_mode: str = ""
+    texture_encoding: str = ""
     fallback_reason: str = ""
 
 

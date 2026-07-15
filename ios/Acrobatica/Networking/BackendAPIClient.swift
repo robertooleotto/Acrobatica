@@ -400,6 +400,8 @@ actor BackendAPIClient {
         let progress: Double
         let message: String
         let error: String
+        let projection_mode: String?
+        let texture_encoding: String?
     }
 
     /// Avvia il bake cloud. Il timeout della singola richiesta è esteso perché

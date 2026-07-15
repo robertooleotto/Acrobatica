@@ -170,7 +170,12 @@ private final class ComputoMetricoModel: ObservableObject {
                               userInfo: [NSLocalizedDescriptionKey:
                                 "Il bundle non contiene la geometria dei piani."])
             }
-            let sviluppo = try SviluppoFacciateBuilder.costruisci(objURL: objURL)
+            let vecchioBakeConCanaliInvertiti =
+                risultato.projection_mode == "oc_reference_registered"
+                && risultato.texture_encoding?.lowercased() != "srgb"
+            let sviluppo = try SviluppoFacciateBuilder.costruisci(
+                objURL: objURL,
+                correggiRossoBlu: vecchioBakeConCanaliInvertiti)
             documento = sviluppo
             areaTotale = risultato.total_area_m2
             copertura = risultato.coverage
@@ -206,7 +211,7 @@ private enum SviluppoFacciateBuilder {
         let indice: Int
         let materiale: String
         let punti: [SIMD3<Float>]
-        let uv: [SIMD2<Float>]
+        var uv: [SIMD2<Float>]
         let indici: [Int32]
         var orizzontale: SIMD3<Float>
         let verticale: SIMD3<Float>
@@ -216,7 +221,10 @@ private enum SviluppoFacciateBuilder {
         let maxY: Float
     }
 
-    static func costruisci(objURL: URL) throws -> SviluppoFacciateDocumento {
+    static func costruisci(
+        objURL: URL,
+        correggiRossoBlu: Bool
+    ) throws -> SviluppoFacciateDocumento {
         let testo = try String(contentsOf: objURL, encoding: .utf8)
         var posizioni: [SIMD3<Float>] = []
         var coordinateTexture: [SIMD2<Float>] = []
@@ -348,6 +356,9 @@ private enum SviluppoFacciateBuilder {
                 piani[indice].orizzontale = -corrente.orizzontale
                 piani[indice].minX = -corrente.maxX
                 piani[indice].maxX = -corrente.minX
+                // La faccia viene ribaltata per portare lo spigolo condiviso
+                // sul lato corretto: anche U deve seguire lo stesso ribaltamento.
+                piani[indice].uv = corrente.uv.map { SIMD2(1 - $0.x, $0.y) }
             }
         }
 
@@ -367,7 +378,8 @@ private enum SviluppoFacciateBuilder {
             }
             let sorgenteVertici = SCNGeometrySource(vertices: sviluppati)
             let sorgenteUV = SCNGeometrySource(textureCoordinates: piano.uv.map {
-                CGPoint(x: CGFloat($0.x), y: CGFloat($0.y))
+                // Le UV OBJ hanno origine in basso a sinistra, UIImage in alto.
+                CGPoint(x: CGFloat($0.x), y: CGFloat(1 - $0.y))
             })
             let elemento = SCNGeometryElement(indices: piano.indici, primitiveType: .triangles)
             let geometria = SCNGeometry(sources: [sorgenteVertici, sorgenteUV],
@@ -380,6 +392,13 @@ private enum SviluppoFacciateBuilder {
                 throw NSError(domain: "ComputoMetrico", code: 4,
                               userInfo: [NSLocalizedDescriptionKey:
                                 "Texture mancante per \(piano.materiale)."])
+            }
+            if correggiRossoBlu {
+                // Correzione GPU per i vecchi bake: evita di ricodificare tutte
+                // le texture sul main thread durante l'apertura della schermata.
+                materiale.shaderModifiers = [
+                    .fragment: "#pragma body\n_output.color = _output.color.bgra;"
+                ]
             }
             materiale.diffuse.contents = immagine
             materiale.diffuse.magnificationFilter = .linear

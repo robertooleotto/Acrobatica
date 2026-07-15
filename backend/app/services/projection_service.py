@@ -307,6 +307,7 @@ def _public_result(sess: dict) -> dict:
         "files": public_files,
         "planes": manifest.get("planes", []),
         "projection_mode": manifest.get("projection_mode", ""),
+        "texture_encoding": manifest.get("texture_encoding", ""),
         "fallback_reason": manifest.get("fallback_reason", ""),
     }
 
@@ -478,6 +479,7 @@ def project(session_id: str) -> dict:
                 "photo_count": inp["photo_count"],
                 "scale_m_per_mesh_unit": scale,
                 "projection_mode": summary.get("projection_mode", "pose_only"),
+                "texture_encoding": summary.get("texture_encoding", "sRGB"),
                 "fallback_reason": fallback_reason,
             }
             latest = session_store.get_session(session_id) or sess

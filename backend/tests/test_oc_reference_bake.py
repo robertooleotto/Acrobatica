@@ -1,6 +1,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import cv2
 import numpy as np
 
 from app.services import oc_reference_bake
@@ -120,3 +121,17 @@ def test_compose_plane_uses_registered_photo_and_preserves_alpha(monkeypatch, tm
     assert report["registered_photos"] == 1
     assert np.all(rgba[..., 3] == 255)
     assert float(rgba[..., 2].mean()) == 240.0
+
+
+def test_opencv_bgra_texture_is_written_without_swapping_red_and_blue(tmp_path):
+    texture = np.zeros((4, 5, 4), np.uint8)
+    texture[..., 0] = 17
+    texture[..., 1] = 83
+    texture[..., 2] = 231
+    texture[..., 3] = 255
+    path = tmp_path / "texture.png"
+
+    oc_reference_bake._write_texture_png(str(path), texture)
+    decoded = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+
+    assert np.array_equal(decoded, texture)

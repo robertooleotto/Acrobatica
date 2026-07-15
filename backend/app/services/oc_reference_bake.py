@@ -22,6 +22,12 @@ from scripts import run_oc_reference_registration_local as registration
 from scripts.oc_compositing import coverage_rgba, mosaic
 
 
+def _write_texture_png(path: str, bgra: np.ndarray) -> None:
+    """Scrive il buffer OpenCV BGRA senza reinterpretarne i canali."""
+    if not cv2.imwrite(path, bgra):
+        raise RuntimeError(f"Impossibile scrivere la texture: {path}")
+
+
 def _identity_correction() -> dict[str, object]:
     return {
         "offset_x": 0.0,
@@ -365,7 +371,9 @@ def bake_planes(
             max_scale_error=0.03,
         )
         filename = f"plane_{index}_{ob._sanitize(name)}.png"
-        cv2.imwrite(os.path.join(out_dir, filename), cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGRA))
+        # Tutta la pipeline OpenCV mantiene BGR/BGRA. Un ulteriore RGBA→BGRA
+        # scambiava rosso e blu e produceva la dominante azzurra nei PNG.
+        _write_texture_png(os.path.join(out_dir, filename), rgba)
         area = pf.area_m2
         total_area += area
         result = {
@@ -411,4 +419,5 @@ def bake_planes(
         "out_dir": out_dir,
         "count": len(results),
         "projection_mode": "oc_reference_registered",
+        "texture_encoding": "sRGB",
     }
