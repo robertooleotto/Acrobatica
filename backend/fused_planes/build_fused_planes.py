@@ -15,6 +15,10 @@ def xz_dist(a, b):
     return math.hypot(a[0] - b[0], a[2] - b[2])
 
 
+def distance(a, b):
+    return math.sqrt(sum((a[i] - b[i]) ** 2 for i in range(3)))
+
+
 def dot(a, b):
     return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 
@@ -217,12 +221,72 @@ def useful_height_bounds(stack):
     return useful[0]["y"], useful[-1]["y"]
 
 
-def edge_point_at_y(original_point, current, neighbor, y):
-    if neighbor and neighbor["id"] != current["id"]:
-        intersection = intersect_planes_at_y(current, neighbor, y)
-        if intersection is not None:
-            return intersection
-    return point_on_plane_with_y(project_keep_y(original_point, current["normal"], current["point"]), current["normal"], current["point"], y)
+def estimate_common_extrusion(planes, max_lean=0.08):
+    """Stima un'unica direzione di elevazione per l'intera catena di piani.
+
+    Ogni normale fornisce il vincolo h·d = slope, dove h e' la sua direzione
+    orizzontale e d lo spostamento XZ per un metro verticale. Il fit ai minimi
+    quadrati evita che le inclinazioni indipendenti delle spallette deformino
+    gli spigoli condivisi.
+    """
+    m00 = m01 = m11 = b0 = b1 = total_weight = 0.0
+    for plane in planes:
+        normal = norm(plane.get("normal") or plane.get("normale"))
+        horizontal = math.hypot(normal[0], normal[2])
+        if horizontal <= 1e-9:
+            continue
+        hx, hz = normal[0] / horizontal, normal[2] / horizontal
+        slope = max(-max_lean, min(max_lean, -normal[1] / horizontal))
+        weight = max(float(plane.get("fit_weight") or 1.0), 1.0)
+        if plane.get("type") in {"spalla", "spalletta"}:
+            weight *= 0.35
+        m00 += weight * hx * hx
+        m01 += weight * hx * hz
+        m11 += weight * hz * hz
+        b0 += weight * hx * slope
+        b1 += weight * hz * slope
+        total_weight += weight
+
+    if total_weight <= 0.0:
+        return [0.0, 1.0, 0.0]
+
+    # La regolarizzazione rende stabile anche il caso con una sola direzione di
+    # facciata: la componente di inclinazione non osservabile resta nulla.
+    ridge = max((m00 + m11) * 1e-6, 1e-9)
+    m00 += ridge
+    m11 += ridge
+    determinant = m00 * m11 - m01 * m01
+    if abs(determinant) <= 1e-12:
+        return [0.0, 1.0, 0.0]
+    dx = (b0 * m11 - b1 * m01) / determinant
+    dz = (m00 * b1 - m01 * b0) / determinant
+    lean = math.hypot(dx, dz)
+    if lean > max_lean:
+        scale = max_lean / lean
+        dx *= scale
+        dz *= scale
+    return norm([dx, 1.0, dz])
+
+
+def regularize_plane_for_extrusion(plane, extrusion, reference_y):
+    """Mantiene azimut e posizione del piano, ma lo rende parallelo
+    all'unica direzione di elevazione condivisa dall'edificio."""
+    original_normal = norm(plane.get("normal") or plane.get("normale"))
+    horizontal = math.hypot(original_normal[0], original_normal[2])
+    if horizontal <= 1e-9:
+        return dict(plane)
+    hx, hz = original_normal[0] / horizontal, original_normal[2] / horizontal
+    normal = norm([hx, -(hx * extrusion[0] + hz * extrusion[2]) / extrusion[1], hz])
+    original_point = plane["point"]
+    anchor = point_on_plane_with_y(
+        original_point, original_normal, original_point, reference_y)
+    return {**plane, "normal": normal, "point": anchor}
+
+
+def project_along_to_plane(point, direction, plane_point):
+    """Proietta lungo `direction` sul piano ortogonale alla stessa direzione."""
+    amount = dot([point[i] - plane_point[i] for i in range(3)], direction)
+    return [point[i] - direction[i] * amount for i in range(3)]
 
 
 def coalesce_plane_segments(segments, max_unassigned_bridge=2.0):
@@ -257,12 +321,55 @@ def build_planes(fusion, original_by_id, ymin, ymax):
     by_id = {p["id"]: p for p in fusion["planes"]}
     out = []
     source_segments = coalesce_plane_segments(fusion["segments"])
+    if not source_segments:
+        return out
+
+    raw_sources = {
+        segment["plane_id"]: (
+            original_by_id.get(segment["plane_id"]) or by_id[segment["plane_id"]])
+        for segment in source_segments
+        if segment.get("plane_id") is not None
+    }
+    extrusion = estimate_common_extrusion(raw_sources.values())
+    reference_points = [
+        point
+        for segment in source_segments
+        for point in (segment["joined_a"], segment["joined_b"])
+    ]
+    reference_y = sum(point[1] for point in reference_points) / len(reference_points)
+    reference_origin = [
+        sum(point[0] for point in reference_points) / len(reference_points),
+        reference_y,
+        sum(point[2] for point in reference_points) / len(reference_points),
+    ]
+    sources = {
+        plane_id: regularize_plane_for_extrusion(source, extrusion, reference_y)
+        for plane_id, source in raw_sources.items()
+    }
+    lower_offset = (ymin - reference_y) / extrusion[1]
+    upper_offset = (ymax - reference_y) / extrusion[1]
+
+    def translated(point, amount):
+        return [point[i] + extrusion[i] * amount for i in range(3)]
+
+    def reference_edge_point(original_point, current, neighbor):
+        point = None
+        if neighbor and neighbor["id"] != current["id"]:
+            point = intersect_planes_at_y(current, neighbor, reference_y)
+        if point is None:
+            projected = project_keep_y(original_point, current["normal"], current["point"])
+            point = point_on_plane_with_y(
+                projected, current["normal"], current["point"], reference_y)
+        # Le intersezioni sono parallele all'estrusione comune. Portarle sullo
+        # stesso piano ortogonale produce un anello che, estruso, genera rettangoli.
+        return project_along_to_plane(point, extrusion, reference_origin)
+
     for idx, seg in enumerate(source_segments):
         plane_id = seg.get("plane_id")
         a = seg["joined_a"]
         b = seg["joined_b"]
-        source = original_by_id.get(plane_id) or by_id[plane_id]
-        normal = source.get("normal") or source.get("normale")
+        source = sources[plane_id]
+        normal = source["normal"]
         point = source["point"]
         current = {"id": plane_id, "normal": normal, "point": point}
 
@@ -271,25 +378,33 @@ def build_planes(fusion, original_by_id, ymin, ymax):
         prev_plane = None
         next_plane = None
         if prev_seg and prev_seg.get("plane_id") is not None:
-            p = original_by_id.get(prev_seg["plane_id"]) or by_id[prev_seg["plane_id"]]
-            prev_plane = {"id": prev_seg["plane_id"], "normal": p.get("normal") or p.get("normale"), "point": p["point"]}
+            p = sources[prev_seg["plane_id"]]
+            prev_plane = {"id": prev_seg["plane_id"], "normal": p["normal"], "point": p["point"]}
         if next_seg and next_seg.get("plane_id") is not None:
-            p = original_by_id.get(next_seg["plane_id"]) or by_id[next_seg["plane_id"]]
-            next_plane = {"id": next_seg["plane_id"], "normal": p.get("normal") or p.get("normale"), "point": p["point"]}
+            p = sources[next_seg["plane_id"]]
+            next_plane = {"id": next_seg["plane_id"], "normal": p["normal"], "point": p["point"]}
 
+        reference_a = reference_edge_point(a, current, prev_plane)
+        reference_b = reference_edge_point(b, current, next_plane)
+        bottom_a = translated(reference_a, lower_offset)
+        bottom_b = translated(reference_b, lower_offset)
+        top_b = translated(reference_b, upper_offset)
+        top_a = translated(reference_a, upper_offset)
         corners = [
-            edge_point_at_y(a, current, prev_plane, ymin),
-            edge_point_at_y(b, current, next_plane, ymin),
-            edge_point_at_y(b, current, next_plane, ymax),
-            edge_point_at_y(a, current, prev_plane, ymax),
+            bottom_a,
+            bottom_b,
+            top_b,
+            top_a,
         ]
-        width = xz_dist(corners[0], corners[1])
-        area = width * (ymax - ymin)
+        width = distance(bottom_a, bottom_b)
+        height = distance(bottom_a, top_a)
+        area = width * height
+        center = [sum(corner[i] for corner in corners) / 4.0 for i in range(3)]
         out.append({
             "id": seg["index"],
             "nome": f"{source['name']} · seg {seg['index']}",
             "tipo": source.get("type", "facciata"),
-            "punto": point,
+            "punto": center,
             "normale": normal,
             "corners": corners,
             "area_m2": area,
@@ -302,8 +417,10 @@ def build_planes(fusion, original_by_id, ymin, ymax):
             "fit_slope": source.get("fit_slope"),
             "fit_samples": source.get("fit_samples"),
             "fit_raw_samples": source.get("fit_raw_samples"),
+            "extrusion_direction": extrusion,
+            "regularization": "shared_orthogonal_extrusion",
             "w": width,
-            "h": ymax - ymin,
+            "h": height,
             "n_triangoli": 2,
         })
     return out
@@ -376,8 +493,10 @@ def run(stack_path, fusion_path, planes_path, out_dir, viewer_bundle=None):
             "angle_deg": stack.get("global_angle_deg"),
             "assigned_segments": fusion["stats"]["assigned"],
             "segments": fusion["stats"]["segments"],
-            "plane_mode": "perimeter_fit_tilt",
-            "edge_mode": "grow_to_neighbor_intersections",
+            "plane_mode": "perimeter_fit_shared_lean",
+            "edge_mode": "shared_orthogonal_extrusion",
+            "extrusion_direction": (
+                planes[0].get("extrusion_direction") if planes else [0.0, 1.0, 0.0]),
             "ymin": ymin,
             "ymax": ymax,
         },
