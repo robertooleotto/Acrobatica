@@ -43,6 +43,7 @@ struct AppFlowView: View {
     @EnvironmentObject var flow: AppFlow
     #if DEBUG
     @State private var debugComputoChiuso = false
+    @State private var debugEditorChiuso = false
     #endif
 
     var body: some View {
@@ -56,8 +57,13 @@ struct AppFlowView: View {
                     debugComputoChiuso = true
                 })
             } else if let sessionId = ProcessInfo.processInfo.environment["DEBUG_EDITOR_SESSION"],
-               !sessionId.isEmpty {
-                EditorMesh3DCaricamentoView(sessionId: sessionId, onChiudi: {})
+               !sessionId.isEmpty, !debugEditorChiuso {
+                EditorMesh3DCaricamentoView(
+                    sessionId: sessionId,
+                    onChiudi: {
+                        flow.phase = .main
+                        debugEditorChiuso = true
+                    })
             } else {
                 contenutoNormale
             }
