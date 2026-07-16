@@ -410,10 +410,10 @@ def project(session_id: str) -> dict:
                 return str(local)
 
             texel_mm = float(os.environ.get("ACRO_PROJECTION_TEXEL_MM", "20"))
-            max_photos = int(os.environ.get("ACRO_PROJECTION_REGISTER_PHOTOS", "12"))
+            max_photos = int(os.environ.get("ACRO_PROJECTION_REGISTER_PHOTOS", "20"))
             registration_ceiling = int(os.environ.get(
-                "ACRO_PROJECTION_MAX_REGISTER_PHOTOS", "32"))
-            coverage_photos = int(os.environ.get("ACRO_PROJECTION_COVERAGE_PHOTOS", "60"))
+                "ACRO_PROJECTION_MAX_REGISTER_PHOTOS", "80"))
+            coverage_photos = int(os.environ.get("ACRO_PROJECTION_COVERAGE_PHOTOS", "100"))
             fallback_reason = ""
             raw_reference = inp.get("raw_reference")
             enhanced = bool(raw_reference) and os.environ.get(

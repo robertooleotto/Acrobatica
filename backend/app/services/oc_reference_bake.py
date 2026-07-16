@@ -40,13 +40,41 @@ def _identity_correction() -> dict[str, object]:
 
 def adaptive_registration_budget(
     pf: ob.PlaneFrame,
-    base_photos: int = 12,
-    max_photos: int = 32,
+    base_photos: int = 20,
+    max_photos: int = 80,
 ) -> int:
     """Dimensiona il tetto di registrazione dalla superficie reale del piano."""
     span_need = math.ceil(pf.width_m / 3.0)
     area_need = math.ceil(pf.area_m2 / 40.0)
     return min(max(max_photos, base_photos), max(base_photos, span_need, area_need))
+
+
+def _alignment_is_connected(report: dict, photo_count: int) -> bool:
+    """Verifica che tutte le foto registrate appartengano allo stesso grafo."""
+    if photo_count < 2:
+        return False
+    components = report.get("components")
+    if isinstance(components, list):
+        return len(components) == 1
+    # Mantiene compatibilita con implementazioni/test che non espongono ancora
+    # il dettaglio dei componenti ma dichiarano l'allineamento applicato.
+    return bool(report.get("applied"))
+
+
+def _pose_filler_candidates(
+    ranked: list[dict],
+    attempted_keys: set[str],
+    accepted_keys: set[str],
+    limit: int,
+):
+    """Con foto valide, non ricicla come filler registrazioni gia rifiutate."""
+    for rank, candidate in enumerate(ranked[:limit], 1):
+        key = str(candidate["key"])
+        if key in accepted_keys:
+            continue
+        if accepted_keys and key in attempted_keys:
+            continue
+        yield rank, candidate
 
 
 def _select_registration_candidates(
@@ -141,6 +169,8 @@ def _select_registration_candidates(
 
     single_coverage = float((coverage_count[polygon] >= 1).mean())
     double_coverage = float((coverage_count[polygon] >= 2).mean())
+    rank_order = {str(candidate["key"]): index for index, candidate in enumerate(ranked)}
+    selected.sort(key=lambda candidate: rank_order.get(str(candidate["key"]), len(ranked)))
     return selected, {
         "budget": budget,
         "selected": len(selected),
@@ -188,53 +218,122 @@ def _compose_plane(
         reference_points, reference_descriptors = [], None
     ranked = registration.rank_candidates(pf, normal, cams, crop=crop)
     camera_by_key = {str(int(cam.key)): cam for cam in cams}
+    rank_by_key = {str(candidate["key"]): rank for rank, candidate in enumerate(ranked, 1)}
 
-    accepted_images: list[np.ndarray] = []
-    accepted_planar_masks: list[np.ndarray] = []
+    registered_images: list[np.ndarray] = []
+    registered_planar_masks: list[np.ndarray] = []
     accepted_full_masks: list[np.ndarray] = []
     accepted_keys: list[str] = []
+    attempted_keys: set[str] = set()
     photo_reports: list[dict[str, object]] = []
 
     if can_register:
-        registration_candidates, selection_report = _select_registration_candidates(
-            pf, normal, cams, ranked, crop=crop,
-            base_photos=max_photos, max_photos=registration_ceiling,
-        )
+        selection_target = min(max_photos, registration_ceiling)
+        selection_rounds: list[dict[str, object]] = []
+        selection_report: dict[str, object] = {}
+        global_report: dict[str, object] = {}
+        corrections: list[dict[str, object]] = []
+        accepted_images: list[np.ndarray] = []
+        accepted_planar_masks: list[np.ndarray] = []
+
+        while selection_target > 0:
+            registration_candidates, round_report = _select_registration_candidates(
+                pf, normal, cams, ranked, crop=crop,
+                base_photos=selection_target, max_photos=registration_ceiling,
+            )
+            new_candidates = [
+                candidate for candidate in registration_candidates
+                if str(candidate["key"]) not in attempted_keys
+            ]
+            if not new_candidates:
+                selection_report = {
+                    **round_report,
+                    "hard_ceiling": registration_ceiling,
+                    "rounds": selection_rounds,
+                    "stop_reason": "nessuna nuova foto candidata",
+                }
+                break
+
+            for candidate in new_candidates:
+                key = str(candidate["key"])
+                attempted_keys.add(key)
+                rank = rank_by_key.get(key, len(ranked) + 1)
+                resolved = photo_resolver(key)
+                item: dict[str, object] = {
+                    "rank": rank, **candidate, "photo_found": bool(resolved),
+                }
+                if not resolved:
+                    photo_reports.append(item)
+                    continue
+                posed, posed_mask = registration.warp_photo_to_plane(
+                    Path(resolved), camera_by_key[key], pf,
+                )
+                aligned, aligned_mask, residual = registration.register_residual(
+                    reference, planar_reference, reference_points, reference_descriptors,
+                    posed, posed_mask,
+                    max_rotation_deg=max_rotation_deg,
+                    max_scale_error=max_scale_error,
+                    max_residual_px=max_residual_px,
+                )
+                item["registration"] = residual
+                photo_reports.append(item)
+                if bool(residual.get("accepted")):
+                    registered_images.append(aligned)
+                    registered_planar_masks.append(aligned_mask & planar_reference)
+                    accepted_full_masks.append(aligned_mask)
+                    accepted_keys.append(key)
+
+            accepted_images, accepted_planar_masks, global_report, corrections = \
+                registration.global_align_photos(
+                    registered_images, registered_planar_masks, accepted_keys,
+                )
+            polygon = ob._polygon_mask(pf.tex_w, pf.tex_h, pf.polygon_uv)
+            coverage_count = np.zeros((pf.tex_h, pf.tex_w), np.uint16)
+            for mask in accepted_full_masks:
+                coverage_count += mask.astype(np.uint16)
+            single_coverage = (
+                float((coverage_count[polygon] >= 1).mean()) if polygon.any() else 0.0
+            )
+            double_coverage = (
+                float((coverage_count[polygon] >= 2).mean()) if polygon.any() else 0.0
+            )
+            connected = _alignment_is_connected(global_report, len(accepted_keys))
+            selection_rounds.append({
+                "target": selection_target,
+                "attempted": len(attempted_keys),
+                "accepted": len(accepted_keys),
+                "connected": connected,
+                "components": len(global_report.get("components", [])) or None,
+                "single_coverage": round(single_coverage, 4),
+                "double_coverage": round(double_coverage, 4),
+            })
+            selection_report = {
+                **round_report,
+                "hard_ceiling": registration_ceiling,
+                "rounds": selection_rounds,
+            }
+            if connected and single_coverage >= 0.995 and double_coverage >= 0.90:
+                selection_report["stop_reason"] = "copertura e grafo sufficienti"
+                break
+            if len(attempted_keys) >= min(registration_ceiling, len(ranked)):
+                selection_report["stop_reason"] = "raggiunto il tetto tecnico"
+                break
+            next_target = min(
+                registration_ceiling,
+                max(selection_target + 8, int(math.ceil(selection_target * 1.5))),
+            )
+            if next_target <= selection_target:
+                selection_report["stop_reason"] = "raggiunto il tetto tecnico"
+                break
+            selection_target = next_target
     else:
-        registration_candidates, selection_report = [], {
+        accepted_images = []
+        accepted_planar_masks = []
+        global_report = {}
+        corrections = []
+        selection_report = {
             "budget": 0, "selected": 0, "reason": "riferimento planare insufficiente",
         }
-    for rank, candidate in enumerate(registration_candidates, 1):
-        key = str(candidate["key"])
-        resolved = photo_resolver(key)
-        item: dict[str, object] = {
-            "rank": rank, **candidate, "photo_found": bool(resolved),
-        }
-        if not resolved:
-            photo_reports.append(item)
-            continue
-        posed, posed_mask = registration.warp_photo_to_plane(
-            Path(resolved), camera_by_key[key], pf,
-        )
-        aligned, aligned_mask, residual = registration.register_residual(
-            reference, planar_reference, reference_points, reference_descriptors,
-            posed, posed_mask,
-            max_rotation_deg=max_rotation_deg,
-            max_scale_error=max_scale_error,
-            max_residual_px=max_residual_px,
-        )
-        item["registration"] = residual
-        photo_reports.append(item)
-        if bool(residual.get("accepted")):
-            accepted_images.append(aligned)
-            accepted_planar_masks.append(aligned_mask & planar_reference)
-            accepted_full_masks.append(aligned_mask)
-            accepted_keys.append(key)
-
-    accepted_images, accepted_planar_masks, global_report, corrections = \
-        registration.global_align_photos(
-            accepted_images, accepted_planar_masks, accepted_keys,
-        )
     size = (pf.tex_w, pf.tex_h)
     compositing_masks = [
         cv2.warpAffine(
@@ -255,12 +354,11 @@ def _compose_plane(
 
     # Se il riferimento OC non ha feature sufficienti, conserva comunque il
     # risultato metrico delle pose invece di produrre una texture vuota.
-    filler_start = 0
     filler_limit = max(max_photos, coverage_photos)
-    for rank, candidate in enumerate(ranked[filler_start:filler_limit], filler_start + 1):
+    for rank, candidate in _pose_filler_candidates(
+        ranked, attempted_keys, set(accepted_keys), filler_limit,
+    ):
         key = str(candidate["key"])
-        if key in accepted_keys:
-            continue
         cam = camera_by_key[key]
         predicted_mask = registration.photo_coverage_mask(cam, pf)
         new_pixels = predicted_mask & ~covered
@@ -322,8 +420,8 @@ def bake_planes(
     *,
     texel_mm: float = 20.0,
     max_photos: int = 20,
-    registration_ceiling: int = 32,
-    coverage_photos: int = 60,
+    registration_ceiling: int = 80,
+    coverage_photos: int = 100,
     crop: float = 0.9,
     scale_m_per_mesh_unit: float = 1.0,
     photo_resolver=None,
