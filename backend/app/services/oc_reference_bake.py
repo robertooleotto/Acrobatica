@@ -127,10 +127,18 @@ def _select_registration_candidates(
             usable_ranked.append(candidate)
             masks.append(mask)
 
-    selected: list[dict] = []
-    selected_ids: set[int] = set()
+    # Il viewer locale parte dalle viste meglio classificate e su questa
+    # sequenza costruisce un grafo molto stabile. Manteniamo lo stesso nucleo;
+    # le viste distribuite servono solo ad ampliare la copertura quando occorre.
+    selected = list(ranked[:min(base_photos, budget, len(ranked))])
+    selected_keys = {str(candidate["key"]) for candidate in selected}
+    selected_ids = {
+        index for index, candidate in enumerate(usable_ranked)
+        if str(candidate["key"]) in selected_keys
+    }
     coverage_count = np.zeros(len(world), np.uint8)
-    minimum = min(base_photos, len(usable_ranked))
+    for index in selected_ids:
+        coverage_count[masks[index]] += 1
 
     while len(selected) < min(budget, len(usable_ranked)):
         deficit = polygon & (coverage_count < 2)
@@ -149,17 +157,17 @@ def _select_registration_candidates(
             break
         single_coverage = float((coverage_count[polygon] >= 1).mean())
         double_coverage = float((coverage_count[polygon] >= 2).mean())
-        if (len(selected) >= minimum and single_coverage >= 0.995
-                and double_coverage >= 0.95):
+        if single_coverage >= 0.995 and double_coverage >= 0.95:
             break
-        if len(selected) >= minimum and best_gain < max(1, int(polygon_cells * 0.002)):
+        if best_gain < max(1, int(polygon_cells * 0.002)):
             break
         selected_ids.add(best_index)
-        selected.append(usable_ranked[best_index])
+        candidate = usable_ranked[best_index]
+        selected.append(candidate)
+        selected_keys.add(str(candidate["key"]))
         coverage_count[masks[best_index]] += 1
 
     # Mantiene il baseline anche quando le maschere centrali sono troppo severe.
-    selected_keys = {str(item["key"]) for item in selected}
     for candidate in ranked:
         if len(selected) >= min(base_photos, len(ranked)) or len(selected) >= budget:
             break
