@@ -1034,6 +1034,8 @@ async def upload_mesh(
     meshes = _mesh_dict(existing)
     meshes[kind] = {"files": manifest, "main_obj": first_obj or first_usdz}
     existing["mesh"] = meshes
+    if kind == "clean":
+        projection_service.invalidate_geometry_outputs(existing, clear_planes=True)
     session_store.update_session(session_id, {"result": existing})
 
     # L'upload della mesh pulita conclude davvero il passo di pulizia. Le vecchie
@@ -1118,6 +1120,7 @@ def save_planes(session_id: str, payload: dict = Body(...)):
     storage_service.upload_bytes(remote, data, "application/json")
 
     existing = sess.get("result") or {}
+    projection_service.invalidate_geometry_outputs(existing)
     existing["planes"] = {"path": remote, "count": len(planes), "bytes": len(data)}
     session_store.update_session(session_id, {"result": existing})
 

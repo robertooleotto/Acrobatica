@@ -38,3 +38,25 @@ def test_recent_job_heartbeat_is_not_stale():
     job = {"state": "running", "updated_at": (now - timedelta(seconds=30)).isoformat()}
 
     assert not projection_service._job_is_stale(job, now=now)
+
+
+def test_geometry_change_invalidates_derived_outputs_and_optionally_planes():
+    result = {
+        "mesh": {"clean": {"files": ["mesh.obj"]}},
+        "planes": {"path": "planes.json"},
+        "projection": {"main_obj": "planes.obj"},
+        "projection_job": {"state": "complete"},
+        "metric_openings": {"openings": [{"id": "window-1"}]},
+        "opening_detection_job": {"state": "complete"},
+    }
+
+    projection_service.invalidate_geometry_outputs(result)
+    assert "mesh" in result
+    assert "planes" in result
+    assert "projection" not in result
+    assert "projection_job" not in result
+    assert "metric_openings" not in result
+    assert "opening_detection_job" not in result
+
+    projection_service.invalidate_geometry_outputs(result, clear_planes=True)
+    assert "planes" not in result

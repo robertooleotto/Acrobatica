@@ -21,9 +21,22 @@ struct EditorMesh3DView: View {
     @State private var caricandoCloud = false
     @State private var toastCloud: String?
     @State private var autoRiconoscimentoFatto = false
+    @State private var autoSalvataggioTask: Task<Void, Never>?
+    @State private var autoSalvataggioInCorso = false
+    @State private var revisioneMeshSalvata = 0
+    @State private var revisioneWorkspaceSalvata = 0
     /// Strumenti del vecchio flusso di costruzione/rifinitura manuale. Restano
     /// implementati, ma non occupano il pannello del flusso automatico corrente.
     private let abilitaControlliManualiPiani = false
+
+    private var cloudOccupato: Bool {
+        caricandoCloud || autoSalvataggioInCorso
+    }
+
+    private var workspaceSalvato: Bool {
+        model.meshRevision <= revisioneMeshSalvata
+            && model.workspaceRevision <= revisioneWorkspaceSalvata
+    }
 
     /// `meshFile` nil → mesh demo procedurale. `sessionId` presente → abilita il
     /// salvataggio della mesh RIPULITA sul backend (kind=clean).
@@ -40,17 +53,28 @@ struct EditorMesh3DView: View {
 
     /// Esporta la mesh ripulita e la carica sul backend come `clean`.
     private func salvaSuCloud() {
-        guard let sid = sessionId, !caricandoCloud else { return }
+        guard let sid = sessionId, !cloudOccupato else { return }
+        autoSalvataggioTask?.cancel()
         let nome = model.nome.replacingOccurrences(of: " ", with: "_")
         guard let obj = model.esportaMeshRipulita(nomeBase: nome).first else {
             toastCloud = "Nessuna mesh da salvare"; return
         }
+        guard let piani = model.esportaPianiPayload(includiVuoto: true) else {
+            toastCloud = "Impossibile preparare i piani"; return
+        }
+        let revisioneMesh = model.meshRevision
+        let revisioneWorkspace = model.workspaceRevision
         caricandoCloud = true
-        toastCloud = "Carico la mesh pulita…"
+        toastCloud = "Sincronizzo mesh e piani…"
         Task {
             do {
                 _ = try await BackendAPIClient.shared.uploadMesh(sessionId: sid, fileURL: obj, kind: "clean")
-                toastCloud = "Mesh pulita salvata sul cloud ✓"
+                _ = try await BackendAPIClient.shared.uploadPlanes(
+                    sessionId: sid, jsonData: piani)
+                revisioneMeshSalvata = max(revisioneMeshSalvata, revisioneMesh)
+                revisioneWorkspaceSalvata = max(
+                    revisioneWorkspaceSalvata, revisioneWorkspace)
+                toastCloud = "Mesh e piani sincronizzati ✓"
             } catch {
                 toastCloud = "Upload fallito: \(error.localizedDescription)"
             }
@@ -63,7 +87,8 @@ struct EditorMesh3DView: View {
     /// Serializza i piani decisi e li carica sul backend (out/planes.json su
     /// storage) come input della proiezione foto→piani (passo 7).
     private func salvaPianiSuCloud() {
-        guard let sid = sessionId, !caricandoCloud else { return }
+        guard let sid = sessionId, !cloudOccupato else { return }
+        autoSalvataggioTask?.cancel()
         guard let data = model.esportaPianiPayload() else {
             toastCloud = "Nessun piano da salvare"; return
         }
@@ -72,6 +97,8 @@ struct EditorMesh3DView: View {
         Task {
             do {
                 let r = try await BackendAPIClient.shared.uploadPlanes(sessionId: sid, jsonData: data)
+                revisioneWorkspaceSalvata = max(
+                    revisioneWorkspaceSalvata, model.workspaceRevision)
                 toastCloud = "Piani salvati sul cloud (\(r.count)) ✓"
             } catch {
                 toastCloud = "Upload piani fallito: \(error.localizedDescription)"
@@ -83,12 +110,15 @@ struct EditorMesh3DView: View {
     }
 
     private func proiettaTextureSuPiani() {
-        guard let sid = sessionId, !caricandoCloud else { return }
+        guard let sid = sessionId, !cloudOccupato else { return }
+        autoSalvataggioTask?.cancel()
         let nome = model.nome.replacingOccurrences(of: " ", with: "_")
         guard let obj = model.esportaMeshRipulita(nomeBase: nome).first,
               let planes = model.esportaPianiPayload() else {
             toastCloud = "Servono mesh e piani validi"; return
         }
+        let revisioneMesh = model.meshRevision
+        let revisioneWorkspace = model.workspaceRevision
         caricandoCloud = true
         toastCloud = "Carico la mesh pulita…"
         Task {
@@ -98,6 +128,9 @@ struct EditorMesh3DView: View {
                 toastCloud = "Carico i piani revisionati…"
                 _ = try await BackendAPIClient.shared.uploadPlanes(
                     sessionId: sid, jsonData: planes)
+                revisioneMeshSalvata = max(revisioneMeshSalvata, revisioneMesh)
+                revisioneWorkspaceSalvata = max(
+                    revisioneWorkspaceSalvata, revisioneWorkspace)
                 toastCloud = "Avvio la proiezione…"
                 var result = try await BackendAPIClient.shared.projectPlanes(sessionId: sid)
                 var polls = 0
@@ -153,7 +186,7 @@ struct EditorMesh3DView: View {
     }
 
     private func caricaUltimaTexture() {
-        guard let sid = sessionId, !caricandoCloud else { return }
+        guard let sid = sessionId, !cloudOccupato else { return }
         caricandoCloud = true
         toastCloud = "Scarico i piani texturizzati…"
         Task {
@@ -179,6 +212,70 @@ struct EditorMesh3DView: View {
         }
     }
 
+    private func pianificaSalvataggioAutomatico() {
+        guard sessionId != nil else { return }
+        guard !autoSalvataggioInCorso else { return }
+        autoSalvataggioTask?.cancel()
+        autoSalvataggioTask = Task {
+            do {
+                try await Task.sleep(nanoseconds: 1_200_000_000)
+                try Task.checkCancellation()
+                await eseguiSalvataggioAutomatico()
+            } catch {
+                // Una nuova modifica sostituisce il debounce precedente.
+            }
+        }
+    }
+
+    @MainActor
+    private func eseguiSalvataggioAutomatico() async {
+        guard let sid = sessionId else { return }
+        if caricandoCloud {
+            pianificaSalvataggioAutomatico()
+            return
+        }
+
+        let revisioneWorkspace = model.workspaceRevision
+        let revisioneMesh = model.meshRevision
+        let deveCaricareMesh = revisioneMesh > revisioneMeshSalvata
+        let deveCaricarePiani = revisioneWorkspace > revisioneWorkspaceSalvata
+        guard deveCaricareMesh || deveCaricarePiani else { return }
+
+        let nome = model.nome.replacingOccurrences(of: " ", with: "_")
+        let obj = deveCaricareMesh
+            ? model.esportaMeshRipulita(nomeBase: nome).first
+            : nil
+        guard !deveCaricareMesh || obj != nil else {
+            toastCloud = "Autosave mesh fallito: esportazione non riuscita"
+            return
+        }
+        let piani = model.esportaPianiPayload(includiVuoto: true)
+
+        autoSalvataggioInCorso = true
+        defer {
+            autoSalvataggioInCorso = false
+            if model.workspaceRevision > revisioneWorkspaceSalvata
+                || model.meshRevision > revisioneMeshSalvata {
+                pianificaSalvataggioAutomatico()
+            }
+        }
+        do {
+            if let obj {
+                _ = try await BackendAPIClient.shared.uploadMesh(
+                    sessionId: sid, fileURL: obj, kind: "clean")
+                revisioneMeshSalvata = max(revisioneMeshSalvata, revisioneMesh)
+            }
+            if let piani {
+                _ = try await BackendAPIClient.shared.uploadPlanes(
+                    sessionId: sid, jsonData: piani)
+            }
+            revisioneWorkspaceSalvata = max(
+                revisioneWorkspaceSalvata, revisioneWorkspace)
+        } catch {
+            toastCloud = "Autosave non riuscito: \(error.localizedDescription)"
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             barraSuperiore
@@ -196,7 +293,7 @@ struct EditorMesh3DView: View {
         .overlay(alignment: .bottom) {
             if let t = toastCloud {
                 HStack(spacing: 8) {
-                    if caricandoCloud { ProgressView().tint(.white).scaleEffect(0.8) }
+                    if cloudOccupato { ProgressView().tint(.white).scaleEffect(0.8) }
                     Text(t).font(Theme.Typo.caption(12)).foregroundStyle(.white)
                 }
                 .padding(.horizontal, 14).padding(.vertical, 10)
@@ -215,6 +312,9 @@ struct EditorMesh3DView: View {
                 autoRiconoscimentoFatto = true
                 Task { await model.riconosciPianiAuto(sessionId: sid) }
             }
+        }
+        .onChange(of: model.workspaceRevision) { _ in
+            pianificaSalvataggioAutomatico()
         }
         .sheet(isPresented: Binding(
             get: { !urlsExport.isEmpty },
@@ -264,11 +364,13 @@ struct EditorMesh3DView: View {
             .foregroundStyle(model.puoRedo ? EditorTheme.testo : EditorTheme.testoMuto.opacity(0.4))
             if sessionId != nil {
                 Button { salvaSuCloud() } label: {
-                    Image(systemName: caricandoCloud ? "arrow.triangle.2.circlepath" : "cloud.and.arrow.up")
+                    Image(systemName: cloudOccupato
+                          ? "arrow.triangle.2.circlepath"
+                          : (workspaceSalvato ? "checkmark.icloud" : "icloud.and.arrow.up"))
                         .frame(width: 36, height: 36)
                         .foregroundStyle(model.numTriangoli == 0 ? EditorTheme.testoMuto.opacity(0.4) : EditorTheme.accento)
                 }
-                .disabled(model.numTriangoli == 0 || caricandoCloud)
+                .disabled(model.numTriangoli == 0 || cloudOccupato)
             }
             Menu {
                 Button {
@@ -286,15 +388,15 @@ struct EditorMesh3DView: View {
                     Button { salvaPianiSuCloud() } label: {
                         Label("Salva piani sul cloud", systemImage: "cloud.and.arrow.up")
                     }
-                    .disabled(model.facce.isEmpty || caricandoCloud)
+                    .disabled(model.facce.isEmpty || cloudOccupato)
                     Button { proiettaTextureSuPiani() } label: {
                         Label("Proietta texture sui piani", systemImage: "photo.on.rectangle.angled")
                     }
-                    .disabled(model.facce.isEmpty || model.numTriangoli == 0 || caricandoCloud)
+                    .disabled(model.facce.isEmpty || model.numTriangoli == 0 || cloudOccupato)
                     Button { caricaUltimaTexture() } label: {
                         Label("Carica texture calcolata", systemImage: "arrow.down.square")
                     }
-                    .disabled(caricandoCloud)
+                    .disabled(cloudOccupato)
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")
@@ -1882,6 +1984,7 @@ private struct SceneKitContainer: UIViewRepresentable {
                     model.spostaSelezioneAllinea(delta: step)
                 case .ended, .cancelled:
                     spostaPianoP = nil; spostaPianoN = nil; spostaLastWorld = nil
+                    model.concludiModificaPersistente()
                 default: break
                 }
                 return
@@ -2050,6 +2153,7 @@ private struct SceneKitContainer: UIViewRepresentable {
                     }
                 case .ended, .cancelled:
                     trascina = nil
+                    model.concludiModificaPersistente()
                 default: break
                 }
                 return
@@ -2725,7 +2829,10 @@ final class Mesh3DModel: ObservableObject {
     private(set) var mesh = EditableMesh(vertices: [], triangles: [])
     /// Cambia a ogni modifica distruttiva locale. Impedisce a un rilevamento
     /// backend avviato prima del taglio di sovrascrivere i piani aggiornati.
-    private var meshRevision = 0
+    @Published private(set) var meshRevision = 0
+    /// Cambia per ogni modifica persistente a mesh o piani. La vista lo usa per
+    /// accodare un unico autosave dopo una sequenza ravvicinata di operazioni.
+    @Published private(set) var workspaceRevision = 0
     /// Mesh come caricata (prima di crop/pulizia): per "riparti da zero".
     private var meshOriginale: EditableMesh?
     /// Adiacenza saldata in cache (ricostruita pigramente): velocizza ogni crescita.
@@ -3411,6 +3518,8 @@ final class Mesh3DModel: ObservableObject {
     func ricaricaDaCapo() {
         guard let orig = meshOriginale else { return }
         installaMesh(orig)
+        meshRevision += 1
+        workspaceRevision += 1
     }
 
     private func configuraScena() {
@@ -4493,6 +4602,11 @@ final class Mesh3DModel: ObservableObject {
         if undoStack.count > maxUndo { undoStack.removeFirst() }
         redoStack.removeAll()
         puoUndo = true; puoRedo = false
+        workspaceRevision += 1
+    }
+
+    func concludiModificaPersistente() {
+        workspaceRevision += 1
     }
 
     func undo() {
@@ -4501,6 +4615,7 @@ final class Mesh3DModel: ObservableObject {
         redoStack.append((mesh, selezione, facce))
         mesh = m; selezione = s; facce = f
         meshRevision += 1
+        workspaceRevision += 1
         puoUndo = !undoStack.isEmpty; puoRedo = true
         renderMesh()
     }
@@ -4511,6 +4626,7 @@ final class Mesh3DModel: ObservableObject {
         undoStack.append((mesh, selezione, facce))
         mesh = m; selezione = s; facce = f
         meshRevision += 1
+        workspaceRevision += 1
         puoUndo = true; puoRedo = !redoStack.isEmpty
         renderMesh()
     }
@@ -7496,7 +7612,7 @@ final class Mesh3DModel: ObservableObject {
     /// Serializza i piani decisi (facce con piano fittato + piano_base) nel
     /// documento da caricare sul backend per la proiezione. `nil` se non c'è
     /// nessun piano valido. Include i triangoli per la maschera sulla mesh pulita.
-    func esportaPianiPayload() -> Data? {
+    func esportaPianiPayload(includiVuoto: Bool = false) -> Data? {
         assicuraPiani()   // fitta i piani mancanti senza toccare le rifiniture
         for f in facce where f.poligono == nil && !f.triangoli.isEmpty {
             generaPoligono(perFaccia: f.id)
@@ -7512,7 +7628,7 @@ final class Mesh3DModel: ObservableObject {
                 punto: p.lista, normale: n.lista, corners: polygon.map(\.lista),
                 n_triangoli: f.triangoli.count, triangoli: f.triangoli.sorted())
         }
-        guard !planes.isEmpty else { return nil }
+        guard includiVuoto || !planes.isEmpty else { return nil }
         let doc = PianiUploadDoc(schema: "acro.planes/v1", versione: 1,
                                  stato: statoProxy.raw, piano_base: pb, planes: planes)
         let enc = JSONEncoder()

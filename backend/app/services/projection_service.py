@@ -39,6 +39,25 @@ _CONTENT_TYPES = {
     ".json": "application/json",
 }
 
+
+def invalidate_geometry_outputs(result: dict, clear_planes: bool = False) -> dict:
+    """Invalida tutti gli artefatti derivati da mesh e piani.
+
+    La funzione modifica `result` in-place per integrarsi con il documento di
+    sessione esistente. Una nuova mesh rende obsoleti anche i piani; una nuova
+    revisione dei soli piani conserva invece la mesh pulita.
+    """
+    if clear_planes:
+        result.pop("planes", None)
+    for key in (
+        "projection",
+        "projection_job",
+        "metric_openings",
+        "opening_detection_job",
+    ):
+        result.pop(key, None)
+    return result
+
 _ACTIVE_JOB_STATES = {"queued", "running"}
 _JOB_STALE_SECONDS = 15 * 60
 
