@@ -25,6 +25,9 @@ struct EditorMesh3DView: View {
     @State private var autoSalvataggioInCorso = false
     @State private var revisioneMeshSalvata = 0
     @State private var revisioneWorkspaceSalvata = 0
+    #if DEBUG
+    @State private var debugTextureCaricata = false
+    #endif
     /// Strumenti del vecchio flusso di costruzione/rifinitura manuale. Restano
     /// implementati, ma non occupano il pannello del flusso automatico corrente.
     private let abilitaControlliManualiPiani = false
@@ -281,10 +284,23 @@ struct EditorMesh3DView: View {
             barraSuperiore
             ZStack(alignment: .topTrailing) {
                 SceneKitContainer(model: model)
+                if model.haPianiTexturizzati,
+                   model.modalitaVisuale == .confronto,
+                   !model.mostraSviluppoPiani {
+                    confrontoVisuale
+                }
                 if model.modoPerimetro && model.perimetroTraccia { PannelloPerimetro(model: model) }
                 hud
                 NavGizmo(model: model).padding(.top, 8).padding(.trailing, 62)
                 railDestro
+                if model.haPianiTexturizzati && !model.mostraSviluppoPiani {
+                    VStack {
+                        Spacer()
+                        selettoreModalitaVisuale
+                            .padding(.bottom, 12)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
             }
             barraStrumenti
         }
@@ -308,6 +324,18 @@ struct EditorMesh3DView: View {
         // solo se non ci sono già piani): "riconosce subito i piani" col detector
         // python. Se non c'è sessione (mesh demo) resta manuale.
         .onChange(of: model.numTriangoli) { n in
+            #if DEBUG
+            if n > 0, !debugTextureCaricata,
+               let path = ProcessInfo.processInfo.environment["DEBUG_PROJECTED_OBJ"],
+               !path.isEmpty {
+                debugTextureCaricata = true
+                try? model.caricaPianiTexturizzati(URL(fileURLWithPath: path))
+                if let rawMode = ProcessInfo.processInfo.environment["DEBUG_VISUAL_MODE"],
+                   let mode = ModalitaVisualePiani(rawValue: rawMode) {
+                    model.modalitaVisuale = mode
+                }
+            }
+            #endif
             if n > 0, let sid = sessionId, model.facce.isEmpty, !autoRiconoscimentoFatto {
                 autoRiconoscimentoFatto = true
                 Task { await model.riconosciPianiAuto(sessionId: sid) }
@@ -409,6 +437,75 @@ struct EditorMesh3DView: View {
         .padding(.vertical, 6)
         .background(EditorTheme.panel)
         .overlay(Rectangle().fill(EditorTheme.hair).frame(height: 1), alignment: .bottom)
+    }
+
+    private var selettoreModalitaVisuale: some View {
+        HStack(spacing: 2) {
+            ForEach(ModalitaVisualePiani.allCases) { modalita in
+                Button {
+                    model.modalitaVisuale = modalita
+                } label: {
+                    Label(modalita.etichetta, systemImage: modalita.icona)
+                        .font(Theme.Typo.caption(10, .semibold))
+                        .foregroundStyle(model.modalitaVisuale == modalita
+                                         ? .white : EditorTheme.testo.opacity(0.72))
+                        .padding(.horizontal, 9)
+                        .frame(height: 34)
+                        .background(model.modalitaVisuale == modalita
+                                    ? EditorTheme.accento : Color.clear,
+                                    in: RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(modalita.etichetta)
+            }
+        }
+        .padding(3)
+        .background(EditorTheme.panel.opacity(0.94),
+                    in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8)
+            .stroke(EditorTheme.hair, lineWidth: 1))
+    }
+
+    private var confrontoVisuale: some View {
+        GeometryReader { proxy in
+            let x = proxy.size.width * model.separatoreConfronto
+            ZStack(alignment: .topLeading) {
+                HStack {
+                    Text("OC")
+                        .padding(.horizontal, 7).padding(.vertical, 4)
+                        .background(.black.opacity(0.62), in: Capsule())
+                    Spacer()
+                    Text("PIANI")
+                        .padding(.horizontal, 7).padding(.vertical, 4)
+                        .background(.black.opacity(0.62), in: Capsule())
+                }
+                .font(Theme.Typo.caption(10, .bold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12)
+                .padding(.top, 180)
+                .allowsHitTesting(false)
+
+                Rectangle()
+                    .fill(Color.white.opacity(0.9))
+                    .frame(width: 2, height: proxy.size.height)
+                    .position(x: x, y: proxy.size.height * 0.5)
+                    .allowsHitTesting(false)
+
+                Image(systemName: "arrow.left.and.right")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(EditorTheme.panel)
+                    .frame(width: 34, height: 34)
+                    .background(Color.white, in: Circle())
+                    .shadow(color: .black.opacity(0.28), radius: 4, y: 2)
+                    .position(x: x, y: proxy.size.height * 0.52)
+                    .gesture(DragGesture(minimumDistance: 0)
+                        .onChanged { value in
+                            model.separatoreConfronto = min(
+                                max(value.location.x / max(proxy.size.width, 1), 0.08), 0.92)
+                        })
+                    .accessibilityLabel("Separatore confronto")
+            }
+        }
     }
 
     /// Menu delle viste (proxy/piani/geometria/texture/validazione) — nel rail.
@@ -2768,6 +2865,28 @@ private struct PuntoRevisionePiano {
     let pianoId: Int
 }
 
+enum ModalitaVisualePiani: String, CaseIterable, Identifiable {
+    case risultato
+    case controllo
+    case confronto
+
+    var id: String { rawValue }
+    var etichetta: String {
+        switch self {
+        case .risultato: return "Risultato"
+        case .controllo: return "Controllo"
+        case .confronto: return "Confronto"
+        }
+    }
+    var icona: String {
+        switch self {
+        case .risultato: return "photo"
+        case .controllo: return "square.dashed"
+        case .confronto: return "rectangle.split.2x1"
+        }
+    }
+}
+
 /// Faccia del box di lavoro trascinabile (una maniglia per lato).
 enum FacciaBox: String {
     case xMin, xMax, yMin, yMax, zMin, zMax
@@ -2801,6 +2920,12 @@ final class Mesh3DModel: ObservableObject {
     /// Incrementato per chiedere alla vista una re-inquadratura (frameNodes).
     @Published var reframeTick = 0
     @Published private(set) var haPianiTexturizzati = false
+    @Published var modalitaVisuale: ModalitaVisualePiani = .risultato {
+        didSet { aggiornaVista() }
+    }
+    @Published var separatoreConfronto: CGFloat = 0.5 {
+        didSet { aggiornaParametriConfronto() }
+    }
     @Published var mostraSviluppoPiani = false {
         didSet { aggiornaModalitaPianiTexturizzati() }
     }
@@ -3788,6 +3913,8 @@ final class Mesh3DModel: ObservableObject {
                 userInfo: [NSLocalizedDescriptionKey: "PNG delle texture non leggibili"])
         }
         haPianiTexturizzati = !pianiTexturizzatiNode.childNodes.isEmpty
+        modalitaVisuale = .risultato
+        separatoreConfronto = 0.5
         // I piani coincidono quasi con la superficie OC: se la mesh resta opaca
         // davanti, l'utente vede il modello bianco invece delle ortofoto.
         mostraTexturaOC = false
@@ -3795,6 +3922,7 @@ final class Mesh3DModel: ObservableObject {
         mostraPiani = false
         mostraProxy = false
         mostraSviluppoPiani = false
+        aggiornaVista()
         cursoreInfo = "Piani texturizzati caricati"
     }
 
@@ -4018,8 +4146,8 @@ final class Mesh3DModel: ObservableObject {
             sviluppoPianiNode.isHidden = true
             return
         }
-        pianiTexturizzatiNode.isHidden = mostraSviluppoPiani
         sviluppoPianiNode.isHidden = !mostraSviluppoPiani
+        aggiornaVista()
         guard mostraSviluppoPiani else {
             inquadra()
             return
@@ -4489,7 +4617,13 @@ final class Mesh3DModel: ObservableObject {
             SIMD4<Float>(rt.columns.2, 0),
             SIMD4<Float>(t, 1))
         for material in materials {
-            material.shaderModifiers = clipAttivo ? [.surface: MeshFactory.clipModifier] : nil
+            var modifiers = material.shaderModifiers ?? [:]
+            if clipAttivo {
+                modifiers[.surface] = MeshFactory.clipModifier
+            } else {
+                modifiers.removeValue(forKey: .surface)
+            }
+            material.shaderModifiers = modifiers.isEmpty ? nil : modifiers
             material.setValue(SCNVector3(boxLo.x, boxLo.y, boxLo.z), forKey: "clipLo")
             material.setValue(SCNVector3(boxHi.x, boxHi.y, boxHi.z), forKey: "clipHi")
             material.setValue(NSValue(scnMatrix4: SCNMatrix4(inv)), forKey: "clipInv")
@@ -7213,7 +7347,10 @@ final class Mesh3DModel: ObservableObject {
     /// Quad colorato per ogni piano fittato (anteprima multipiano proxy).
     private func ridisegnaPiani() {
         pianiNode.childNodes.forEach { $0.removeFromParentNode() }
-        let visibili = mostraPiani && !mostraSviluppoPiani
+        let controlloTexture = haPianiTexturizzati && modalitaVisuale == .controllo
+        let risultatoPulito = haPianiTexturizzati && modalitaVisuale != .controllo
+        let visibili = (mostraPiani || controlloTexture)
+            && !risultatoPulito && !mostraSviluppoPiani
         pianiNode.isHidden = !visibili
         guard visibili else { return }
         let upRef = assiRif.u
@@ -7258,16 +7395,35 @@ final class Mesh3DModel: ObservableObject {
             let soloPiani = !mostraMesh && !mostraTexturaOC
             let m = SCNMaterial()
             let faSel = strumento == .allinea && facciaAllineaSelezionata(f.id)
-            m.diffuse.contents = faSel ? UIColor.systemOrange.withAlphaComponent(0.6)
-                : f.colore.withAlphaComponent(soloPiani ? 1.0 : 0.62)   // più solido = look viewer
+            if controlloTexture {
+                m.diffuse.contents = faSel
+                    ? UIColor.systemOrange.withAlphaComponent(0.22)
+                    : UIColor.systemTeal.withAlphaComponent(0.08)
+            } else {
+                m.diffuse.contents = faSel ? UIColor.systemOrange.withAlphaComponent(0.6)
+                    : f.colore.withAlphaComponent(soloPiani ? 1.0 : 0.62)
+            }
             m.isDoubleSided = true; m.lightingModel = .constant
-            m.writesToDepthBuffer = soloPiani
+            m.readsFromDepthBuffer = !controlloTexture
+            m.writesToDepthBuffer = soloPiani && !controlloTexture
             g.materials = [m]
             let fill = SCNNode(geometry: g)
             fill.name = "piano:\(f.id)"   // selezionabile col tap (anche piani solo-poligono)
+            if controlloTexture { fill.renderingOrder = 800 }
             pianiNode.addChildNode(fill)
-            if let c = MeshFactory.lineaGeometria(corners, colore: f.colore, chiusa: true) {
-                pianiNode.addChildNode(SCNNode(geometry: c))
+            let coloreBordo = controlloTexture
+                ? (faSel ? UIColor.systemOrange : UIColor.white.withAlphaComponent(0.92))
+                : f.colore
+            if let c = MeshFactory.lineaGeometria(corners, colore: coloreBordo, chiusa: true) {
+                let bordo = SCNNode(geometry: c)
+                if controlloTexture {
+                    c.materials.forEach {
+                        $0.readsFromDepthBuffer = false
+                        $0.writesToDepthBuffer = false
+                    }
+                    bordo.renderingOrder = 900
+                }
+                pianiNode.addChildNode(bordo)
             }
             // Maniglie (solo sul poligono editabile della faccia attiva):
             // sfere bianche = angoli (Fase C drag), cubetti arancioni = edge
@@ -7384,13 +7540,96 @@ final class Mesh3DModel: ObservableObject {
     private func aggiornaVista() {
         let t: CGFloat = vistaValidazione == .soloProxy ? 0.04
             : (vistaValidazione == .soloScarti ? 0.18 : 1.0)
-        // geometria grigia nascosta se l'utente la spegne o se mostra la texture
-        let mostraGrigia = mostraMesh && !mostraTexturaOC && !mostraSviluppoPiani
+        let visualizzaRisultato = haPianiTexturizzati && !mostraSviluppoPiani
+        let visualizzaOC = visualizzaRisultato
+            && (modalitaVisuale == .controllo || modalitaVisuale == .confronto)
+        let mostraGrigia: Bool
+        if visualizzaRisultato {
+            mostraGrigia = visualizzaOC && ocTextureNode == nil
+        } else {
+            mostraGrigia = mostraMesh && !mostraTexturaOC && !mostraSviluppoPiani
+        }
         contentNode.geometry?.firstMaterial?.transparency = mostraGrigia ? t : 0
-        ocTextureNode?.isHidden = !mostraTexturaOC || mostraSviluppoPiani
-        facceProxyNode.isHidden = !mostraProxy || mostraSviluppoPiani
+        ocTextureNode?.isHidden = visualizzaRisultato
+            ? !visualizzaOC
+            : (!mostraTexturaOC || mostraSviluppoPiani)
+        pianiTexturizzatiNode.isHidden = !visualizzaRisultato
+            || modalitaVisuale == .controllo
+        facceProxyNode.isHidden = visualizzaRisultato
+            || !mostraProxy || mostraSviluppoPiani
+        aggiornaShaderVisuale()
         ridisegnaFacce()
-        ridisegnaPiani()   // i piani diventano pieni/trasparenti secondo la visibilità mesh
+        ridisegnaPiani()
+    }
+
+    private func materiali(in root: SCNNode) -> [SCNMaterial] {
+        var result: [SCNMaterial] = []
+        root.enumerateHierarchy { node, _ in
+            if let geometry = node.geometry { result.append(contentsOf: geometry.materials) }
+        }
+        return result
+    }
+
+    private func configuraShaderVisuale(
+        _ material: SCNMaterial,
+        confronto: Bool,
+        lato: Float,
+        desaturazione: Float,
+        luminosita: Float
+    ) {
+        let usaShader = confronto || desaturazione > 0.001 || luminosita < 0.999
+        var modifiers = material.shaderModifiers ?? [:]
+        if usaShader {
+            modifiers[.fragment] = MeshFactory.visualComparisonModifier
+            material.setValue(Float(confronto ? 1 : 0), forKey: "compareEnabled")
+            material.setValue(Float(separatoreConfronto), forKey: "compareDivider")
+            material.setValue(lato, forKey: "compareSide")
+            material.setValue(desaturazione, forKey: "visualDesaturation")
+            material.setValue(luminosita, forKey: "visualBrightness")
+        } else {
+            modifiers.removeValue(forKey: .fragment)
+        }
+        material.shaderModifiers = modifiers.isEmpty ? nil : modifiers
+    }
+
+    private func aggiornaShaderVisuale() {
+        let confronto = haPianiTexturizzati
+            && modalitaVisuale == .confronto
+            && !mostraSviluppoPiani
+        let controllo = haPianiTexturizzati
+            && modalitaVisuale == .controllo
+            && !mostraSviluppoPiani
+        let ocMaterials = (ocTextureNode.map(materiali(in:)) ?? [])
+            + (contentNode.geometry?.materials ?? [])
+        for material in ocMaterials {
+            configuraShaderVisuale(
+                material,
+                confronto: confronto,
+                lato: -1,
+                desaturazione: controllo ? 0.88 : 0,
+                luminosita: controllo ? 0.72 : 1)
+        }
+        for material in materiali(in: pianiTexturizzatiNode) {
+            configuraShaderVisuale(
+                material,
+                confronto: confronto,
+                lato: 1,
+                desaturazione: 0,
+                luminosita: 1)
+        }
+    }
+
+    private func aggiornaParametriConfronto() {
+        let divider = Float(separatoreConfronto)
+        let roots = [ocTextureNode, pianiTexturizzatiNode]
+        for root in roots.compactMap({ $0 }) {
+            for material in materiali(in: root) {
+                material.setValue(divider, forKey: "compareDivider")
+            }
+        }
+        contentNode.geometry?.materials.forEach {
+            $0.setValue(divider, forKey: "compareDivider")
+        }
     }
 
     /// Riallinea triangoli e piani dopo un taglio. Conserva la normale
@@ -7992,6 +8231,27 @@ enum MeshFactory {
             discard_fragment();
         }
     }
+    """
+
+    static let visualComparisonModifier = """
+    #pragma arguments
+    float compareEnabled;
+    float compareDivider;
+    float compareSide;
+    float visualDesaturation;
+    float visualBrightness;
+    #pragma body
+    if (compareEnabled > 0.5) {
+        float4 clipPosition = scn_frame.projectionTransform * float4(_surface.position, 1.0);
+        float screenX = (clipPosition.x / max(abs(clipPosition.w), 0.0001)) * 0.5 + 0.5;
+        if ((compareSide < 0.0 && screenX > compareDivider) ||
+            (compareSide > 0.0 && screenX < compareDivider)) {
+            discard_fragment();
+        }
+    }
+    float luminance = dot(_output.color.rgb, float3(0.2126, 0.7152, 0.0722));
+    _output.color.rgb = mix(_output.color.rgb, float3(luminance), visualDesaturation)
+        * visualBrightness;
     """
 }
 
