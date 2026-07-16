@@ -389,6 +389,16 @@ actor BackendAPIClient {
     }
 
     struct ProjectionResult: Codable {
+        struct Plane: Codable {
+            let index: Int
+            let nome: String?
+            let file: String
+            let width_m: Double
+            let height_m: Double
+            let area_m2: Double
+            let coverage: Double
+        }
+
         let session_id: String
         let status: String
         let count: Int
@@ -402,6 +412,7 @@ actor BackendAPIClient {
         let error: String
         let projection_mode: String?
         let texture_encoding: String?
+        let planes: [Plane]?
     }
 
     /// Avvia il bake cloud. Il timeout della singola richiesta è esteso perché
