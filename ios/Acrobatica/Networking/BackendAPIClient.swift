@@ -84,6 +84,16 @@ actor BackendAPIClient {
         return decoded.session_id
     }
 
+    /// Chiude la cattura solo quando tutti gli upload sono terminati e la mette
+    /// nella coda del Mac Object Capture.
+    func finalizeAndRequestMesh(sessionId: String) async throws {
+        var request = URLRequest(url: baseURL.appendingPathComponent(
+            "/facade-sessions/\(sessionId)/start-automatic"))
+        request.httpMethod = "POST"
+        let (requestData, requestResponse) = try await urlSession.data(for: request)
+        try assertHTTPOK(requestResponse, data: requestData)
+    }
+
     // MARK: - Upload
 
     struct UploadResponse: Codable {
@@ -717,6 +727,11 @@ final class BackgroundUploader: NSObject, ObservableObject {
     private let baseURL = AcroBackend.baseURL
     private let maxRetry = 5
     private var responseData: [Int: Data] = [:]   // per taskIdentifier
+    private var sessioniChiuse: Set<String> {
+        get { Set(UserDefaults.standard.stringArray(forKey: "closed_capture_sessions") ?? []) }
+        set { UserDefaults.standard.set(Array(newValue), forKey: "closed_capture_sessions") }
+    }
+    private var sessioniInAccodamento: Set<String> = []
 
     private lazy var session: URLSession = {
         let c = URLSessionConfiguration.background(withIdentifier: "com.acrobatica.upload.bg")
@@ -777,10 +792,23 @@ final class BackgroundUploader: NSObject, ObservableObject {
         recomputeCounters()
     }
 
+    /// Segna che non arriveranno altre foto per questa sessione. L'accodamento
+    /// parte subito se la coda e vuota, oppure alla riuscita dell'ultimo upload.
+    func finishCapture(sessionId: String) {
+        var closed = sessioniChiuse
+        closed.insert(sessionId)
+        sessioniChiuse = closed
+        provaFinalizzazione(sessionId: sessionId)
+    }
+
     /// Da chiamare all'avvio dell'app: ricollega la background session (i task
     /// ancora vivi consegnano il completamento) e ri-accoda ciò che non era partito.
     func resumeOnLaunch() {
         let store = loadStore()
+        for sessionId in sessioniChiuse
+        where !store.contains(where: { $0.sessionId == sessionId }) {
+            provaFinalizzazione(sessionId: sessionId)
+        }
         guard !store.isEmpty else { return }
         for p in store { statusByOrder[p.photo.orderIndex] = .uploading }
         recomputeCounters()
@@ -861,12 +889,34 @@ final class BackgroundUploader: NSObject, ObservableObject {
 
     private func finishSuccess(_ id: String) {
         let store = loadStore()
+        let completed = store.first(where: { $0.id == id })
         if let p = store.first(where: { $0.id == id }) {
             statusByOrder[p.photo.orderIndex] = .done
         }
         try? FileManager.default.removeItem(at: bodyDir.appendingPathComponent("\(id).multipart"))
         removeFromStore(id: id)
         recomputeCounters()
+        if let completed { provaFinalizzazione(sessionId: completed.sessionId) }
+    }
+
+    private func provaFinalizzazione(sessionId: String) {
+        guard sessioniChiuse.contains(sessionId),
+              !sessioniInAccodamento.contains(sessionId) else { return }
+        let pendenti = loadStore().contains { $0.sessionId == sessionId }
+        guard !pendenti, failed == 0 else { return }
+        sessioniInAccodamento.insert(sessionId)
+        Task {
+            do {
+                try await BackendAPIClient.shared.finalizeAndRequestMesh(
+                    sessionId: sessionId)
+                var closed = sessioniChiuse
+                closed.remove(sessionId)
+                sessioniChiuse = closed
+            } catch {
+                // La sessione resta persistita e verra ritentata al prossimo avvio.
+            }
+            sessioniInAccodamento.remove(sessionId)
+        }
     }
 
     private func handleFailure(id: String) {

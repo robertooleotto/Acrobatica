@@ -212,6 +212,37 @@ struct EditorMesh3DView: View {
         }
     }
 
+    /// All'apertura mostra subito il risultato automatico se il backend lo ha
+    /// gia prodotto; in assenza di un bake conserva il riconoscimento editoriale.
+    private func preparaRisultatoAutomatico(sessionId sid: String) async {
+        do {
+            let result = try await BackendAPIClient.shared.projectionStatus(sessionId: sid)
+            guard result.state == "complete", let main = result.main_obj else {
+                if result.state == "queued" || result.state == "running" {
+                    toastCloud = result.message
+                } else {
+                    await model.riconosciPianiAuto(sessionId: sid)
+                }
+                return
+            }
+            caricandoCloud = true
+            toastCloud = "Scarico il risultato texturizzato…"
+            defer { caricandoCloud = false }
+            let bundle = try await BackendAPIClient.shared.downloadMeshBundle(result.files)
+            guard let url = bundle[main.name] else {
+                throw NSError(
+                    domain: "AcrobaticaProjection", code: 7,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "Il bundle automatico non contiene l'OBJ principale"])
+            }
+            try model.caricaPianiTexturizzati(url)
+            toastCloud = "Modello texturizzato pronto ✓"
+        } catch {
+            toastCloud = "Risultato automatico non disponibile"
+            await model.riconosciPianiAuto(sessionId: sid)
+        }
+    }
+
     private func pianificaSalvataggioAutomatico() {
         guard sessionId != nil else { return }
         guard !autoSalvataggioInCorso else { return }
@@ -310,7 +341,7 @@ struct EditorMesh3DView: View {
         .onChange(of: model.numTriangoli) { n in
             if n > 0, let sid = sessionId, model.facce.isEmpty, !autoRiconoscimentoFatto {
                 autoRiconoscimentoFatto = true
-                Task { await model.riconosciPianiAuto(sessionId: sid) }
+                Task { await preparaRisultatoAutomatico(sessionId: sid) }
             }
         }
         .onChange(of: model.workspaceRevision) { _ in

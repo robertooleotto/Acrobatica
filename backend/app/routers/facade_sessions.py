@@ -203,8 +203,28 @@ def request_mesh(session_id: str):
     return _session_state(row, photos)
 
 
+@router.post("/{session_id}/start-automatic", response_model=SessionState)
+def start_automatic_pipeline(session_id: str):
+    """Chiude gli upload e accoda OC con una singola operazione idempotente."""
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        raise HTTPException(404, "Sessione non trovata")
+    status = sess.get("status") or ""
+    already_started = {
+        session_state.QUEUED_OC, session_state.COMPUTING_OC,
+        session_state.MESH_READY, session_state.CLEANING,
+        session_state.CLEAN_UPLOADED, session_state.PLANES_READY,
+        session_state.MAPPING, session_state.COMPLETED,
+    }
+    if status in already_started:
+        return _session_state(sess, session_store.list_photos(session_id))
+    if status != session_state.UPLOADED:
+        finalize_capture(session_id)
+    return request_mesh(session_id)
+
+
 @router.post("/{session_id}/mesh-ready", response_model=SessionState)
-def mesh_ready(session_id: str):
+def mesh_ready(session_id: str, background_tasks: BackgroundTasks):
     """Passo 4 — il worker ha caricato mesh+pose: la sessione è pronta per il
     download/pulizia on-device (computing_oc → mesh_ready)."""
     sess = session_store.get_session(session_id)
@@ -214,6 +234,11 @@ def mesh_ready(session_id: str):
         row = session_store.update_status(session_id, session_state.MESH_READY)
     except ValueError as e:
         raise HTTPException(409, str(e))
+    projection_service._set_job(
+        session_id, "queued", 0.0,
+        "Mesh pronta: accodo riconoscimento piani e texture",
+    )
+    background_tasks.add_task(_run_automatic_mesh_pipeline, session_id)
     return _session_state(row, session_store.list_photos(session_id))
 
 
@@ -1034,8 +1059,9 @@ async def upload_mesh(
     meshes = _mesh_dict(existing)
     meshes[kind] = {"files": manifest, "main_obj": first_obj or first_usdz}
     existing["mesh"] = meshes
-    if kind == "clean":
-        projection_service.invalidate_geometry_outputs(existing, clear_planes=True)
+    # Ogni nuova geometria rende obsoleti piani, texture e aperture. Per la raw
+    # questo conta soprattutto quando il worker ricalcola una sessione esistente.
+    projection_service.invalidate_geometry_outputs(existing, clear_planes=True)
     session_store.update_session(session_id, {"result": existing})
 
     # L'upload della mesh pulita conclude davvero il passo di pulizia. Le vecchie
@@ -1349,6 +1375,53 @@ def detect_planes(session_id: str, payload: Optional[dict] = Body(None)):
                               count=len(planes), engine=engine,
                               engine_error=engine_error,
                               planes=planes)
+
+
+def _automatic_planes_payload(detected: DetectPlanesResult) -> dict:
+    """Converte il risultato del detector nel documento usato dal baker."""
+    try:
+        scale = float(os.environ.get("ACRO_OC_SCALE", "6.0927"))
+    except ValueError:
+        scale = 6.0927
+    planes = []
+    for index, plane in enumerate(detected.planes, 1):
+        item = plane.model_dump()
+        item.setdefault("id", index)
+        if item.get("tipo") == "spalla":
+            item["tipo"] = "spalletta"
+        planes.append(item)
+    return {
+        "schema": "acro.planes/v1",
+        "versione": 1,
+        "stato": "proposta_automatica",
+        "engine": detected.engine,
+        "scale_m_per_mesh_unit": scale,
+        "piano_base": {"up": detected.up},
+        "planes": planes,
+    }
+
+
+def _run_automatic_mesh_pipeline(session_id: str) -> None:
+    """Mesh OC -> piani -> bake texture, senza interventi intermedi."""
+    try:
+        projection_service._set_job(
+            session_id, "running", 0.02, "Riconosco i piani della facciata",
+        )
+        detected = detect_planes(session_id, {"up": [0.0, 1.0, 0.0]})
+        if detected.count == 0:
+            raise RuntimeError("Il riconoscimento non ha prodotto piani utilizzabili")
+        projection_service._set_job(
+            session_id, "running", 0.08,
+            f"Piani riconosciuti: {detected.count}. Preparo la texture",
+        )
+        save_planes(session_id, _automatic_planes_payload(detected))
+        projection_service.project(session_id)
+    except Exception as exc:
+        detail = getattr(exc, "detail", None) or str(exc)
+        projection_service._set_job(
+            session_id, "failed", 1.0,
+            "Elaborazione automatica non riuscita", str(detail)[:500],
+        )
 
 
 # ─── Pre-marcatura automatica: zone fuori-piano proposte ────────────────────

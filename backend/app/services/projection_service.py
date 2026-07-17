@@ -3,7 +3,8 @@
 Questo modulo raccoglie gli input da R2/Supabase e orchestra il baker headless:
 
     sessions/<id>/photos/*.jpg            ← foto (tabella facade_photos)
-    sessions/<id>/out/mesh/clean/*        ← mesh PULITA (dall'editor)
+    sessions/<id>/out/mesh/clean/*        ← mesh PULITA (dall'editor, se esiste)
+    sessions/<id>/out/mesh/raw/*          ← prima mesh automatica dal worker OC
     sessions/<id>/out/mesh/raw/oc_poses.json  ← pose Object Capture
     sessions/<id>/out/planes.json         ← piani decisi nell'editor
 
@@ -103,6 +104,29 @@ def _mesh_main_path(entry: dict) -> Optional[str]:
     return _file_in(entry, main) if main else None
 
 
+def _mesh_obj_path(entry: dict) -> Optional[str]:
+    """Trova l'OBJ proiettabile anche quando il main del gruppo e un USDZ."""
+    main = entry.get("main_obj")
+    if main and Path(main).suffix.lower() == ".obj":
+        path = _file_in(entry, main)
+        if path:
+            return path
+    for item in entry.get("files", []):
+        if not isinstance(item, dict):
+            continue
+        if Path(item.get("name", "")).suffix.lower() == ".obj":
+            return item.get("path")
+    return None
+
+
+def _projection_mesh(result: dict) -> tuple[Optional[str], str]:
+    """Preferisce la revisione clean, altrimenti usa la prima mesh raw OC."""
+    clean_path = _mesh_obj_path(_mesh_entry(result, "clean"))
+    if clean_path:
+        return clean_path, "clean"
+    return _mesh_obj_path(_mesh_entry(result, "raw")), "raw"
+
+
 def _download_raw_reference(result: dict, root: Path) -> Optional[dict[str, Path]]:
     """Scarica solo OBJ, MTL e immagini necessarie al riferimento OC."""
     raw = _mesh_entry(result, "raw")
@@ -180,17 +204,16 @@ def gather_inputs(session_id: str) -> Optional[dict]:
     else:
         add("photos", False, "nessuna foto registrata per la sessione")
 
-    # 2) MESH PULITA — l'OBJ principale del gruppo `clean`.
-    clean = _mesh_entry(result, "clean")
-    obj_path = _mesh_main_path(clean)
+    # 2) MESH — revisione pulita se disponibile, altrimenti OBJ raw del worker.
+    obj_path, mesh_kind = _projection_mesh(result)
     if obj_path:
         size = storage_service.head_size(obj_path)
         if size is not None:
-            add("mesh_clean", True, f"{clean.get('main_obj')} ({size} B)", [obj_path])
+            add("mesh", True, f"OBJ {mesh_kind} ({size} B)", [obj_path])
         else:
-            add("mesh_clean", False, f"manifest presente ma {obj_path} non su storage", [obj_path])
+            add("mesh", False, f"manifest presente ma {obj_path} non su storage", [obj_path])
     else:
-        add("mesh_clean", False, "mesh pulita non caricata (salvala dall'editor)")
+        add("mesh", False, "nessuna mesh OBJ raw o clean disponibile")
 
     # 3) POSE OC — oc_poses.json nel gruppo mesh raw.
     poses_path = _file_in(_mesh_entry(result, "raw"), "oc_poses.json")
@@ -227,14 +250,13 @@ def gather_inputs(session_id: str) -> Optional[dict]:
 
 def _download_inputs(session_id: str, sess: dict, root: Path) -> dict:
     result = sess.get("result") or {}
-    clean = _mesh_entry(result, "clean")
-    mesh_path = _mesh_main_path(clean)
+    mesh_path, mesh_kind = _projection_mesh(result)
     poses_path = _file_in(_mesh_entry(result, "raw"), "oc_poses.json")
     planes_path = (result.get("planes") or {}).get("path")
     photos = session_store.list_photos(session_id)
     missing = []
     if not mesh_path:
-        missing.append("mesh_clean")
+        missing.append("mesh")
     if not poses_path:
         missing.append("poses")
     if not planes_path:
@@ -271,7 +293,8 @@ def _download_inputs(session_id: str, sess: dict, root: Path) -> dict:
         raw_reference = _download_raw_reference(result, root)
     except Exception:
         raw_reference = None
-    return {"mesh": mesh, "poses": poses, "planes": planes,
+    return {"mesh": mesh, "mesh_kind": mesh_kind,
+            "poses": poses, "planes": planes,
             "raw_reference": raw_reference,
             "photos": photos_dir, "photo_paths": photo_paths,
             "photo_count": len(photos)}

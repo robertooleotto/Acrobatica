@@ -56,7 +56,9 @@ _ALLOWED: dict[str, set[str]] = {
     UPLOADED:       {QUEUED_OC, UPLOADING},
     QUEUED_OC:      {COMPUTING_OC, UPLOADED},
     COMPUTING_OC:   {MESH_READY, QUEUED_OC},
-    MESH_READY:     {CLEANING},
+    # Il primo risultato automatico usa direttamente la mesh OC raw; la pulizia
+    # resta una revisione opzionale che invalida e rigenera gli artefatti.
+    MESH_READY:     {CLEANING, PLANES_READY},
     CLEANING:       {CLEAN_UPLOADED, CLEANING},
     CLEAN_UPLOADED: {PLANES_READY, CLEANING},
     PLANES_READY:   {MAPPING, CLEANING},

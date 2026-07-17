@@ -62,12 +62,23 @@ scp HelloPhotogrammetry.swift $MAC:~/oc/
 ```bash
 cd ~/oc
 swiftc -O HelloPhotogrammetry.swift -o hpg
+swiftc -O usdz2obj.swift -o usdz2obj
 
 # mesh massima densità (geometria grezza, ideale per misurare rilievi)
 ./hpg ./photos ./model_raw.usdz raw unordered high
 
 # in alternativa, levigata ma densa:
 ./hpg ./photos ./model_full.usdz full unordered high
+```
+
+Nel funzionamento continuo usare `oc_worker.py`: dopo Object Capture converte
+automaticamente USDZ in OBJ/MTL/texture, carica tutti gli asset e chiama
+`mesh-ready`. Da quel momento il backend calcola piani e proiezione senza altri
+comandi:
+
+```bash
+BACKEND=https://acrobatica-production.up.railway.app \
+python3 oc_worker.py --hpg ./hpg --converter ./usdz2obj --detail full
 ```
 Tempo atteso: pochi minuti (`.full`) / 10–30 min (`.raw`) su M2-Pro/M4.
 Se compare `[warn] automatic downsampling` → RAM insufficiente, scendi a `.full`

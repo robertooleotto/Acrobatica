@@ -41,6 +41,10 @@ def test_riedita_da_completed():
     assert st.can_transition(st.COMPLETED, st.MAPPING)
 
 
+def test_primo_risultato_automatico_puo_saltare_la_pulizia():
+    assert st.can_transition(st.MESH_READY, st.PLANES_READY)
+
+
 def test_validate_solleva():
     with pytest.raises(ValueError):
         st.validate_transition(st.CAPTURING, "boh")

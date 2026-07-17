@@ -21,6 +21,11 @@ struct RisultatoPanoramaView: View {
     @State private var orthoComposite: URL?
     @State private var errore: String?
     @State private var previewGrandeURL: URL?
+    @State private var pipeline3DInCorso = false
+    @State private var pipeline3DFallita = false
+    @State private var pipeline3DProgresso = 0.0
+    @State private var pipeline3DMessaggio = ""
+    @State private var risultato3DAperto = false
 
     var body: some View {
         ScrollView {
@@ -46,6 +51,7 @@ struct RisultatoPanoramaView: View {
             }
         }
         .task(id: rilievo.id) { await elabora() }
+        .task(id: rilievo.sessionId) { await osservaPipeline3D() }
         .fullScreenCover(isPresented: $showRectifyFacade) {
             if let sid = rilievo.sessionId, let pano = stitchedUrl {
                 RectifyFacadeView(
@@ -237,6 +243,27 @@ struct RisultatoPanoramaView: View {
 
     private var actionButtons: some View {
         VStack(spacing: 10) {
+            if pipeline3DInCorso || !pipeline3DMessaggio.isEmpty {
+                HStack(spacing: 10) {
+                    if pipeline3DInCorso {
+                        ProgressView(value: pipeline3DProgresso)
+                            .frame(width: 64)
+                    } else if pipeline3DFallita {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(Theme.danger)
+                    } else {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(Theme.success)
+                    }
+                    Text(pipeline3DMessaggio)
+                        .font(Theme.Typo.caption(12))
+                        .foregroundStyle(Theme.muted)
+                        .lineLimit(2)
+                    Spacer()
+                }
+                .padding(.vertical, 6)
+            }
+
             BrandButton(title: "Definisci facciata (4 tap)", systemImage: "viewfinder.rectangular",
                         kind: .primary) {
                 showRectifyFacade = true
@@ -272,6 +299,51 @@ struct RisultatoPanoramaView: View {
                         kind: .ghost) {
                 creaPreventivoDaRilievo()
             }
+        }
+    }
+
+    @MainActor
+    private func osservaPipeline3D() async {
+        guard let sid = rilievo.sessionId else { return }
+        while !Task.isCancelled {
+            do {
+                let result = try await BackendAPIClient.shared.projectionStatus(
+                    sessionId: sid)
+                switch result.state {
+                case "complete":
+                    pipeline3DInCorso = false
+                    pipeline3DFallita = false
+                    pipeline3DProgresso = 1
+                    pipeline3DMessaggio = "Modello 3D texturizzato pronto"
+                    rilievo.areaLorda = result.total_area_m2
+                    if !risultato3DAperto {
+                        risultato3DAperto = true
+                        showEditor3D = true
+                    }
+                    return
+                case "failed":
+                    pipeline3DInCorso = false
+                    pipeline3DFallita = true
+                    pipeline3DMessaggio = result.error.isEmpty
+                        ? "Elaborazione 3D non riuscita" : result.error
+                    return
+                case "queued", "running":
+                    pipeline3DInCorso = true
+                    pipeline3DFallita = false
+                    pipeline3DProgresso = result.progress
+                    pipeline3DMessaggio = result.message
+                default:
+                    pipeline3DInCorso = true
+                    pipeline3DFallita = false
+                    pipeline3DProgresso = 0
+                    pipeline3DMessaggio = "Attendo il modello 3D dal Mac"
+                }
+            } catch {
+                pipeline3DInCorso = true
+                pipeline3DFallita = false
+                pipeline3DMessaggio = "Connessione al calcolo 3D in attesa"
+            }
+            try? await Task.sleep(for: .seconds(5))
         }
     }
 

@@ -719,7 +719,12 @@ struct CatturaARView: View {
         // Accoda TUTTO ciò che non è già caricato/in coda. Da qui l'upload va in
         // background: prosegue anche in standby e riprende dopo un crash.
         let pending = rilievo.frameCatturati.filter { uploader.statusByOrder[$0.orderIndex] != .done }
-        Task { await enqueueUpload(pending) }
+        Task {
+            await enqueueUpload(pending)
+            if let sid = backendSessionId {
+                uploader.finishCapture(sessionId: sid)
+            }
+        }
     }
 
     /// Esce dalla schermata di caricamento. Gli upload non ancora finiti

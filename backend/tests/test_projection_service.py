@@ -60,3 +60,29 @@ def test_geometry_change_invalidates_derived_outputs_and_optionally_planes():
 
     projection_service.invalidate_geometry_outputs(result, clear_planes=True)
     assert "planes" not in result
+
+
+def test_projection_prefers_clean_obj_and_falls_back_to_raw_obj():
+    raw_only = {
+        "mesh": {"raw": {
+            "main_obj": "model.usdz",
+            "files": [
+                {"name": "model.usdz", "path": "raw/model.usdz"},
+                {"name": "model.obj", "path": "raw/model.obj"},
+            ],
+        }},
+    }
+    assert projection_service._projection_mesh(raw_only) == ("raw/model.obj", "raw")
+
+    with_clean = {
+        **raw_only,
+        "mesh": {
+            **raw_only["mesh"],
+            "clean": {
+                "main_obj": "clean.obj",
+                "files": [{"name": "clean.obj", "path": "clean/clean.obj"}],
+            },
+        },
+    }
+    assert projection_service._projection_mesh(with_clean) == \
+        ("clean/clean.obj", "clean")

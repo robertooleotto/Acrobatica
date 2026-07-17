@@ -68,10 +68,18 @@ class Client:
     def upload_mesh(self, sid: str, files: list[tuple[str, str]], kind: str = "raw"):
         if self.dry:
             print(f"  [dry] PUT /{sid}/mesh?kind={kind} {[n for n, _ in files]}"); return
-        multipart = [("files", (name, open(path, "rb"))) for name, path in files]
-        r = requests.put(f"{self.base}/facade-sessions/{sid}/mesh",
-                         data={"kind": kind}, files=multipart, timeout=600)
-        r.raise_for_status()
+        handles = [open(path, "rb") for _, path in files]
+        try:
+            multipart = [
+                ("files", (name, handle))
+                for (name, _), handle in zip(files, handles)
+            ]
+            r = requests.put(f"{self.base}/facade-sessions/{sid}/mesh",
+                             data={"kind": kind}, files=multipart, timeout=600)
+            r.raise_for_status()
+        finally:
+            for handle in handles:
+                handle.close()
 
     def mesh_ready(self, sid: str):
         if self.dry:
@@ -88,7 +96,8 @@ class Client:
             pass
 
 
-def process_job(cli: Client, job: dict, hpg: str, detail: str, dry: bool) -> None:
+def process_job(cli: Client, job: dict, hpg: str, converter: str,
+                detail: str, dry: bool) -> None:
     sid = job["session_id"]
     photos = job.get("photos", [])
     print(f"▶ job {sid}: {len(photos)} foto, detail={detail}")
@@ -106,13 +115,22 @@ def process_job(cli: Client, job: dict, hpg: str, detail: str, dry: bool) -> Non
                 dest.write_bytes(data)
         usdz = Path(tmp) / "model.usdz"
         poses = Path(tmp) / "oc_poses.json"
+        obj = Path(tmp) / "model.obj"
         if dry:
             print(f"  [dry] {hpg} {pdir} {usdz} {detail} sequential high")
+            print(f"  [dry] {converter} {usdz} {obj}")
         else:
             subprocess.run([hpg, str(pdir), str(usdz), detail, "sequential", "high"], check=True)
             n = merge_intrinsics(str(poses), intr)
             print(f"  intrinseci uniti a {n}/{len(photos)} pose")
-        cli.upload_mesh(sid, [("model.usdz", str(usdz)), ("oc_poses.json", str(poses))])
+            subprocess.run([converter, str(usdz), str(obj)], check=True)
+        generated = [("model.usdz", str(usdz)), ("oc_poses.json", str(poses))]
+        mesh_suffixes = {".obj", ".mtl", ".png", ".jpg", ".jpeg"}
+        generated += [
+            (path.name, str(path)) for path in sorted(Path(tmp).iterdir())
+            if path.is_file() and path.suffix.lower() in mesh_suffixes
+        ]
+        cli.upload_mesh(sid, generated)
         cli.mesh_ready(sid)
     print(f"✔ job {sid} → mesh_ready")
 
@@ -121,6 +139,8 @@ def main():
     ap = argparse.ArgumentParser(description="Worker Object Capture (opzione A)")
     ap.add_argument("--backend", default=os.environ.get("BACKEND", "http://localhost:8000"))
     ap.add_argument("--hpg", default="./hpg", help="binario Object Capture")
+    ap.add_argument("--converter", default="./usdz2obj",
+                    help="binario USDZ -> OBJ/MTL/texture")
     ap.add_argument("--detail", default="full", help="preview|reduced|medium|full|raw")
     ap.add_argument("--poll", type=int, default=15, help="secondi tra i polling a coda vuota")
     ap.add_argument("--once", action="store_true", help="elabora un job e termina")
@@ -140,7 +160,7 @@ def main():
             time.sleep(args.poll); continue
         sid = job["session_id"]
         try:
-            process_job(cli, job, args.hpg, args.detail, args.dry_run)
+            process_job(cli, job, args.hpg, args.converter, args.detail, args.dry_run)
         except Exception as e:
             print(f"✗ job {sid} FALLITO: {e}")
             cli.fail(sid, str(e))
