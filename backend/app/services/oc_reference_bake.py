@@ -548,7 +548,9 @@ def _compose_plane(
         while selection_target > 0:
             registration_candidates, round_report = _select_registration_candidates(
                 pf, normal, cams, ranked, crop=crop,
-                base_photos=selection_target, max_photos=registration_ceiling,
+                # Unlock adaptive headroom in a later round only after the
+                # current round has demonstrated insufficient coverage.
+                base_photos=selection_target, max_photos=selection_target,
             )
             new_candidates = [
                 candidate for candidate in registration_candidates
@@ -690,11 +692,10 @@ def _compose_plane(
         ) > 0
         for mask, correction in zip(accepted_full_masks, corrections)
     ]
-    accepted_images, accepted_planar_masks, compositing_masks, seam_refinements = \
-        _refine_major_seams(
-            accepted_images, accepted_planar_masks, compositing_masks,
-            accepted_keys,
-        )
+    # The residual and global stages already constrain every photo to a
+    # similarity transform.  A later unconstrained affine seam pass bent
+    # horizontal architectural lines even while reducing point residuals.
+    seam_refinements: list[dict] = []
     for key, correction in zip(accepted_keys, corrections):
         for item in photo_reports:
             if str(item.get("key")) == key and isinstance(item.get("registration"), dict):
@@ -721,13 +722,10 @@ def _compose_plane(
         if not resolved:
             continue
         posed, posed_mask = registration.warp_photo_to_plane(Path(resolved), cam, pf)
-        # I filler non hanno superato la registrazione visuale: possono chiudere
-        # un buco, ma non devono mai competere con fotografie gia allineate.
-        # Usare la maschera completa qui reintroduceva cuciture su finestre e
-        # cornici, soprattutto nella fascia alta della facciata.
-        filler_mask = posed_mask & ~covered
-        if int(filler_mask.sum()) < 200:
-            continue
+        # Match the local compositor: the pose-only view keeps its full support.
+        # ``mosaic`` still orders it by new coverage, but needs overlap around
+        # the boundary to feather the transition instead of leaving a hard cut.
+        filler_mask = posed_mask
         accepted_images.append(posed)
         compositing_masks.append(filler_mask)
         accepted_keys.append(key)
@@ -735,9 +733,9 @@ def _compose_plane(
             "rank": rank, **candidate, "photo_found": True,
             "registration": {
                 "accepted": True,
-                "reason": "riempimento soli pixel scoperti da posa",
+                "reason": "riempimento copertura da posa",
                 "pose_only_filler": True,
-                "gap_only": True,
+                "gap_only": False,
                 "coverage_pixels": int(filler_mask.sum()),
                 "global_correction": _identity_correction(),
             },

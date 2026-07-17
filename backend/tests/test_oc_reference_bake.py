@@ -276,7 +276,7 @@ def test_compose_plane_uses_registered_photo_and_preserves_alpha(monkeypatch, tm
     assert float(rgba[..., 2].mean()) == 240.0
 
 
-def test_pose_filler_only_writes_pixels_not_covered_by_registered_photo(
+def test_pose_filler_feathers_across_registered_photo_boundary(
     monkeypatch, tmp_path,
 ):
     frame = ortho_bake.PlaneFrame(
@@ -353,11 +353,13 @@ def test_pose_filler_only_writes_pixels_not_covered_by_registered_photo(
 
     assert coverage == 1.0
     assert used == ["0", "1"]
-    assert np.all(rgba[:, :75, :3] == 60)
-    assert np.all(rgba[:, 75:, :3] == 220)
+    assert np.all(rgba[:, :65, :3] == 60)
+    # The compositor also applies its bounded color correction (-18 here).
+    assert np.all(rgba[:, 85:, :3] == 202)
+    assert np.all((rgba[:, 70:75, :3] > 60) & (rgba[:, 70:75, :3] < 202))
     filler_report = next(item for item in report["photos"] if item["key"] == "1")
-    assert filler_report["registration"]["gap_only"] is True
-    assert filler_report["registration"]["coverage_pixels"] == 2_500
+    assert filler_report["registration"]["gap_only"] is False
+    assert filler_report["registration"]["coverage_pixels"] == 10_000
 
 
 def test_opencv_bgra_texture_is_written_without_swapping_red_and_blue(tmp_path):
