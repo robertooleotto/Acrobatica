@@ -14,7 +14,7 @@ def test_registration_budget_grows_with_real_plane_size():
     larger_facade = SimpleNamespace(width_m=60.0, area_m2=1200.0)
     very_large_facade = SimpleNamespace(width_m=120.0, area_m2=3000.0)
 
-    assert oc_reference_bake.adaptive_registration_budget(current_facade) == 20
+    assert oc_reference_bake.adaptive_registration_budget(current_facade) == 30
     assert oc_reference_bake.adaptive_registration_budget(larger_facade) == 30
     assert oc_reference_bake.adaptive_registration_budget(very_large_facade) == 75
 
@@ -213,6 +213,90 @@ def test_compose_plane_uses_registered_photo_and_preserves_alpha(monkeypatch, tm
     assert report["registered_photos"] == 1
     assert np.all(rgba[..., 3] == 255)
     assert float(rgba[..., 2].mean()) == 240.0
+
+
+def test_pose_filler_only_writes_pixels_not_covered_by_registered_photo(
+    monkeypatch, tmp_path,
+):
+    frame = ortho_bake.PlaneFrame(
+        origin=np.array([0.0, 0.0, 0.0]),
+        u=np.array([1.0, 0.0, 0.0]),
+        v=np.array([0.0, 1.0, 0.0]),
+        corners=np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], float),
+        polygon_uv=np.array([[0, 0], [1, 0], [1, 1], [0, 1]], float),
+        width_world=1.0, height_world=1.0,
+        width_m=1.0, height_m=1.0, area_m2=1.0,
+        tex_w=100, tex_h=100, texel_m=0.01,
+    )
+    cameras = [
+        ortho_bake.Camera(
+            key=str(index), C=np.array([0.0, 0.0, 1.0]), R=np.eye(3),
+            fx=100.0, fy=100.0, cx=50.0, cy=50.0,
+            image_width=100, image_height=100,
+        )
+        for index in range(2)
+    ]
+    reference = np.full((100, 100, 4), 80, np.uint8)
+    reference[..., 3] = 255
+    registered = np.full((100, 100, 3), 60, np.uint8)
+    filler = np.full((100, 100, 3), 220, np.uint8)
+    registered_mask = np.zeros((100, 100), bool)
+    registered_mask[:, :75] = True
+    full_mask = np.ones((100, 100), bool)
+    identity = {
+        "offset_x": 0.0, "offset_y": 0.0, "rotation_deg": 0.0, "scale": 1.0,
+        "matrix": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+    }
+
+    monkeypatch.setattr(oc_reference_bake.registration, "orient_normal",
+                        lambda *args: np.array([0.0, 0.0, 1.0]))
+    monkeypatch.setattr(oc_reference_bake.registration, "orient_frame_for_front_view",
+                        lambda *args: False)
+    monkeypatch.setattr(oc_reference_bake.registration, "render_oc_reference",
+                        lambda *args: (reference, full_mask,
+                                       np.zeros((100, 100), np.float32)))
+    ranked = [{"key": "0", "score": 2.0}, {"key": "1", "score": 1.0}]
+    monkeypatch.setattr(oc_reference_bake.registration, "rank_candidates",
+                        lambda *args, **kwargs: ranked)
+    monkeypatch.setattr(
+        oc_reference_bake, "_select_registration_candidates",
+        lambda *args, **kwargs: (ranked[:1], {"budget": 1, "selected": 1}),
+    )
+
+    def fake_warp(_path, camera, _frame):
+        if camera.key == "0":
+            return registered, registered_mask
+        return filler, full_mask
+
+    monkeypatch.setattr(oc_reference_bake.registration, "warp_photo_to_plane", fake_warp)
+    monkeypatch.setattr(
+        oc_reference_bake.registration, "register_residual",
+        lambda *args, **kwargs: (registered, registered_mask, {"accepted": True}),
+    )
+    monkeypatch.setattr(
+        oc_reference_bake.registration, "global_align_photos",
+        lambda images, masks, keys: (
+            images, masks, {"applied": True, "components": [["0"]]}, [identity],
+        ),
+    )
+    monkeypatch.setattr(oc_reference_bake.registration, "photo_coverage_mask",
+                        lambda *args: full_mask)
+
+    rgba, coverage, used, report = oc_reference_bake._compose_plane(
+        object(), frame, {"normale": [0, 0, 1]}, cameras,
+        lambda key: str(tmp_path / f"{key}.jpg"),
+        scale_m_per_mesh_unit=1.0, max_photos=1, registration_ceiling=1,
+        coverage_photos=2, crop=0.9, depth_m=2.0, max_residual_px=40.0,
+        max_rotation_deg=0.5, max_scale_error=0.03,
+    )
+
+    assert coverage == 1.0
+    assert used == ["0", "1"]
+    assert np.all(rgba[:, :75, :3] == 60)
+    assert np.all(rgba[:, 75:, :3] == 220)
+    filler_report = next(item for item in report["photos"] if item["key"] == "1")
+    assert filler_report["registration"]["gap_only"] is True
+    assert filler_report["registration"]["coverage_pixels"] == 2_500
 
 
 def test_opencv_bgra_texture_is_written_without_swapping_red_and_blue(tmp_path):

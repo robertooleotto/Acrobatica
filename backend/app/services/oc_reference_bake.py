@@ -43,10 +43,16 @@ def adaptive_registration_budget(
     base_photos: int = 20,
     max_photos: int = 80,
 ) -> int:
-    """Dimensiona il tetto di registrazione dalla superficie reale del piano."""
+    """Dimensiona il tetto lasciando spazio a viste che chiudono i bordi.
+
+    ``base_photos`` sono le viste principali ordinate per qualita. Il 50% di
+    headroom non viene riempito automaticamente: `_select_registration_candidates`
+    lo usa solo per foto che aumentano davvero la copertura singola/doppia.
+    """
     span_need = math.ceil(pf.width_m / 3.0)
     area_need = math.ceil(pf.area_m2 / 40.0)
-    return min(max(max_photos, base_photos), max(base_photos, span_need, area_need))
+    coverage_headroom = math.ceil(base_photos * 1.5)
+    return min(max_photos, max(coverage_headroom, span_need, area_need))
 
 
 def _alignment_is_connected(report: dict, photo_count: int) -> bool:
@@ -413,15 +419,24 @@ def _compose_plane(
         if not resolved:
             continue
         posed, posed_mask = registration.warp_photo_to_plane(Path(resolved), cam, pf)
+        # I filler non hanno superato la registrazione visuale: possono chiudere
+        # un buco, ma non devono mai competere con fotografie gia allineate.
+        # Usare la maschera completa qui reintroduceva cuciture su finestre e
+        # cornici, soprattutto nella fascia alta della facciata.
+        filler_mask = posed_mask & ~covered
+        if int(filler_mask.sum()) < 200:
+            continue
         accepted_images.append(posed)
-        compositing_masks.append(posed_mask)
+        compositing_masks.append(filler_mask)
         accepted_keys.append(key)
         filler_report = {
             "rank": rank, **candidate, "photo_found": True,
             "registration": {
                 "accepted": True,
-                "reason": "riempimento copertura da posa",
+                "reason": "riempimento soli pixel scoperti da posa",
                 "pose_only_filler": True,
+                "gap_only": True,
+                "coverage_pixels": int(filler_mask.sum()),
                 "global_correction": _identity_correction(),
             },
         }
@@ -433,7 +448,7 @@ def _compose_plane(
             photo_reports.append(filler_report)
         else:
             existing.update(filler_report)
-        covered |= posed_mask
+        covered |= filler_mask
 
     rgba = coverage_rgba(mosaic(accepted_images, compositing_masks, reference),
                          compositing_masks)
