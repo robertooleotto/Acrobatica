@@ -148,30 +148,6 @@ def test_diagnostic_overlay_accepts_an_empty_overlap():
     assert np.array_equal(output, reference)
 
 
-def test_strong_photo_pair_can_recover_beyond_standard_displacement_limit():
-    assert registration._reliable_pair_alignment(
-        inlier_count=68,
-        inlier_ratio=0.3487,
-        ransac_residual=1.479,
-        relative_displacement=25.001,
-        spatial_span=0.5423,
-    )
-    assert not registration._reliable_pair_alignment(
-        inlier_count=18,
-        inlier_ratio=0.34,
-        ransac_residual=1.4,
-        relative_displacement=25.0,
-        spatial_span=0.50,
-    )
-    assert not registration._reliable_pair_alignment(
-        inlier_count=70,
-        inlier_ratio=0.35,
-        ransac_residual=1.4,
-        relative_displacement=36.0,
-        spatial_span=0.50,
-    )
-
-
 def test_rejected_registration_is_not_reused_as_pose_filler():
     ranked = [{"key": str(index), "score": 10 - index} for index in range(5)]
 

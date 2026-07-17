@@ -477,29 +477,6 @@ def _connected_components(count: int, constraints: list[dict[str, object]]) -> l
     return components
 
 
-def _reliable_pair_alignment(
-    inlier_count: int,
-    inlier_ratio: float,
-    ransac_residual: float,
-    relative_displacement: float,
-    spatial_span: float,
-) -> bool:
-    """Allow a larger recovery only when photo-to-photo evidence is strong."""
-    common = (
-        inlier_count >= 10 and inlier_ratio >= 0.30
-        and ransac_residual <= 2.5 and spatial_span >= 0.08
-    )
-    if not common:
-        return False
-    if relative_displacement <= 20.0:
-        return True
-    return bool(
-        relative_displacement <= 35.0
-        and inlier_count >= 40
-        and ransac_residual <= 2.0 and spatial_span >= 0.25
-    )
-
-
 def global_align_photos(
     images: list[np.ndarray],
     masks: list[np.ndarray],
@@ -586,9 +563,10 @@ def global_align_photos(
             ).max())
             spread = np.ptp((inlier_a + inlier_b) * 0.5, axis=0)
             spatial_span = max(spread[0] / width, spread[1] / height)
-            accepted = _reliable_pair_alignment(
-                inlier_count, inlier_ratio, ransac_residual,
-                relative_displacement, spatial_span,
+            accepted = bool(
+                inlier_count >= 10 and inlier_ratio >= 0.30
+                and ransac_residual <= 2.5 and relative_displacement <= 20.0
+                and spatial_span >= 0.08
             )
             diagnostic = {
                 "photo_a": keys[first], "photo_b": keys[second],
