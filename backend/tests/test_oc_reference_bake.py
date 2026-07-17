@@ -45,6 +45,41 @@ def test_mosaic_anchor_keeps_clearly_better_scored_photo():
     ) == "best"
 
 
+def test_major_seam_refinement_applies_only_to_large_extension(monkeypatch):
+    shape = (100, 100)
+    anchor = np.zeros((*shape, 3), np.uint8)
+    source = np.zeros_like(anchor)
+    source[:, 40:] = 180
+    anchor_mask = np.zeros(shape, bool)
+    anchor_mask[:, :70] = True
+    source_mask = np.zeros(shape, bool)
+    source_mask[:, 40:] = True
+
+    matrix = np.float64([[1.0, 0.0, -2.0], [0.0, 1.0, 0.0]])
+
+    def accepted_affine(*_args):
+        return matrix, {"accepted": True, "reason": "ok"}
+
+    monkeypatch.setattr(
+        oc_reference_bake, "_estimate_planar_seam_affine", accepted_affine,
+    )
+    images, planar, full, reports = oc_reference_bake._refine_major_seams(
+        [anchor, source], [anchor_mask, source_mask],
+        [anchor_mask, source_mask], ["anchor", "extension"],
+    )
+
+    assert reports == [{
+        "accepted": True,
+        "reason": "ok",
+        "key": "extension",
+        "new_pixels_before": 3_000,
+    }]
+    assert np.array_equal(images[0], anchor)
+    assert full[1][:, 38].all()
+    assert not full[1][:, 98].any()
+    assert planar[1][:, 38].all()
+
+
 def test_registration_selection_exceeds_baseline_when_coverage_requires_it():
     frame = ortho_bake.PlaneFrame(
         origin=np.array([0.0, 0.0, 0.0]),

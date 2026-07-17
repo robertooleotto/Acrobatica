@@ -70,6 +70,257 @@ def _stable_mosaic_anchor(
     return str(anchor["key"])
 
 
+def _estimate_planar_seam_affine(
+    target: np.ndarray,
+    target_mask: np.ndarray,
+    target_coverage: np.ndarray,
+    source: np.ndarray,
+    source_mask: np.ndarray,
+    source_coverage: np.ndarray,
+) -> tuple[np.ndarray | None, dict[str, object]]:
+    """Stima un affine locale usando soltanto la superficie del muro."""
+    overlap = target_mask & source_mask
+    report: dict[str, object] = {
+        "accepted": False,
+        "overlap_pixels": int(overlap.sum()),
+        "reason": "sovrapposizione planare insufficiente",
+    }
+    minimum_pixels = max(1_000, int(overlap.size * 0.05))
+    if int(overlap.sum()) < minimum_pixels:
+        return None, report
+
+    sift = cv2.SIFT_create(
+        nfeatures=10_000, contrastThreshold=0.02, edgeThreshold=12,
+    )
+    target_points, target_descriptors = sift.detectAndCompute(
+        registration._normalized_gray(target), overlap.astype(np.uint8) * 255,
+    )
+    source_points, source_descriptors = sift.detectAndCompute(
+        registration._normalized_gray(source), overlap.astype(np.uint8) * 255,
+    )
+    if (target_descriptors is None or source_descriptors is None
+            or len(target_points) < 20 or len(source_points) < 20):
+        report["reason"] = "feature planari insufficienti"
+        return None, report
+
+    matcher = cv2.BFMatcher(cv2.NORM_L2)
+
+    def ratio_matches(first: np.ndarray, second: np.ndarray) -> dict[int, int]:
+        return {
+            match.queryIdx: match.trainIdx
+            for pair in matcher.knnMatch(first, second, k=2)
+            if len(pair) == 2
+            for match, alternative in [pair]
+            if match.distance < 0.72 * alternative.distance
+        }
+
+    forward = ratio_matches(source_descriptors, target_descriptors)
+    backward = ratio_matches(target_descriptors, source_descriptors)
+    mutual = [
+        (query, train) for query, train in forward.items()
+        if backward.get(train) == query
+    ]
+    if len(mutual) < 20:
+        report["reason"] = "corrispondenze planari insufficienti"
+        return None, report
+
+    source_xy = np.float32([
+        source_points[query].pt for query, _ in mutual
+    ])
+    target_xy = np.float32([
+        target_points[train].pt for _, train in mutual
+    ])
+    prior_distance = np.linalg.norm(source_xy - target_xy, axis=1)
+    compatible = prior_distance <= 35.0
+    source_xy, target_xy = source_xy[compatible], target_xy[compatible]
+    if len(source_xy) < 20:
+        report["reason"] = "corrispondenze compatibili insufficienti"
+        return None, report
+
+    height, width = overlap.shape
+    bounds = np.float32([
+        [0.0, 0.0], [width - 1.0, 0.0],
+        [width - 1.0, height - 1.0], [0.0, height - 1.0],
+        [width * 0.5, height * 0.5],
+    ])
+    displacement_limit = max(8.0, min(height, width) * 0.025)
+
+    target_gray = registration._normalized_gray(target).astype(np.float32)
+    target_gx = cv2.Sobel(target_gray, cv2.CV_32F, 1, 0, ksize=3)
+    target_gy = cv2.Sobel(target_gray, cv2.CV_32F, 0, 1, ksize=3)
+    distance_inside = cv2.distanceTransform(
+        target_coverage.astype(np.uint8), cv2.DIST_L2, 3,
+    )
+
+    def seam_score(matrix: np.ndarray) -> float:
+        size = (width, height)
+        warped = cv2.warpAffine(
+            source, matrix, size, flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+        )
+        warped_coverage = cv2.warpAffine(
+            source_coverage.astype(np.uint8), matrix, size,
+            flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT,
+        ) > 0
+        band = (
+            target_coverage & warped_coverage
+            & (distance_inside > 2.0) & (distance_inside <= 25.0)
+        )
+        if int(band.sum()) < minimum_pixels // 4:
+            return float("inf")
+        source_gray = registration._normalized_gray(warped).astype(np.float32)
+        source_gx = cv2.Sobel(source_gray, cv2.CV_32F, 1, 0, ksize=3)
+        source_gy = cv2.Sobel(source_gray, cv2.CV_32F, 0, 1, ksize=3)
+        gradient_error = np.sqrt(
+            (target_gx[band] - source_gx[band]) ** 2
+            + (target_gy[band] - source_gy[band]) ** 2
+        )
+        return float(np.median(gradient_error))
+
+    identity = np.float64([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    identity_score = seam_score(identity)
+    candidates: list[tuple[float, np.ndarray, dict[str, object]]] = []
+    candidate_reports: list[dict[str, object]] = []
+    for threshold in (1.5, 2.0, 2.25):
+        cv2.setRNGSeed(0)
+        matrix, inlier_mask = cv2.estimateAffine2D(
+            source_xy, target_xy, method=cv2.RANSAC,
+            ransacReprojThreshold=threshold, maxIters=15_000,
+            confidence=0.999, refineIters=50,
+        )
+        if matrix is None or inlier_mask is None:
+            continue
+        inliers = inlier_mask.reshape(-1).astype(bool)
+        predicted = source_xy @ matrix[:, :2].T + matrix[:, 2]
+        before = np.linalg.norm(source_xy - target_xy, axis=1)[inliers]
+        after = np.linalg.norm(predicted - target_xy, axis=1)[inliers]
+        singular_values = np.linalg.svd(matrix[:, :2], compute_uv=False)
+        moved = bounds @ matrix[:, :2].T + matrix[:, 2]
+        max_displacement = float(np.linalg.norm(moved - bounds, axis=1).max())
+        median_before = float(np.median(before)) if len(before) else float("inf")
+        median_after = float(np.median(after)) if len(after) else float("inf")
+        inlier_count = int(inliers.sum())
+        inlier_ratio = inlier_count / max(len(source_xy), 1)
+        score = seam_score(matrix)
+        safe = bool(
+            inlier_count >= 50 and inlier_ratio >= 0.25
+            and median_after <= 1.5
+            and median_after <= median_before * 0.65
+            and float(singular_values.min()) >= 0.97
+            and float(singular_values.max()) <= 1.03
+            and float(np.linalg.det(matrix[:, :2])) > 0.0
+            and max_displacement <= displacement_limit
+        )
+        item = {
+            "ransac_threshold_px": threshold,
+            "safe": safe,
+            "inliers": inlier_count,
+            "inlier_ratio": round(inlier_ratio, 4),
+            "median_before_px": round(median_before, 4),
+            "median_after_px": round(median_after, 4),
+            "scale_min": round(float(singular_values.min()), 6),
+            "scale_max": round(float(singular_values.max()), 6),
+            "max_displacement_px": round(max_displacement, 4),
+            "seam_gradient_error": round(score, 4),
+        }
+        candidate_reports.append(item)
+        if safe and np.isfinite(score):
+            candidates.append((score, matrix, item))
+
+    report.update({
+        "matches": len(source_xy),
+        "seam_gradient_error_before": round(identity_score, 4),
+        "candidates": candidate_reports,
+    })
+    if not candidates:
+        report["reason"] = "nessun affine planare entro soglia"
+        return None, report
+
+    score, matrix, selected = min(candidates, key=lambda candidate: candidate[0])
+    if score > identity_score * 0.90:
+        report["reason"] = "raccordo sul bordo non migliorato"
+        return None, report
+    report.update({
+        **selected,
+        "accepted": True,
+        "reason": "ok",
+        "seam_gradient_error_after": round(score, 4),
+        "matrix": matrix.tolist(),
+    })
+    return matrix, report
+
+
+def _refine_major_seams(
+    images: list[np.ndarray],
+    planar_masks: list[np.ndarray],
+    full_masks: list[np.ndarray],
+    keys: list[str],
+) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], list[dict]]:
+    """Allinea localmente solo le espansioni grandi del mosaico."""
+    if not images:
+        return images, planar_masks, full_masks, []
+
+    refined_images = [image.copy() for image in images]
+    refined_planar = [mask.copy() for mask in planar_masks]
+    refined_full = [mask.copy() for mask in full_masks]
+    height, width = full_masks[0].shape
+    major_pixels = max(1_000, int(height * width * 0.05))
+    covered = np.zeros((height, width), bool)
+    planar_covered = np.zeros((height, width), bool)
+    target = np.zeros_like(images[0])
+    remaining = list(range(len(images)))
+    reports: list[dict] = []
+
+    while remaining:
+        contributions = [
+            int((refined_full[index] & ~covered).sum()) for index in remaining
+        ]
+        if not covered.any():
+            selected_at = 0
+        else:
+            scores = [
+                contribution / (1.0 + index * 0.08)
+                for contribution, index in zip(contributions, remaining)
+            ]
+            selected_at = int(np.argmax(scores))
+        if contributions[selected_at] == 0:
+            break
+        selected = remaining.pop(selected_at)
+
+        if covered.any() and contributions[selected_at] >= major_pixels:
+            matrix, item = _estimate_planar_seam_affine(
+                target, planar_covered, covered,
+                refined_images[selected], refined_planar[selected],
+                refined_full[selected],
+            )
+            item.update({
+                "key": keys[selected],
+                "new_pixels_before": contributions[selected_at],
+            })
+            reports.append(item)
+            if matrix is not None:
+                size = (width, height)
+                refined_images[selected] = cv2.warpAffine(
+                    refined_images[selected], matrix, size,
+                    flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT,
+                )
+                refined_planar[selected] = cv2.warpAffine(
+                    refined_planar[selected].astype(np.uint8), matrix, size,
+                    flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT,
+                ) > 0
+                refined_full[selected] = cv2.warpAffine(
+                    refined_full[selected].astype(np.uint8), matrix, size,
+                    flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT,
+                ) > 0
+
+        new_pixels = refined_full[selected] & ~covered
+        target[new_pixels] = refined_images[selected][new_pixels]
+        covered |= refined_full[selected]
+        planar_covered |= refined_planar[selected]
+
+    return refined_images, refined_planar, refined_full, reports
+
+
 def adaptive_registration_budget(
     pf: ob.PlaneFrame,
     base_photos: int = 20,
@@ -439,6 +690,11 @@ def _compose_plane(
         ) > 0
         for mask, correction in zip(accepted_full_masks, corrections)
     ]
+    accepted_images, accepted_planar_masks, compositing_masks, seam_refinements = \
+        _refine_major_seams(
+            accepted_images, accepted_planar_masks, compositing_masks,
+            accepted_keys,
+        )
     for key, correction in zip(accepted_keys, corrections):
         for item in photo_reports:
             if str(item.get("key")) == key and isinstance(item.get("registration"), dict):
@@ -509,6 +765,7 @@ def _compose_plane(
         "accepted_photos": len(accepted_images),
         "registered_photos": len(corrections),
         "mosaic_anchor_key": anchor_key,
+        "seam_refinements": seam_refinements,
         "registration_selection": selection_report,
         "global_alignment": global_report,
         "photos": photo_reports,
