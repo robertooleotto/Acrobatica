@@ -61,6 +61,18 @@ def _alignment_is_connected(report: dict, photo_count: int) -> bool:
     return bool(report.get("applied"))
 
 
+def _dominant_component_keys(report: dict, accepted_keys: list[str]) -> set[str]:
+    """Restituisce la catena foto-foto piu estesa, escludendo le isole."""
+    components = report.get("components")
+    if isinstance(components, list) and components:
+        valid = [component for component in components if component]
+        if valid:
+            return {str(key) for key in max(valid, key=len)}
+    if report.get("applied"):
+        return set(accepted_keys)
+    return set()
+
+
 def _pose_filler_candidates(
     ranked: list[dict],
     attempted_keys: set[str],
@@ -295,9 +307,15 @@ def _compose_plane(
                 registration.global_align_photos(
                     registered_images, registered_planar_masks, accepted_keys,
                 )
+            dominant_keys = _dominant_component_keys(global_report, accepted_keys)
+            dominant_indices = [
+                index for index, key in enumerate(accepted_keys)
+                if key in dominant_keys
+            ]
             polygon = ob._polygon_mask(pf.tex_w, pf.tex_h, pf.polygon_uv)
             coverage_count = np.zeros((pf.tex_h, pf.tex_w), np.uint16)
-            for mask in accepted_full_masks:
+            for index in dominant_indices:
+                mask = accepted_full_masks[index]
                 coverage_count += mask.astype(np.uint16)
             single_coverage = (
                 float((coverage_count[polygon] >= 1).mean()) if polygon.any() else 0.0
@@ -306,12 +324,15 @@ def _compose_plane(
                 float((coverage_count[polygon] >= 2).mean()) if polygon.any() else 0.0
             )
             connected = _alignment_is_connected(global_report, len(accepted_keys))
+            dominant_ratio = len(dominant_keys) / max(len(accepted_keys), 1)
             selection_rounds.append({
                 "target": selection_target,
                 "attempted": len(attempted_keys),
                 "accepted": len(accepted_keys),
                 "connected": connected,
                 "components": len(global_report.get("components", [])) or None,
+                "dominant_component": len(dominant_keys),
+                "dominant_ratio": round(dominant_ratio, 4),
                 "single_coverage": round(single_coverage, 4),
                 "double_coverage": round(double_coverage, 4),
             })
@@ -320,8 +341,10 @@ def _compose_plane(
                 "hard_ceiling": registration_ceiling,
                 "rounds": selection_rounds,
             }
-            if connected and single_coverage >= 0.995 and double_coverage >= 0.90:
-                selection_report["stop_reason"] = "copertura e grafo sufficienti"
+            if (len(dominant_keys) >= 2 and dominant_ratio >= 0.70
+                    and single_coverage >= 0.80 and double_coverage >= 0.70):
+                selection_report["stop_reason"] = \
+                    "copertura e componente dominante sufficienti"
                 break
             if len(attempted_keys) >= min(registration_ceiling, len(ranked)):
                 selection_report["stop_reason"] = "raggiunto il tetto tecnico"
@@ -334,6 +357,20 @@ def _compose_plane(
                 selection_report["stop_reason"] = "raggiunto il tetto tecnico"
                 break
             selection_target = next_target
+
+        dominant_keys = _dominant_component_keys(global_report, accepted_keys)
+        if dominant_keys and len(dominant_keys) < len(accepted_keys):
+            discarded_keys = [key for key in accepted_keys if key not in dominant_keys]
+            keep = [index for index, key in enumerate(accepted_keys) if key in dominant_keys]
+            accepted_images = [accepted_images[index] for index in keep]
+            accepted_planar_masks = [accepted_planar_masks[index] for index in keep]
+            accepted_full_masks = [accepted_full_masks[index] for index in keep]
+            corrections = [corrections[index] for index in keep]
+            accepted_keys = [accepted_keys[index] for index in keep]
+            selection_report["discarded_disconnected"] = discarded_keys
+            for item in photo_reports:
+                if str(item.get("key")) in discarded_keys:
+                    item["registration"]["excluded_disconnected"] = True
     else:
         accepted_images = []
         accepted_planar_masks = []

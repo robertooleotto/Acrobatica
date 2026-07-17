@@ -129,7 +129,7 @@ def test_compose_plane_expands_until_registered_graph_is_connected(
 
     def fake_global_align(images, masks, keys):
         global_counts.append(len(keys))
-        components = [keys[:2], keys[2:]] if len(keys) < 4 else [keys]
+        components = [[key] for key in keys] if len(keys) < 4 else [keys]
         return images, masks, {
             "applied": True,
             "components": components,
@@ -153,7 +153,7 @@ def test_compose_plane_expands_until_registered_graph_is_connected(
     assert used == ["0", "1", "2", "3"]
     assert report["registration_selection"]["rounds"][-1]["connected"] is True
     assert report["registration_selection"]["stop_reason"] == \
-        "copertura e grafo sufficienti"
+        "copertura e componente dominante sufficienti"
 
 
 def test_compose_plane_uses_registered_photo_and_preserves_alpha(monkeypatch, tmp_path):
