@@ -70,3 +70,30 @@ def test_automatic_pipeline_exposes_failure_in_projection_job(monkeypatch):
 
     assert jobs[-1][1] == "failed"
     assert "detector offline" in jobs[-1][-1]
+
+
+def test_plane_edits_preserve_the_first_texture_frame():
+    original = {
+        "planes": [{
+            "id": 4, "nome": "Facciata",
+            "normale": [0, 0, 1], "punto": [0, 0, 0],
+            "corners": [[0, 0, 0], [1, 0, 0], [1, 1, 0]],
+        }],
+    }
+    first_save = facade_sessions._preserve_texture_frames(original)
+    edited = {
+        "planes": [{
+            "id": 4, "nome": "Facciata",
+            "normale": [0.1, 0, 0.99], "punto": [0, 0, 0.2],
+            "corners": [[0, 0, 0.2], [2, 0, 0.2], [2, 1, 0.2]],
+        }],
+    }
+
+    second_save = facade_sessions._preserve_texture_frames(edited, first_save)
+
+    assert second_save["planes"][0]["normale"] == [0.1, 0, 0.99]
+    assert second_save["planes"][0]["texture_frame"] == {
+        "normale": [0, 0, 1],
+        "punto": [0, 0, 0],
+        "corners": [[0, 0, 0], [1, 0, 0], [1, 1, 0]],
+    }

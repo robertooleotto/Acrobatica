@@ -38,6 +38,17 @@ def _identity_correction() -> dict[str, object]:
     }
 
 
+def texture_plane(plane: dict) -> tuple[dict, bool]:
+    """Return the immutable projection frame, keeping reviewed geometry separate."""
+    frame = plane.get("texture_frame")
+    required = ("normale", "punto", "corners")
+    if not isinstance(frame, dict) or not all(key in frame for key in required):
+        return plane, False
+    projection_plane = dict(plane)
+    projection_plane.update({key: frame[key] for key in required})
+    return projection_plane, True
+
+
 def _stable_mosaic_anchor(
     accepted_keys: list[str],
     ranked: list[dict],
@@ -811,15 +822,24 @@ def bake_planes(
 
     for index, plane in enumerate(planes, 1):
         name = plane.get("nome") or plane.get("tipo") or f"piano{index}"
-        pf = ob.plane_frame(
+        geometry_pf = ob.plane_frame(
             plane, up_world, vertices, faces, texel_m,
             scale_m_per_mesh_unit=scale_m_per_mesh_unit,
         )
-        if pf is None:
+        if geometry_pf is None:
             log(f"  piano {index} ({name}): degenere, salto")
             continue
+        projection_plane, uses_texture_frame = texture_plane(plane)
+        projection_pf = ob.plane_frame(
+            projection_plane, up_world, vertices, faces, texel_m,
+            scale_m_per_mesh_unit=scale_m_per_mesh_unit,
+        )
+        if projection_pf is None:
+            projection_plane = plane
+            projection_pf = geometry_pf
+            uses_texture_frame = False
         rgba, coverage, used, report = _compose_plane(
-            textured_mesh, pf, plane, cams, photo_resolver,
+            textured_mesh, projection_pf, projection_plane, cams, photo_resolver,
             scale_m_per_mesh_unit=scale_m_per_mesh_unit,
             max_photos=max_photos,
             registration_ceiling=registration_ceiling,
@@ -834,26 +854,30 @@ def bake_planes(
         # Tutta la pipeline OpenCV mantiene BGR/BGRA. Un ulteriore RGBA→BGRA
         # scambiava rosso e blu e produceva la dominante azzurra nei PNG.
         _write_texture_png(os.path.join(out_dir, filename), rgba)
-        area = pf.area_m2
+        report["texture_frame"] = "preserved" if uses_texture_frame else "geometry"
+        area = geometry_pf.area_m2
         total_area += area
         result = {
             "index": index, "nome": name, "file": filename,
-            "width_m": round(pf.width_m, 3), "height_m": round(pf.height_m, 3),
-            "tex_w": pf.tex_w, "tex_h": pf.tex_h,
+            "width_m": round(geometry_pf.width_m, 3),
+            "height_m": round(geometry_pf.height_m, 3),
+            "tex_w": projection_pf.tex_w, "tex_h": projection_pf.tex_h,
             "area_m2": round(area, 2), "coverage": round(coverage, 3),
             "photos_used": len(used), "registered_photos": report["registered_photos"],
             "registration_budget": report["registration_selection"].get("budget", 0),
             "projection_mode": "oc_reference_registered",
+            "texture_frame": report["texture_frame"],
         }
         results.append(result)
         reports.append({"index": index, "nome": name, **report})
-        frames.append((index, name, filename, pf))
+        frames.append((index, name, filename, geometry_pf))
         lines.append(
-            f"plane_{index}_{name:<16.16s} {pf.width_m:6.2f} x {pf.height_m:6.2f} m "
+            f"plane_{index}_{name:<16.16s} "
+            f"{geometry_pf.width_m:6.2f} x {geometry_pf.height_m:6.2f} m "
             f"{area:8.2f} m2   copertura {coverage * 100:3.0f}%",
         )
         log(
-            f"  piano {index} ({name}): {pf.tex_w}x{pf.tex_h}px, "
+            f"  piano {index} ({name}): {projection_pf.tex_w}x{projection_pf.tex_h}px, "
             f"{len(used)} foto, copertura {coverage * 100:.0f}%",
         )
         if progress:

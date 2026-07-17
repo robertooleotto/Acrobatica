@@ -1123,12 +1123,58 @@ def _planes_remote(session_id: str) -> str:
     return storage_service.out_path(session_id, "planes.json")
 
 
+def _texture_frame_snapshot(plane: dict) -> dict | None:
+    keys = ("normale", "punto", "corners")
+    if not isinstance(plane, dict) or not all(key in plane for key in keys):
+        return None
+    return {key: plane[key] for key in keys}
+
+
+def _preserve_texture_frames(payload: dict, previous: dict | None = None) -> dict:
+    """Keep the first projection frame while allowing reviewed geometry to move."""
+    previous_planes = (previous or {}).get("planes") or []
+    previous_by_id = {
+        str(plane.get("id")): plane for plane in previous_planes
+        if isinstance(plane, dict) and plane.get("id") is not None
+    }
+    previous_by_name = {
+        str(plane.get("nome")): plane for plane in previous_planes
+        if isinstance(plane, dict) and plane.get("nome")
+    }
+    output = dict(payload)
+    output_planes = []
+    for raw_plane in payload.get("planes") or []:
+        if not isinstance(raw_plane, dict):
+            output_planes.append(raw_plane)
+            continue
+        plane = dict(raw_plane)
+        prior = previous_by_id.get(str(plane.get("id")))
+        if prior is None and plane.get("nome"):
+            prior = previous_by_name.get(str(plane["nome"]))
+        frame = None
+        if isinstance(prior, dict) and isinstance(prior.get("texture_frame"), dict):
+            frame = prior["texture_frame"]
+        elif isinstance(plane.get("texture_frame"), dict):
+            # Supports migration of sessions created before texture frames were
+            # persisted. Future edits will preserve this imported snapshot.
+            frame = plane["texture_frame"]
+        elif isinstance(prior, dict):
+            frame = _texture_frame_snapshot(prior)
+        if frame is None:
+            frame = _texture_frame_snapshot(plane)
+        if frame is not None:
+            plane["texture_frame"] = frame
+        output_planes.append(plane)
+    output["planes"] = output_planes
+    return output
+
+
 @router.put("/{session_id}/planes-data", response_model=PlanesSaveResult)
 def save_planes(session_id: str, payload: dict = Body(...)):
     """Salva i piani decisi dall'utente nell'editor 3D (passo 7). Il payload è il
-    JSON dei piani prodotto dall'app (mesh già pulita): lo conserviamo verbatim su
-    storage in `out/planes.json`, così la proiezione lo scaricherà da lì. Avanza lo
-    stato a `planes_ready` (best-effort: non fallisce se la transizione non è valida).
+    JSON dei piani prodotto dall'app (mesh già pulita). Conserviamo il primo frame
+    di proiezione in `texture_frame`, mentre posizione e bordi revisionati restano
+    la geometria corrente. Avanza lo stato a `planes_ready` (best-effort).
 
     Il payload atteso ha una chiave `planes` (lista); il resto è opaco al backend."""
     sess = session_store.get_session(session_id)
@@ -1142,6 +1188,13 @@ def save_planes(session_id: str, payload: dict = Body(...)):
         raise HTTPException(400, "Il payload deve contenere 'planes' (lista)")
 
     remote = _planes_remote(session_id)
+    previous_payload = None
+    try:
+        previous_payload = json.loads(storage_service.download_bytes(remote))
+    except Exception:
+        pass
+    payload = _preserve_texture_frames(payload, previous_payload)
+    planes = payload["planes"]
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     storage_service.upload_bytes(remote, data, "application/json")
 
