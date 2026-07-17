@@ -38,6 +38,38 @@ def _identity_correction() -> dict[str, object]:
     }
 
 
+def _stable_mosaic_anchor(
+    accepted_keys: list[str],
+    ranked: list[dict],
+    score_ratio: float = 0.995,
+) -> str | None:
+    """Sceglie una vista dominante stabile fra candidate quasi equivalenti.
+
+    Il mosaico congela la prima sorgente su gran parte del piano. Piccole
+    variazioni del piano non devono quindi scambiare due foto con score quasi
+    identico: nel gruppo vicino al best score preferiamo la copertura maggiore,
+    che tende anche a essere la vista piu centrale dell'intera facciata.
+    """
+    accepted = set(accepted_keys)
+    candidates = [item for item in ranked if str(item.get("key")) in accepted]
+    if not candidates:
+        return None
+    best_score = max(float(item.get("score", 0.0)) for item in candidates)
+    near_best = [
+        item for item in candidates
+        if float(item.get("score", 0.0)) >= best_score * score_ratio
+    ]
+    anchor = max(
+        near_best,
+        key=lambda item: (
+            float(item.get("coverage", 0.0)),
+            float(item.get("facing", 0.0)),
+            float(item.get("score", 0.0)),
+        ),
+    )
+    return str(anchor["key"])
+
+
 def adaptive_registration_budget(
     pf: ob.PlaneFrame,
     base_photos: int = 20,
@@ -385,6 +417,20 @@ def _compose_plane(
         selection_report = {
             "budget": 0, "selected": 0, "reason": "riferimento planare insufficiente",
         }
+
+    anchor_key = _stable_mosaic_anchor(accepted_keys, ranked)
+    if anchor_key is not None:
+        anchor_index = accepted_keys.index(anchor_key)
+        if anchor_index != 0:
+            order = [anchor_index, *(
+                index for index in range(len(accepted_keys)) if index != anchor_index
+            )]
+            accepted_images = [accepted_images[index] for index in order]
+            accepted_planar_masks = [accepted_planar_masks[index] for index in order]
+            accepted_full_masks = [accepted_full_masks[index] for index in order]
+            corrections = [corrections[index] for index in order]
+            accepted_keys = [accepted_keys[index] for index in order]
+
     size = (pf.tex_w, pf.tex_h)
     compositing_masks = [
         cv2.warpAffine(
@@ -462,6 +508,7 @@ def _compose_plane(
         if polygon.any() else 0.0,
         "accepted_photos": len(accepted_images),
         "registered_photos": len(corrections),
+        "mosaic_anchor_key": anchor_key,
         "registration_selection": selection_report,
         "global_alignment": global_report,
         "photos": photo_reports,

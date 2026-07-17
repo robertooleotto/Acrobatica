@@ -19,6 +19,32 @@ def test_registration_budget_grows_with_real_plane_size():
     assert oc_reference_bake.adaptive_registration_budget(very_large_facade) == 75
 
 
+def test_mosaic_anchor_prefers_coverage_when_scores_are_nearly_tied():
+    ranked = [
+        {"key": "156", "score": 0.903595, "coverage": 0.3787, "facing": 0.6016},
+        {"key": "135", "score": 0.902618, "coverage": 0.4911, "facing": 0.5333},
+        {"key": "136", "score": 0.891600, "coverage": 0.5067, "facing": 0.5223},
+        {"key": "other", "score": 0.80, "coverage": 0.90, "facing": 0.70},
+    ]
+
+    anchor = oc_reference_bake._stable_mosaic_anchor(
+        ["156", "135", "136", "other"], ranked,
+    )
+
+    assert anchor == "135"
+
+
+def test_mosaic_anchor_keeps_clearly_better_scored_photo():
+    ranked = [
+        {"key": "best", "score": 1.0, "coverage": 0.40, "facing": 0.70},
+        {"key": "wide", "score": 0.90, "coverage": 0.80, "facing": 0.60},
+    ]
+
+    assert oc_reference_bake._stable_mosaic_anchor(
+        ["best", "wide"], ranked,
+    ) == "best"
+
+
 def test_registration_selection_exceeds_baseline_when_coverage_requires_it():
     frame = ortho_bake.PlaneFrame(
         origin=np.array([0.0, 0.0, 0.0]),
