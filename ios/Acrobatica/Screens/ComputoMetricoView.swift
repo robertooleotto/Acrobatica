@@ -686,6 +686,16 @@ private enum SviluppoFacciateBuilder {
         let texture: Int
     }
 
+    private struct BordoPosizione: Hashable {
+        let primo: Int
+        let secondo: Int
+
+        init(_ a: Int, _ b: Int) {
+            primo = min(a, b)
+            secondo = max(a, b)
+        }
+    }
+
     private struct GruppoOBJ {
         var nome = ""
         var materiale = ""
@@ -705,6 +715,42 @@ private enum SviluppoFacciateBuilder {
         let minY: Float
         let maxY: Float
         var invertiU: Bool
+        let rettangolare: Bool
+    }
+
+    private static func asseEstrusioneCondiviso(
+        gruppi: [GruppoOBJ],
+        posizioni: [SIMD3<Float>]
+    ) -> SIMD3<Float> {
+        let gravita = SIMD3<Float>(0, 1, 0)
+        var somma = SIMD3<Float>.zero
+        var peso: Float = 0
+
+        for gruppo in gruppi {
+            var occorrenze: [BordoPosizione: Int] = [:]
+            for triangolo in gruppo.triangoli where triangolo.count == 3 {
+                for (a, b) in [(0, 1), (1, 2), (2, 0)] {
+                    let bordo = BordoPosizione(
+                        triangolo[a].posizione, triangolo[b].posizione)
+                    occorrenze[bordo, default: 0] += 1
+                }
+            }
+            for (bordo, conteggio) in occorrenze where conteggio == 1 {
+                guard posizioni.indices.contains(bordo.primo),
+                      posizioni.indices.contains(bordo.secondo) else { continue }
+                var direzione = posizioni[bordo.secondo] - posizioni[bordo.primo]
+                let lunghezza = simd_length(direzione)
+                guard lunghezza > 1e-5 else { continue }
+                direzione /= lunghezza
+                let verticalita = abs(simd_dot(direzione, gravita))
+                guard verticalita >= 0.7 else { continue }
+                if simd_dot(direzione, gravita) < 0 { direzione = -direzione }
+                somma += direzione * lunghezza
+                peso += lunghezza
+            }
+        }
+        guard peso > 1e-5, simd_length(somma) > 1e-5 else { return gravita }
+        return simd_normalize(somma)
     }
 
     static func costruisci(
@@ -764,6 +810,8 @@ private enum SviluppoFacciateBuilder {
         salvaCorrente()
 
         let up = SIMD3<Float>(0, 1, 0)
+        let asseEstrusione = asseEstrusioneCondiviso(
+            gruppi: gruppi, posizioni: posizioni)
         var piani: [Piano] = []
         for gruppo in gruppi {
             var mappa: [VerticeOBJ: Int32] = [:]
@@ -792,7 +840,14 @@ private enum SviluppoFacciateBuilder {
             guard simd_length(normale) > 1e-6 else { continue }
             normale = simd_normalize(normale)
 
-            var verticale = up - normale * simd_dot(up, normale)
+            // I piani sono generati estrudendo lo stesso perimetro. L'asse
+            // condiviso include l'eventuale inclinazione reale della facciata;
+            // usarlo evita che le spallette diventino trapezi nello sviluppo.
+            var verticale = asseEstrusione
+                - normale * simd_dot(asseEstrusione, normale)
+            if simd_length(verticale) < 0.2 {
+                verticale = up - normale * simd_dot(up, normale)
+            }
             if simd_length(verticale) < 0.2 { verticale = b - a }
             guard simd_length(verticale) > 1e-6 else { continue }
             verticale = simd_normalize(verticale)
@@ -818,7 +873,9 @@ private enum SviluppoFacciateBuilder {
                 uv: uv, indici: indici, orizzontale: orizzontale, verticale: verticale,
                 minX: xs.min() ?? 0, maxX: xs.max() ?? 0,
                 minY: ys.min() ?? 0, maxY: ys.max() ?? 0,
-                invertiU: false))
+                invertiU: false,
+                rettangolare: punti.count == 4
+                    && identificatore.lowercased().contains("spalletta")))
         }
         piani.sort { $0.indice < $1.indice }
         guard !piani.isEmpty else {
@@ -879,8 +936,21 @@ private enum SviluppoFacciateBuilder {
                 areaM2: meta?.area_m2 ?? Double(larghezzaPiano * altezzaPiano),
                 invertiU: piano.invertiU))
             let sviluppati = piano.punti.map { punto -> SCNVector3 in
-                let x = cursoreX + simd_dot(punto, piano.orizzontale) - piano.minX
-                let y = simd_dot(punto, piano.verticale) - minYGlobale
+                let localeX = simd_dot(punto, piano.orizzontale) - piano.minX
+                let localeY = simd_dot(punto, piano.verticale) - piano.minY
+                let x: Float
+                let y: Float
+                if piano.rettangolare {
+                    // La saldatura fra piani stimati puo lasciare uno shear
+                    // residuo. Nel computo una spalletta a quattro vertici
+                    // segue la regola architettonica rettangolare.
+                    x = cursoreX + (localeX < larghezzaPiano * 0.5 ? 0 : larghezzaPiano)
+                    y = piano.minY - minYGlobale
+                        + (localeY < altezzaPiano * 0.5 ? 0 : altezzaPiano)
+                } else {
+                    x = cursoreX + localeX
+                    y = piano.minY - minYGlobale + localeY
+                }
                 return SCNVector3(x, y, 0)
             }
             let sorgenteVertici = SCNGeometrySource(vertices: sviluppati)
