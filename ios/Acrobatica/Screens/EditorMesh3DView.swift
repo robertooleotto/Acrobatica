@@ -168,7 +168,7 @@ struct EditorMesh3DView: View {
                         userInfo: [NSLocalizedDescriptionKey:
                             result.error.isEmpty ? "Errore nel calcolo cloud" : result.error])
                 }
-                let bundle = try await BackendAPIClient.shared.downloadMeshBundle(result.files)
+                let bundle = try await BackendAPIClient.shared.downloadProjectionBundle(result.files)
                 guard let main = result.main_obj, let url = bundle[main.name] else {
                     throw NSError(
                         domain: "AcrobaticaProjection", code: 1,
@@ -197,13 +197,14 @@ struct EditorMesh3DView: View {
                         domain: "AcrobaticaProjection", code: 5,
                         userInfo: [NSLocalizedDescriptionKey: "Nessuna texture completata"])
                 }
-                let bundle = try await BackendAPIClient.shared.downloadMeshBundle(result.files)
+                let bundle = try await BackendAPIClient.shared.downloadProjectionBundle(result.files)
                 guard let url = bundle[main.name] else {
                     throw NSError(
                         domain: "AcrobaticaProjection", code: 6,
                         userInfo: [NSLocalizedDescriptionKey: "OBJ texturizzato non ricevuto"])
                 }
                 try model.caricaPianiTexturizzati(url)
+                await ripristinaPianiSalvati(sessionId: sid)
                 toastCloud = "Texture calcolata caricata ✓"
             } catch {
                 toastCloud = "Download fallito: \(error.localizedDescription)"
@@ -228,7 +229,7 @@ struct EditorMesh3DView: View {
             caricandoCloud = true
             toastCloud = "Scarico il risultato texturizzato…"
             defer { caricandoCloud = false }
-            let bundle = try await BackendAPIClient.shared.downloadMeshBundle(result.files)
+            let bundle = try await BackendAPIClient.shared.downloadProjectionBundle(result.files)
             guard let url = bundle[main.name] else {
                 throw NSError(
                     domain: "AcrobaticaProjection", code: 7,
@@ -236,10 +237,24 @@ struct EditorMesh3DView: View {
                         "Il bundle automatico non contiene l'OBJ principale"])
             }
             try model.caricaPianiTexturizzati(url)
+            await ripristinaPianiSalvati(sessionId: sid)
             toastCloud = "Modello texturizzato pronto ✓"
         } catch {
             toastCloud = "Risultato automatico non disponibile"
             await model.riconosciPianiAuto(sessionId: sid)
+        }
+    }
+
+    @MainActor
+    private func ripristinaPianiSalvati(sessionId: String) async {
+        guard model.facce.isEmpty else { return }
+        do {
+            let planes = try await BackendAPIClient.shared.downloadSavedPlanes(
+                sessionId: sessionId)
+            guard !planes.isEmpty else { return }
+            model.applicaPianiRilevati(planes, registraModifica: false)
+        } catch {
+            await model.riconosciPianiAuto(sessionId: sessionId)
         }
     }
 
@@ -4879,16 +4894,17 @@ final class Mesh3DModel: ObservableObject {
     /// Sostituisce le facce coi piani rilevati dal backend (quad + tipo).
     func applicaPianiRilevati(
         _ planes: [BackendAPIClient.DetectedPlane],
-        adattaAllaMeshCorrente: Bool = false
+        adattaAllaMeshCorrente: Bool = false,
+        registraModifica: Bool = true
     ) {
-        registraUndo()
+        if registraModifica { registraUndo() }
         facce.removeAll(); facceSelezionate.removeAll(); facciaAttivaId = nil
         for p in planes {
             let colore = FacciaProxy.palette[facce.count % FacciaProxy.palette.count]
             var f = FacciaProxy(id: prossimoIdFaccia, nome: p.nome, colore: colore)
             prossimoIdFaccia += 1
             switch p.tipo {
-            case "spalla":      f.tipo = .spalletta
+            case "spalla", "spalletta": f.tipo = .spalletta
             case "falda":       f.tipo = .torretta      // obliquo (timpano/mansarda)
             case "orizzontale": f.tipo = .orizzontale
             default:            f.tipo = .facciata

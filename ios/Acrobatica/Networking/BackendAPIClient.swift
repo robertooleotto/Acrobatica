@@ -351,6 +351,52 @@ actor BackendAPIClient {
         let status: String
     }
 
+    private struct PlanesDataResult: Decodable {
+        let session_id: String
+        let count: Int
+        let url: String
+    }
+
+    private struct SavedPlanesDocument: Decodable {
+        struct Plane: Decodable {
+            let nome: String
+            let tipo: String
+            let punto: [Float]
+            let normale: [Float]
+            let corners: [[Float]]
+            let triangoli: [Int]?
+        }
+
+        let planes: [Plane]
+    }
+
+    /// Recupera i piani revisionati gia salvati, senza rieseguire il detector.
+    func downloadSavedPlanes(sessionId: String) async throws -> [DetectedPlane] {
+        let endpoint = baseURL.appendingPathComponent(
+            "/facade-sessions/\(sessionId)/planes-data")
+        let (locationData, locationResponse) = try await urlSession.data(from: endpoint)
+        try assertHTTPOK(locationResponse, data: locationData)
+        let location = try JSONDecoder().decode(PlanesDataResult.self, from: locationData)
+        guard let remote = URL(string: location.url) else {
+            throw APIError.httpError(0, "URL piani non valido")
+        }
+        let (documentData, documentResponse) = try await urlSession.data(from: remote)
+        try assertHTTPOK(documentResponse, data: documentData)
+        let document = try JSONDecoder().decode(SavedPlanesDocument.self, from: documentData)
+        return document.planes.map { plane in
+            DetectedPlane(
+                nome: plane.nome,
+                tipo: plane.tipo,
+                punto: plane.punto,
+                normale: plane.normale,
+                corners: plane.corners,
+                area_m2: 0,
+                w: 0,
+                h: 0,
+                triangoli: plane.triangoli)
+        }
+    }
+
     /// Un piano rilevato automaticamente dal backend (Open3D: qualsiasi
     /// orientamento — verticali, falde oblique, poligoni/trapezi).
     struct DetectedPlane: Codable {
@@ -639,6 +685,17 @@ actor BackendAPIClient {
             try? fileManager.removeItem(at: directory)
             throw error
         }
+    }
+
+    /// Bundle necessario a SceneKit; report JSON/TXT restano disponibili nel
+    /// manifest ma non devono bloccare l'apertura del modello nell'app.
+    func downloadProjectionBundle(_ files: [MeshFileInfo]) async throws -> [String: URL] {
+        let renderExtensions: Set<String> = ["obj", "mtl", "png", "jpg", "jpeg"]
+        let renderFiles = files.filter {
+            renderExtensions.contains(
+                URL(fileURLWithPath: $0.name).pathExtension.lowercased())
+        }
+        return try await downloadMeshBundle(renderFiles)
     }
 
     // MARK: - Keystone (Step 2: foto raddrizzate singolarmente)
