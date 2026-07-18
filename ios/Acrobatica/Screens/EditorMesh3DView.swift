@@ -4644,6 +4644,7 @@ final class Mesh3DModel: ObservableObject {
     }
 
     func registraUndo() {
+        invalidaPianiTexturizzatiLocali()
         undoStack.append((mesh, selezione, facce))
         if undoStack.count > maxUndo { undoStack.removeFirst() }
         redoStack.removeAll()
@@ -4652,7 +4653,22 @@ final class Mesh3DModel: ObservableObject {
     }
 
     func concludiModificaPersistente() {
+        invalidaPianiTexturizzatiLocali()
         workspaceRevision += 1
+    }
+
+    /// Un bundle proiettato appartiene a una specifica revisione dei piani.
+    /// Appena la geometria cambia non deve restare sovrapposto alla revisione
+    /// nuova, altrimenti texture e spigoli sembrano ruotati o scollegati.
+    private func invalidaPianiTexturizzatiLocali() {
+        guard haPianiTexturizzati else { return }
+        pianiTexturizzatiNode.childNodes.forEach { $0.removeFromParentNode() }
+        sviluppoPianiNode.childNodes.forEach { $0.removeFromParentNode() }
+        haPianiTexturizzati = false
+        mostraSviluppoPiani = false
+        pianiTexturizzatiNode.isHidden = true
+        sviluppoPianiNode.isHidden = true
+        mostraMesh = true
     }
 
     func undo() {
