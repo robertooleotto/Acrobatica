@@ -412,6 +412,8 @@ def project(session_id: str) -> dict:
         with tempfile.TemporaryDirectory(prefix="acro_projection_") as td:
             root = Path(td)
             inp = _download_inputs(session_id, sess, root)
+            from .plane_geometry import regularize_planes_document
+            inp["planes"] = regularize_planes_document(inp["planes"])
             out_dir = root / "output"
             scale = float(inp["planes"].get(
                 "scale_m_per_mesh_unit",

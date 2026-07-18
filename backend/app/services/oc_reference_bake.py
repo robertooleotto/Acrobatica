@@ -28,6 +28,41 @@ def _write_texture_png(path: str, bgra: np.ndarray) -> None:
         raise RuntimeError(f"Impossibile scrivere la texture: {path}")
 
 
+def _remap_texture_frame(
+    image: np.ndarray,
+    source: ob.PlaneFrame,
+    target: ob.PlaneFrame,
+) -> np.ndarray:
+    """Porta il compositing dal frame OC storico al quad geometrico corrente.
+
+    Il frame storico resta utile per registrare le foto, ma non può essere
+    applicato direttamente alle UV di un piano che nel frattempo è stato
+    traslato o ruotato dall'utente.
+    """
+    width, height = target.tex_w, target.tex_h
+    gu = (np.arange(width, dtype=np.float64) + 0.5) / width * target.width_world
+    gv = (1.0 - (np.arange(height, dtype=np.float64) + 0.5) / height) * target.height_world
+    delta = target.origin - source.origin
+    base_u = float(np.dot(delta, source.u))
+    base_v = float(np.dot(delta, source.v))
+    source_u = (
+        base_u
+        + gv[:, None] * float(np.dot(target.v, source.u))
+        + gu[None, :] * float(np.dot(target.u, source.u))
+    )
+    source_v = (
+        base_v
+        + gv[:, None] * float(np.dot(target.v, source.v))
+        + gu[None, :] * float(np.dot(target.u, source.v))
+    )
+    map_x = (source_u / source.width_world * source.tex_w - 0.5).astype(np.float32)
+    map_y = ((1.0 - source_v / source.height_world) * source.tex_h - 0.5).astype(np.float32)
+    return cv2.remap(
+        image, map_x, map_y, cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0, 0),
+    )
+
+
 def _identity_correction() -> dict[str, object]:
     return {
         "offset_x": 0.0,
@@ -811,7 +846,9 @@ def bake_planes(
         Path(raw_obj_path), Path(raw_mtl_path),
     )
     pb = planes_doc.get("piano_base") or {}
-    up_world = ob._unit(np.asarray(pb.get("up", [0.0, 1.0, 0.0]), float))
+    up_world = ob._unit(np.asarray(
+        planes_doc.get("shared_extrusion_direction")
+        or pb.get("up", [0.0, 1.0, 0.0]), float))
     texel_m = texel_mm / 1000.0
     planes = planes_doc.get("planes", [])
     frames: list[tuple[int, str, str, ob.PlaneFrame]] = []
@@ -850,6 +887,13 @@ def bake_planes(
             max_rotation_deg=0.5,
             max_scale_error=0.03,
         )
+        if uses_texture_frame:
+            rgba = _remap_texture_frame(rgba, projection_pf, geometry_pf)
+            geometry_mask = ob._polygon_mask(
+                geometry_pf.tex_w, geometry_pf.tex_h, geometry_pf.polygon_uv)
+            painted = rgba[..., 3] > 0
+            coverage = (float(painted[geometry_mask].mean())
+                        if geometry_mask.any() else 0.0)
         filename = f"plane_{index}_{ob._sanitize(name)}.png"
         # Tutta la pipeline OpenCV mantiene BGR/BGRA. Un ulteriore RGBA→BGRA
         # scambiava rosso e blu e produceva la dominante azzurra nei PNG.
@@ -861,7 +905,7 @@ def bake_planes(
             "index": index, "nome": name, "file": filename,
             "width_m": round(geometry_pf.width_m, 3),
             "height_m": round(geometry_pf.height_m, 3),
-            "tex_w": projection_pf.tex_w, "tex_h": projection_pf.tex_h,
+            "tex_w": geometry_pf.tex_w, "tex_h": geometry_pf.tex_h,
             "area_m2": round(area, 2), "coverage": round(coverage, 3),
             "photos_used": len(used), "registered_photos": report["registered_photos"],
             "registration_budget": report["registration_selection"].get("budget", 0),
@@ -877,7 +921,7 @@ def bake_planes(
             f"{area:8.2f} m2   copertura {coverage * 100:3.0f}%",
         )
         log(
-            f"  piano {index} ({name}): {projection_pf.tex_w}x{projection_pf.tex_h}px, "
+            f"  piano {index} ({name}): {geometry_pf.tex_w}x{geometry_pf.tex_h}px, "
             f"{len(used)} foto, copertura {coverage * 100:.0f}%",
         )
         if progress:

@@ -397,3 +397,23 @@ def test_opencv_bgra_texture_is_written_without_swapping_red_and_blue(tmp_path):
     decoded = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
 
     assert np.array_equal(decoded, texture)
+
+
+def test_texture_frame_remap_preserves_identity_and_target_dimensions():
+    image = np.arange(6 * 8 * 4, dtype=np.uint8).reshape(6, 8, 4)
+    frame = SimpleNamespace(
+        origin=np.array([0.0, 0.0, 0.0]),
+        u=np.array([1.0, 0.0, 0.0]),
+        v=np.array([0.0, 1.0, 0.0]),
+        width_world=8.0,
+        height_world=6.0,
+        tex_w=8,
+        tex_h=6,
+    )
+    identity = oc_reference_bake._remap_texture_frame(image, frame, frame)
+    assert np.array_equal(identity, image)
+
+    smaller = SimpleNamespace(**{**frame.__dict__, "width_world": 4.0,
+                                 "height_world": 3.0, "tex_w": 4, "tex_h": 3})
+    remapped = oc_reference_bake._remap_texture_frame(image, frame, smaller)
+    assert remapped.shape == (3, 4, 4)

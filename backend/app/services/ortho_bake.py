@@ -490,7 +490,9 @@ def bake_planes(mesh_path: str, poses: dict, photos_dir: str, planes_doc: dict,
         log("[avviso] occlusione richiesta ma Open3D non disponibile → disattivata")
 
     pb = planes_doc.get("piano_base") or {}
-    up_world = _unit(np.asarray(pb.get("up", [0.0, 1.0, 0.0]), float))
+    up_world = _unit(np.asarray(
+        planes_doc.get("shared_extrusion_direction")
+        or pb.get("up", [0.0, 1.0, 0.0]), float))
     texel_m = texel_mm / 1000.0
     planes = planes_doc.get("planes", [])
     log(f"mesh {len(V)} v / {len(faces)} f · camere {len(cams)} · piani {len(planes)} · "

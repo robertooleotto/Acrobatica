@@ -1193,6 +1193,8 @@ def save_planes(session_id: str, payload: dict = Body(...)):
         previous_payload = json.loads(storage_service.download_bytes(remote))
     except Exception:
         pass
+    from ..services.plane_geometry import regularize_planes_document
+    payload = regularize_planes_document(payload)
     payload = _preserve_texture_frames(payload, previous_payload)
     planes = payload["planes"]
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
