@@ -7321,10 +7321,20 @@ final class Mesh3DModel: ObservableObject {
             let soloPiani = !mostraMesh && !mostraTexturaOC
             let m = SCNMaterial()
             let faSel = strumento == .allinea && facciaAllineaSelezionata(f.id)
-            m.diffuse.contents = faSel ? UIColor.systemOrange.withAlphaComponent(0.6)
-                : f.colore.withAlphaComponent(soloPiani ? 1.0 : 0.62)   // più solido = look viewer
-            m.isDoubleSided = true; m.lightingModel = .constant
-            m.writesToDepthBuffer = soloPiani
+            m.isDoubleSided = true
+            m.lightingModel = .constant
+            if haPianiTexturizzati {
+                // Il quad resta disponibile all'hit-test, ma non compete nel
+                // depth buffer con la stessa superficie texturizzata.
+                m.diffuse.contents = UIColor.clear
+                m.colorBufferWriteMask = []
+                m.readsFromDepthBuffer = false
+                m.writesToDepthBuffer = false
+            } else {
+                m.diffuse.contents = faSel ? UIColor.systemOrange.withAlphaComponent(0.6)
+                    : f.colore.withAlphaComponent(soloPiani ? 1.0 : 0.62)
+                m.writesToDepthBuffer = soloPiani
+            }
             g.materials = [m]
             let fill = SCNNode(geometry: g)
             fill.name = "piano:\(f.id)"   // selezionabile col tap (anche piani solo-poligono)
