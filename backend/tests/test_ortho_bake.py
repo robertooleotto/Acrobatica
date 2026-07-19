@@ -112,3 +112,44 @@ def test_bake_writes_textured_plane_bundle(tmp_path):
     assert texture.shape[2] == 4
     assert float(texture[..., 2][texture[..., 3] > 0].mean()) > 240
     assert "map_Kd plane_1_facciata.png" in (out / "planes_textured.mtl").read_text()
+
+
+def test_textured_mesh_welds_shared_positions_but_keeps_separate_uvs(tmp_path):
+    def frame(corners):
+        points = np.asarray(corners, dtype=float)
+        return ortho_bake.PlaneFrame(
+            origin=points[0], u=np.array([1.0, 0.0, 0.0]),
+            v=np.array([0.0, 1.0, 0.0]), corners=points,
+            polygon_uv=np.array([[0, 0], [1, 0], [1, 1], [0, 1]], dtype=float),
+            width_world=1.0, height_world=1.0, width_m=1.0, height_m=1.0,
+            area_m2=1.0, tex_w=64, tex_h=64, texel_m=0.02,
+        )
+
+    first = frame([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]])
+    second = frame([[1, 0, 0], [1, 0, 1], [1, 1, 1], [1, 1, 0]])
+    ortho_bake._write_textured_mesh(
+        str(tmp_path),
+        [(1, "facciata", "first.png", first),
+         (2, "spalletta", "second.png", second)],
+    )
+
+    lines = (tmp_path / "planes_textured.obj").read_text().splitlines()
+    assert len([line for line in lines if line.startswith("v ")]) == 6
+    assert len([line for line in lines if line.startswith("vt ")]) == 8
+    faces = [line for line in lines if line.startswith("f ")]
+    assert any(token.startswith("2/") for token in faces[0].split()[1:])
+    assert any(token.startswith("2/") for line in faces[2:] for token in line.split()[1:])
+
+
+def test_seal_texture_edges_removes_transparent_sampling_gap():
+    image = np.zeros((9, 9, 4), np.uint8)
+    image[2:7, 2:7, :3] = (20, 80, 160)
+    image[2:7, 2:7, 3] = 255
+
+    sealed = ortho_bake.seal_texture_edges(image)
+
+    assert np.all(sealed[..., 3] == 255)
+    assert np.any(sealed[0, 0, :3] != 0)
+
+    empty = np.zeros((4, 4, 4), np.uint8)
+    assert np.array_equal(ortho_bake.seal_texture_edges(empty), empty)

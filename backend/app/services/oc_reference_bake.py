@@ -24,7 +24,7 @@ from scripts.oc_compositing import coverage_rgba, mosaic
 
 def _write_texture_png(path: str, bgra: np.ndarray) -> None:
     """Scrive il buffer OpenCV BGRA senza reinterpretarne i canali."""
-    if not cv2.imwrite(path, bgra):
+    if not cv2.imwrite(path, ob.seal_texture_edges(bgra)):
         raise RuntimeError(f"Impossibile scrivere la texture: {path}")
 
 
