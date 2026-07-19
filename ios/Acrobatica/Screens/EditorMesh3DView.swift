@@ -329,7 +329,7 @@ struct EditorMesh3DView: View {
                 SceneKitContainer(model: model)
                 if model.modoPerimetro && model.perimetroTraccia { PannelloPerimetro(model: model) }
                 hud
-                NavGizmo(model: model).padding(.top, 8).padding(.trailing, 62)
+                NavGizmo(model: model).padding(.top, 8).padding(.trailing, 78)
                 railDestro
             }
             barraStrumenti
@@ -487,68 +487,78 @@ struct EditorMesh3DView: View {
                 }
             }
         } label: {
-            Image(systemName: "eye")
-                .font(.system(size: 18, weight: .medium))
-                .foregroundStyle(EditorTheme.testo)
-                .frame(width: 38, height: 38)
+            VStack(spacing: 2) {
+                Image(systemName: "eye")
+                    .font(.system(size: 16, weight: .medium))
+                Text("Vista")
+                    .font(.system(size: 8, weight: .semibold))
+            }
+            .foregroundStyle(EditorTheme.testo)
+            .frame(width: 60, height: 42)
+            .background(EditorTheme.panelAlt, in: RoundedRectangle(cornerRadius: 7))
         }
+        .accessibilityLabel("Opzioni vista")
     }
 
-    /// Rail verticale a destra: strumenti + viste + reset (sostituisce la fila in basso).
+    /// Rail verticale a destra: strumenti di modifica separati dai controlli vista.
     private var railDestro: some View {
         HStack {
             Spacer()
             VStack(spacing: 0) {
                 Spacer()
-                VStack(spacing: 6) {
+                VStack(spacing: 5) {
                     ForEach(StrumentoMesh3D.allCases.filter { $0 != .punti && $0 != .seleziona }) { s in
-                        Button {
+                        PulsanteStrumento3D(strumento: s, attivo: model.strumento == s) {
                             model.annullaFaccia(); model.strumento = s
-                        } label: {
-                            Image(systemName: s.icona)
-                                .font(.system(size: 18, weight: .medium))
-                                .foregroundStyle(model.strumento == s ? .white : EditorTheme.testo)
-                                .frame(width: 38, height: 38)
-                                .background(model.strumento == s ? EditorTheme.accento : Color.clear,
-                                            in: RoundedRectangle(cornerRadius: 10))
                         }
+                        .help(s.etichetta)
                     }
                     railDivisore
                     vistaMenu
-                    Button { model.zoomVista(1.25) } label: {
-                        Image(systemName: "plus.magnifyingglass")
-                            .font(.system(size: 18, weight: .medium))
-                            .foregroundStyle(EditorTheme.testo)
-                            .frame(width: 38, height: 38)
+                    HStack(spacing: 0) {
+                        Button { model.zoomVista(1.25) } label: {
+                            Image(systemName: "plus")
+                                .font(.system(size: 14, weight: .semibold))
+                                .frame(width: 30, height: 36)
+                        }
+                        .help("Ingrandisci")
+                        Button { model.zoomVista(0.80) } label: {
+                            Image(systemName: "minus")
+                                .font(.system(size: 14, weight: .semibold))
+                                .frame(width: 30, height: 36)
+                        }
+                        .help("Riduci")
                     }
-                    Button { model.zoomVista(0.80) } label: {
-                        Image(systemName: "minus.magnifyingglass")
-                            .font(.system(size: 18, weight: .medium))
-                            .foregroundStyle(EditorTheme.testo)
-                            .frame(width: 38, height: 38)
-                    }
+                    .foregroundStyle(EditorTheme.testo)
+                    .background(EditorTheme.panelAlt, in: RoundedRectangle(cornerRadius: 7))
                     Button { model.inquadra() } label: {
-                        Image(systemName: "scope")
-                            .font(.system(size: 18, weight: .medium))
+                        Label("Inquadra", systemImage: "scope")
+                            .font(.system(size: 9, weight: .semibold))
+                            .labelStyle(.iconOnly)
                             .foregroundStyle(EditorTheme.testo)
-                            .frame(width: 38, height: 38)
+                            .frame(width: 60, height: 36)
+                            .background(EditorTheme.panelAlt,
+                                        in: RoundedRectangle(cornerRadius: 7))
                     }
+                    .help("Inquadra tutto")
                     railDivisore
                     Button { model.ricaricaDaCapo() } label: {
                         Image(systemName: "arrow.clockwise.circle")
-                            .font(.system(size: 18, weight: .medium))
+                            .font(.system(size: 17, weight: .medium))
                             .foregroundStyle(Theme.danger)
-                            .frame(width: 38, height: 38)
+                            .frame(width: 60, height: 36)
                     }
                     .disabled(model.caricamento || model.numTriangoli == 0)
+                    .help("Ripristina mesh")
                 }
-                .padding(.vertical, 7)
-                .padding(.horizontal, 5)
-                .background(EditorTheme.panel, in: RoundedRectangle(cornerRadius: 16))
-                .overlay(RoundedRectangle(cornerRadius: 16).stroke(EditorTheme.hair, lineWidth: 1))
+                .padding(5)
+                .background(EditorTheme.panel.opacity(0.94),
+                            in: RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8)
+                    .stroke(EditorTheme.hair, lineWidth: 1))
                 Spacer()
             }
-            .padding(.trailing, 10)
+            .padding(.trailing, 8)
         }
     }
 
@@ -1272,43 +1282,59 @@ struct EditorMesh3DView: View {
 private struct NavGizmo: View {
     @ObservedObject var model: Mesh3DModel
     var body: some View {
-        VStack(spacing: 8) {
-            ZStack {
-                Circle()
-                    .stroke(EditorTheme.accento.opacity(0.55), style: StrokeStyle(lineWidth: 2, dash: [3, 4]))
-                    .frame(width: 84, height: 84)
-                ViewCubeMini(model: model).frame(width: 58, height: 58)
-            }
-            HStack(spacing: 6) {
-                Button { model.toggleAutoRuota() } label: {
-                    Image(systemName: model.autoRuota ? "pause.fill" : "arrow.clockwise")
-                        .font(.system(size: 12, weight: .bold))
-                        .frame(width: 30, height: 26)
-                        .background(model.autoRuota ? EditorTheme.accento : EditorTheme.panelAlt,
-                                    in: RoundedRectangle(cornerRadius: 7))
-                        .foregroundStyle(model.autoRuota ? .white : EditorTheme.testo)
+        VStack(spacing: 5) {
+            ViewCubeMini(model: model)
+                .frame(width: 64, height: 64)
+                .accessibilityLabel("Cubo di navigazione")
+            HStack(spacing: 4) {
+                gizIcon(
+                    model.autoRuota ? "pause.fill" : "arrow.triangle.2.circlepath",
+                    attivo: model.autoRuota,
+                    aiuto: model.autoRuota ? "Ferma rotazione" : "Rotazione automatica"
+                ) { model.toggleAutoRuota() }
+                gizIcon("viewfinder", aiuto: "Vista frontale") { model.snapFronte() }
+                gizIcon("cube", aiuto: "Vista isometrica") { model.snapIso() }
+                Menu {
+                    Button("Fronte", systemImage: "rectangle") { model.snapFronte() }
+                    Button("Retro", systemImage: "rectangle") { model.snapRetro() }
+                    Divider()
+                    Button("Sinistra", systemImage: "arrow.left") { model.snapSinistra() }
+                    Button("Destra", systemImage: "arrow.right") { model.snapDestra() }
+                    Divider()
+                    Button("Alto", systemImage: "arrow.up") { model.snapAlto() }
+                    Button("Basso", systemImage: "arrow.down") { model.snapBasso() }
+                } label: {
+                    Image(systemName: "square.grid.3x3")
+                        .font(.system(size: 12, weight: .semibold))
+                        .frame(width: 28, height: 28)
+                        .background(EditorTheme.panelAlt,
+                                    in: RoundedRectangle(cornerRadius: 6))
+                        .foregroundStyle(EditorTheme.testo)
                 }
-                gizBtn("F") { model.snapFronte() }
-                gizBtn("A") { model.snapAlto() }
-                gizBtn("◳") { model.snapIso() }
-            }
-            HStack(spacing: 5) {
-                gizBtn("R") { model.snapRetro() }
-                gizBtn("S") { model.snapSinistra() }
-                gizBtn("D") { model.snapDestra() }
-                gizBtn("B") { model.snapBasso() }
+                .accessibilityLabel("Altre viste")
             }
         }
         .padding(6)
-        .background(EditorTheme.panel.opacity(0.8), in: RoundedRectangle(cornerRadius: 12))
+        .background(EditorTheme.panel.opacity(0.92), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8)
+            .stroke(EditorTheme.hair, lineWidth: 1))
     }
-    private func gizBtn(_ t: String, _ azione: @escaping () -> Void) -> some View {
+    private func gizIcon(
+        _ icona: String,
+        attivo: Bool = false,
+        aiuto: String,
+        _ azione: @escaping () -> Void
+    ) -> some View {
         Button(action: azione) {
-            Text(t).font(Theme.Typo.caption(12, .bold))
-                .frame(width: 28, height: 26)
-                .background(EditorTheme.panelAlt, in: RoundedRectangle(cornerRadius: 7))
-                .foregroundStyle(EditorTheme.testo)
+            Image(systemName: icona)
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: 28, height: 28)
+                .background(attivo ? EditorTheme.accento : EditorTheme.panelAlt,
+                            in: RoundedRectangle(cornerRadius: 6))
+                .foregroundStyle(attivo ? .white : EditorTheme.testo)
         }
+        .help(aiuto)
+        .accessibilityLabel(aiuto)
     }
 }
 
@@ -1439,8 +1465,9 @@ private struct PulsanteStrumento3D: View {
             .foregroundStyle(attivo ? .white : EditorTheme.testo)
             .frame(width: 60, height: 44)
             .background(attivo ? EditorTheme.accento : EditorTheme.panelAlt,
-                        in: RoundedRectangle(cornerRadius: 9))
+                        in: RoundedRectangle(cornerRadius: 7))
         }
+        .accessibilityLabel(strumento.etichetta)
     }
 }
 
