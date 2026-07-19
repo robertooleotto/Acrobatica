@@ -8104,7 +8104,6 @@ struct EditorMesh3DCaricamentoView: View {
     @State private var textureFile: URL?
     @State private var errore: String?
     @State private var pronto = false
-    @State private var revisioneLocale = UUID()
     @State private var messaggio = "Cerco la mesh salvata…"
 
     var body: some View {
@@ -8115,7 +8114,6 @@ struct EditorMesh3DCaricamentoView: View {
                                  nome: "Mesh facciata",
                                  sessionId: sessionId,
                                  onChiudi: onChiudi)
-                    .id(revisioneLocale)
             } else {
                 ZStack {
                     EditorTheme.bg.ignoresSafeArea()
@@ -8145,22 +8143,19 @@ struct EditorMesh3DCaricamentoView: View {
     }
 
     private func carica() async {
-        let apertaDaCache = await caricaDaCache()
-        if apertaDaCache {
-            pronto = true
-        } else {
-            messaggio = "Scarico la mesh per la prima volta…"
-        }
-
+        // Controlla prima il manifest remoto: una sessione ripristinata alla raw
+        // non deve mostrare neppure temporaneamente una vecchia revisione clean.
+        // Il bundle resta in cache per checksum, quindi i file invariati non
+        // vengono riscaricati.
+        messaggio = "Controllo la mesh disponibile…"
         do {
             let info = try await BackendAPIClient.shared.fetchMeshInfo(sessionId: sessionId)
             guard let main = info.main_obj ?? info.files.first else {
-                if !apertaDaCache {
-                    errore = "La sessione non ha una mesh OBJ."
-                    pronto = true
-                }
+                errore = "La sessione non ha una mesh OBJ."
+                pronto = true
                 return
             }
+            messaggio = "Preparo la mesh originale…"
             let nuovaMesh = try await BackendAPIClient.shared.downloadMeshFile(
                 main, sessionId: sessionId, cacheGroup: "mesh-current")
             var nuovaTexture = textureFile
@@ -8191,42 +8186,13 @@ struct EditorMesh3DCaricamentoView: View {
                     }
                 }
             }
-            let meshAggiornata = meshFile?.path != nuovaMesh.path
-            let textureAggiornata = textureFile?.path != nuovaTexture?.path
             meshFile = nuovaMesh
             textureFile = nuovaTexture
-            if apertaDaCache && (meshAggiornata || textureAggiornata) {
-                revisioneLocale = UUID()
-            }
             pronto = true
         } catch {
-            if !apertaDaCache {
-                errore = error.localizedDescription
-                pronto = true
-            }
+            errore = error.localizedDescription
+            pronto = true
         }
-    }
-
-    private func caricaDaCache() async -> Bool {
-        guard let bundle = await BackendAPIClient.shared.cachedAssetBundle(
-            sessionId: sessionId, cacheGroup: "mesh-current") else { return false }
-        guard let main = bundle.values.first(where: {
-            $0.pathExtension.lowercased() == "obj"
-        }) ?? bundle.values.first(where: {
-            $0.pathExtension.lowercased() == "usdz"
-        }) else { return false }
-
-        meshFile = main
-        if let raw = await BackendAPIClient.shared.cachedAssetBundle(
-            sessionId: sessionId, cacheGroup: "mesh-raw") {
-            textureFile = raw.values.first(where: {
-                $0.pathExtension.lowercased() == "usdz"
-            }) ?? raw.values.first(where: {
-                $0.pathExtension.lowercased() == "obj"
-            })
-        }
-        messaggio = "Apro la mesh salvata…"
-        return true
     }
 }
 

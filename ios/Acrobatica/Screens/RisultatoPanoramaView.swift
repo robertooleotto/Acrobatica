@@ -292,6 +292,19 @@ struct RisultatoPanoramaView: View {
                     pipeline3DFallita = false
                     pipeline3DProgresso = result.progress
                     pipeline3DMessaggio = result.message
+                case "idle":
+                    if (try? await BackendAPIClient.shared.fetchMeshInfo(
+                        sessionId: sid, kind: "raw")) != nil {
+                        pipeline3DInCorso = false
+                        pipeline3DFallita = false
+                        pipeline3DProgresso = 0
+                        pipeline3DMessaggio = "Mesh OC originale pronta"
+                        return
+                    }
+                    pipeline3DInCorso = true
+                    pipeline3DFallita = false
+                    pipeline3DProgresso = 0
+                    pipeline3DMessaggio = "Attendo il modello 3D dal Mac"
                 default:
                     pipeline3DInCorso = true
                     pipeline3DFallita = false
