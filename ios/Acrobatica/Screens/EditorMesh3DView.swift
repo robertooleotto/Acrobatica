@@ -558,37 +558,31 @@ struct EditorMesh3DView: View {
 
     private var hud: some View {
         VStack {
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    if let err = model.errore {
-                        Text(err)
-                            .font(Theme.Typo.caption(11))
-                            .foregroundStyle(Theme.danger)
-                    } else {
-                        Label("\(model.numVertici) vertici", systemImage: "circle.grid.3x3")
-                        Label("\(model.numTriangoli) triangoli", systemImage: "triangle")
-                        if !model.facce.isEmpty {
-                            Label("\(model.facce.count) facce", systemImage: "paintbrush")
-                                .foregroundStyle(EditorTheme.accento)
-                        }
-                        if let info = model.cursoreInfo {
-                            Label(info, systemImage: "scope")
-                                .foregroundStyle(EditorTheme.accento)
-                        }
-                    }
-                }
-                .font(Theme.Typo.mono(10))
-                .foregroundStyle(EditorTheme.testo)
-                .padding(8)
-                .background(EditorTheme.panel.opacity(0.88),
-                            in: RoundedRectangle(cornerRadius: 8))
-                Spacer()
-            }
             Spacer()
-            if model.caricamento {
-                ProgressView().tint(EditorTheme.accento)
-                    .padding(10)
-                    .background(EditorTheme.panel.opacity(0.9), in: Circle())
+            HStack(alignment: .bottom, spacing: 8) {
+                if let err = model.errore {
+                    Text(err)
+                        .font(Theme.Typo.caption(11))
+                        .foregroundStyle(Theme.danger)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .background(EditorTheme.panel.opacity(0.9),
+                                    in: RoundedRectangle(cornerRadius: 6))
+                } else if let info = model.cursoreInfo {
+                    Label(info, systemImage: "scope")
+                        .font(Theme.Typo.mono(10))
+                        .foregroundStyle(EditorTheme.accento)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .background(EditorTheme.panel.opacity(0.9),
+                                    in: RoundedRectangle(cornerRadius: 6))
+                }
+                Spacer()
+                if model.caricamento {
+                    ProgressView().tint(EditorTheme.accento)
+                        .padding(10)
+                        .background(EditorTheme.panel.opacity(0.9), in: Circle())
+                }
             }
         }
         .padding(10)
