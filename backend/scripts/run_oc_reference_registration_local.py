@@ -307,6 +307,7 @@ def register_residual(
     max_scale_error: float,
     max_residual_px: float,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
+    pixel_scale = max(1.0, max_residual_px / 40.0)
     overlap = reference_mask & source_mask
     result: dict[str, object] = {"accepted": False, "reason": "dati insufficienti"}
     if int(overlap.sum()) < 8_000:
@@ -344,7 +345,8 @@ def register_residual(
     src_xy = np.float32([src_points[m.queryIdx].pt for m in prior_matches])
     ref_xy = np.float32([reference_points[m.trainIdx].pt for m in prior_matches])
     matrix, inlier_mask = cv2.estimateAffinePartial2D(
-        src_xy, ref_xy, method=cv2.RANSAC, ransacReprojThreshold=3.0,
+        src_xy, ref_xy, method=cv2.RANSAC,
+        ransacReprojThreshold=3.0 * pixel_scale,
         maxIters=5000, confidence=0.995, refineIters=20,
     )
     if matrix is None or inlier_mask is None:
@@ -389,7 +391,7 @@ def register_residual(
         failures.append("scala oltre limite")
     if max_displacement > max_residual_px:
         failures.append("spostamento residuo oltre limite")
-    if residual > 2.5:
+    if residual > 2.5 * pixel_scale:
         failures.append("residuo elevato")
     if failures:
         result["reason"] = ", ".join(failures)
@@ -495,7 +497,12 @@ def global_align_photos(
         }, identity
 
     features = [_atlas_features(image, mask) for image, mask in zip(images, masks)]
-    matcher_gate = max(12.0, min(28.0, images[0].shape[1] * 0.025))
+    height, width = images[0].shape[:2]
+    pixel_scale = max(1.0, max(width, height) / 1100.0)
+    matcher_gate = max(
+        12.0 * pixel_scale,
+        min(28.0 * pixel_scale, width * 0.025),
+    )
     constraints: list[dict[str, object]] = []
     pairs_considered = 0
     pair_diagnostics: list[dict[str, object]] = []
@@ -541,7 +548,7 @@ def global_align_photos(
 
             relative, inlier_mask = cv2.estimateAffinePartial2D(
                 points_a, points_b, method=cv2.RANSAC,
-                ransacReprojThreshold=2.5, maxIters=5000,
+                ransacReprojThreshold=2.5 * pixel_scale, maxIters=5000,
                 confidence=0.995, refineIters=20,
             )
             if relative is None or inlier_mask is None:
@@ -565,7 +572,8 @@ def global_align_photos(
             spatial_span = max(spread[0] / width, spread[1] / height)
             accepted = bool(
                 inlier_count >= 10 and inlier_ratio >= 0.30
-                and ransac_residual <= 2.5 and relative_displacement <= 20.0
+                and ransac_residual <= 2.5 * pixel_scale
+                and relative_displacement <= 20.0 * pixel_scale
                 and spatial_span >= 0.08
             )
             diagnostic = {
@@ -605,7 +613,6 @@ def global_align_photos(
             "pairs": pair_diagnostics,
         }, identity
 
-    height, width = images[0].shape[:2]
     center = ((width - 1) * 0.5, (height - 1) * 0.5)
 
     def residuals(flat_params: np.ndarray) -> np.ndarray:
@@ -621,22 +628,34 @@ def global_align_photos(
                 - _apply_matrix(points_j, matrices[second])
             )
             values.append(delta.reshape(-1) * float(edge["weight"]) / math.sqrt(len(points_i)))
-        prior_scale = np.array([6.0, 6.0, math.radians(0.20), math.log(1.012)])
+        prior_scale = np.array([
+            6.0 * pixel_scale, 6.0 * pixel_scale,
+            math.radians(0.20), math.log(1.012),
+        ])
         values.append((params / prior_scale).reshape(-1) * 0.75)
         # Pairwise residuals cannot observe a common translation/rotation and can
         # be reduced artificially by shrinking the whole group. Keep the group
         # gauge fixed to the OC atlas while allowing relative corrections.
-        gauge_scale = np.array([0.25, 0.25, math.radians(0.01), math.log(1.001)])
+        gauge_scale = np.array([
+            0.25 * pixel_scale, 0.25 * pixel_scale,
+            math.radians(0.01), math.log(1.001),
+        ])
         values.append(params.mean(axis=0) / gauge_scale)
         return np.concatenate(values)
 
     initial = np.zeros(count * 4, np.float64)
-    lower_one = np.array([-20.0, -20.0, -math.radians(0.5), math.log(0.98)])
-    upper_one = np.array([20.0, 20.0, math.radians(0.5), math.log(1.02)])
+    lower_one = np.array([
+        -20.0 * pixel_scale, -20.0 * pixel_scale,
+        -math.radians(0.5), math.log(0.98),
+    ])
+    upper_one = np.array([
+        20.0 * pixel_scale, 20.0 * pixel_scale,
+        math.radians(0.5), math.log(1.02),
+    ])
     result = least_squares(
         residuals, initial,
         bounds=(np.tile(lower_one, count), np.tile(upper_one, count)),
-        loss="soft_l1", f_scale=1.0, max_nfev=160,
+        loss="soft_l1", f_scale=pixel_scale, max_nfev=160,
         xtol=1e-7, ftol=1e-7, gtol=1e-7,
     )
     solved = result.x.reshape(count, 4)

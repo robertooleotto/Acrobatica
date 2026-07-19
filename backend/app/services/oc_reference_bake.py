@@ -552,6 +552,11 @@ def _compose_plane(
     max_rotation_deg: float,
     max_scale_error: float,
 ) -> tuple[np.ndarray, float, list[str], dict]:
+    # Le soglie originali sono state tarate sul piano locale da circa 1100 px.
+    # A 4K lo stesso errore metrico occupa piu pixel, mentre rotazione e scala
+    # restano grandezze indipendenti dalla risoluzione.
+    pixel_scale = max(1.0, max(pf.tex_w, pf.tex_h) / 1100.0)
+    scaled_max_residual_px = max_residual_px * pixel_scale
     normal = registration.orient_normal(
         np.asarray(plane["normale"], float), pf.corners.mean(0), cams,
     )
@@ -630,7 +635,7 @@ def _compose_plane(
                     posed, posed_mask,
                     max_rotation_deg=max_rotation_deg,
                     max_scale_error=max_scale_error,
-                    max_residual_px=max_residual_px,
+                    max_residual_px=scaled_max_residual_px,
                 )
                 item["registration"] = residual
                 photo_reports.append(item)
@@ -808,6 +813,8 @@ def _compose_plane(
         if polygon.any() else 0.0,
         "accepted_photos": len(accepted_images),
         "registered_photos": len(corrections),
+        "registration_pixel_scale": round(pixel_scale, 4),
+        "max_residual_px": round(scaled_max_residual_px, 3),
         "mosaic_anchor_key": anchor_key,
         "seam_refinements": seam_refinements,
         "registration_selection": selection_report,
