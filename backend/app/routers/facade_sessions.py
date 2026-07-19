@@ -225,9 +225,10 @@ def start_automatic_pipeline(session_id: str):
 
 
 @router.post("/{session_id}/mesh-ready", response_model=SessionState)
-def mesh_ready(session_id: str, background_tasks: BackgroundTasks):
+def mesh_ready(session_id: str):
     """Passo 4 — il worker ha caricato mesh+pose: la sessione è pronta per il
-    download/pulizia on-device (computing_oc → mesh_ready)."""
+    download e la pulizia on-device (computing_oc → mesh_ready). I piani non
+    vengono calcolati sulla raw: tetto, contesto e rumore falsano il detector."""
     sess = session_store.get_session(session_id)
     if sess is None:
         raise HTTPException(404, "Sessione non trovata")
@@ -236,10 +237,9 @@ def mesh_ready(session_id: str, background_tasks: BackgroundTasks):
     except ValueError as e:
         raise HTTPException(409, str(e))
     projection_service._set_job(
-        session_id, "queued", 0.0,
-        "Mesh pronta: accodo riconoscimento piani e texture",
+        session_id, "idle", 0.0,
+        "Mesh OC originale pronta: attendo la pulizia",
     )
-    background_tasks.add_task(_run_automatic_mesh_pipeline, session_id)
     return _session_state(row, session_store.list_photos(session_id))
 
 

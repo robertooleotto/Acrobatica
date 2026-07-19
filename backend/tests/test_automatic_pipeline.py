@@ -72,6 +72,39 @@ def test_automatic_pipeline_exposes_failure_in_projection_job(monkeypatch):
     assert "detector offline" in jobs[-1][-1]
 
 
+def test_mesh_ready_waits_for_clean_geometry(monkeypatch):
+    session = {
+        "id": "session-1",
+        "status": "computing_oc",
+        "created_at": "2026-07-19T20:00:00+00:00",
+        "updated_at": "2026-07-19T20:00:00+00:00",
+        "result": None,
+    }
+    jobs = []
+    monkeypatch.setattr(
+        facade_sessions.session_store, "get_session", lambda session_id: session,
+    )
+    monkeypatch.setattr(
+        facade_sessions.session_store, "update_status",
+        lambda session_id, status: {**session, "status": status},
+    )
+    monkeypatch.setattr(
+        facade_sessions.session_store, "list_photos", lambda session_id: [],
+    )
+    monkeypatch.setattr(
+        facade_sessions.projection_service, "_set_job",
+        lambda *args: jobs.append(args),
+    )
+
+    result = facade_sessions.mesh_ready("session-1")
+
+    assert result.status == "mesh_ready"
+    assert jobs == [(
+        "session-1", "idle", 0.0,
+        "Mesh OC originale pronta: attendo la pulizia",
+    )]
+
+
 def test_plane_edits_preserve_the_first_texture_frame():
     original = {
         "planes": [{

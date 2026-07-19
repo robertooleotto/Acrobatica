@@ -16,6 +16,7 @@ struct EditorMesh3DView: View {
     @StateObject private var model: Mesh3DModel
     private let onChiudi: (() -> Void)?
     private let sessionId: String?
+    private let consentiAutoPianiAllApertura: Bool
     @Environment(\.dismiss) private var dismiss
     @State private var urlsExport: [URL] = []
     @State private var caricandoCloud = false
@@ -44,10 +45,12 @@ struct EditorMesh3DView: View {
          textureFile: URL? = nil,
          nome: String = "Mesh facciata",
          sessionId: String? = nil,
+         consentiAutoPianiAllApertura: Bool = false,
          onChiudi: (() -> Void)? = nil) {
         _model = StateObject(wrappedValue: Mesh3DModel(
             meshFile: meshFile, textureFile: textureFile, nome: nome))
         self.sessionId = sessionId
+        self.consentiAutoPianiAllApertura = consentiAutoPianiAllApertura
         self.onChiudi = onChiudi
     }
 
@@ -223,8 +226,10 @@ struct EditorMesh3DView: View {
             guard result.state == "complete", let main = result.main_obj else {
                 if result.state == "queued" || result.state == "running" {
                     toastCloud = result.message
-                } else {
+                } else if consentiAutoPianiAllApertura {
                     await model.riconosciPianiAuto(sessionId: sid)
+                } else {
+                    toastCloud = "Mesh OC originale: puliscila prima di rilevare i piani"
                 }
                 return
             }
@@ -244,7 +249,9 @@ struct EditorMesh3DView: View {
             toastCloud = "Modello texturizzato pronto ✓"
         } catch {
             toastCloud = "Risultato automatico non disponibile"
-            await model.riconosciPianiAuto(sessionId: sid)
+            if consentiAutoPianiAllApertura {
+                await model.riconosciPianiAuto(sessionId: sid)
+            }
         }
     }
 
@@ -298,7 +305,12 @@ struct EditorMesh3DView: View {
             toastCloud = "Autosave mesh fallito: esportazione non riuscita"
             return
         }
-        let piani = model.esportaPianiPayload(includiVuoto: true)
+        // Una nuova geometria invalida i piani precedenti. Il detector viene
+        // rilanciato sulla revisione clean appena caricata; i nuovi piani saranno
+        // salvati dal debounce successivo della workspaceRevision.
+        let piani = deveCaricareMesh
+            ? nil
+            : model.esportaPianiPayload(includiVuoto: true)
 
         autoSalvataggioInCorso = true
         defer {
@@ -313,6 +325,7 @@ struct EditorMesh3DView: View {
                 _ = try await BackendAPIClient.shared.uploadMesh(
                     sessionId: sid, fileURL: obj, kind: "clean")
                 revisioneMeshSalvata = max(revisioneMeshSalvata, revisioneMesh)
+                await model.riconosciPianiAuto(sessionId: sid)
             }
             if let piani {
                 _ = try await BackendAPIClient.shared.uploadPlanes(
@@ -353,9 +366,9 @@ struct EditorMesh3DView: View {
             }
         }
         .animation(.easeInOut, value: toastCloud)
-        // Riconoscimento piani AUTOMATICO appena la mesh è pronta (una volta sola,
-        // solo se non ci sono già piani): "riconosce subito i piani" col detector
-        // python. Se non c'è sessione (mesh demo) resta manuale.
+        // Ripristina un risultato esistente; il riconoscimento nuovo parte qui
+        // solo quando il loader ha trovato una revisione clean. Sulla raw parte
+        // dopo il primo autosalvataggio della pulizia.
         .onChange(of: model.numTriangoli) { n in
             if n > 0, let sid = sessionId, model.facce.isEmpty, !autoRiconoscimentoFatto {
                 autoRiconoscimentoFatto = true
@@ -8102,6 +8115,7 @@ struct EditorMesh3DCaricamentoView: View {
 
     @State private var meshFile: URL?
     @State private var textureFile: URL?
+    @State private var usaMeshPulita = false
     @State private var errore: String?
     @State private var pronto = false
     @State private var messaggio = "Cerco la mesh salvata…"
@@ -8113,6 +8127,7 @@ struct EditorMesh3DCaricamentoView: View {
                                  textureFile: textureFile,
                                  nome: "Mesh facciata",
                                  sessionId: sessionId,
+                                 consentiAutoPianiAllApertura: usaMeshPulita,
                                  onChiudi: onChiudi)
             } else {
                 ZStack {
@@ -8149,13 +8164,25 @@ struct EditorMesh3DCaricamentoView: View {
         // vengono riscaricati.
         messaggio = "Controllo la mesh disponibile…"
         do {
-            let info = try await BackendAPIClient.shared.fetchMeshInfo(sessionId: sessionId)
+            let clean = try? await BackendAPIClient.shared.fetchMeshInfo(
+                sessionId: sessionId, kind: "clean")
+            let info: BackendAPIClient.MeshInfoResult
+            if let clean, !clean.files.isEmpty {
+                info = clean
+                usaMeshPulita = true
+            } else {
+                info = try await BackendAPIClient.shared.fetchMeshInfo(
+                    sessionId: sessionId, kind: "raw")
+                usaMeshPulita = false
+            }
             guard let main = info.main_obj ?? info.files.first else {
                 errore = "La sessione non ha una mesh OBJ."
                 pronto = true
                 return
             }
-            messaggio = "Preparo la mesh originale…"
+            messaggio = usaMeshPulita
+                ? "Preparo la mesh pulita…"
+                : "Preparo la mesh originale…"
             let nuovaMesh = try await BackendAPIClient.shared.downloadMeshFile(
                 main, sessionId: sessionId, cacheGroup: "mesh-current")
             var nuovaTexture = textureFile
