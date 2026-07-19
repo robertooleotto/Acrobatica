@@ -86,3 +86,30 @@ def test_projection_prefers_clean_obj_and_falls_back_to_raw_obj():
     }
     assert projection_service._projection_mesh(with_clean) == \
         ("clean/clean.obj", "clean")
+
+
+def test_public_projection_files_include_stable_checksum(monkeypatch):
+    monkeypatch.setattr(
+        projection_service.storage_service, "signed_url",
+        lambda path, expires_in_sec: f"https://example.test/{path}",
+    )
+    session = {
+        "status": "completed",
+        "result": {
+            "projection_job": {"state": "complete"},
+            "projection": {
+                "main_obj": "planes.obj",
+                "files": [{
+                    "name": "planes.obj",
+                    "path": "projection/planes.obj",
+                    "size": 123,
+                    "checksum": "abc123",
+                }],
+            },
+        },
+    }
+
+    result = projection_service._public_result(session)
+
+    assert result["main_obj"]["checksum"] == "abc123"
+    assert result["files"][0]["checksum"] == "abc123"

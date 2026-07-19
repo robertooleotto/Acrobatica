@@ -13,6 +13,7 @@ validato nel NativePoseMeshViewer e pubblica OBJ/MTL/PNG in `out/projection`.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -331,6 +332,7 @@ def _public_result(sess: dict) -> dict:
             "name": f["name"],
             "url": storage_service.signed_url(f["path"], expires_in_sec=3600),
             "size_bytes": f["size"],
+            "checksum": f.get("checksum"),
         }
         for f in manifest.get("files", [])
     ]
@@ -501,14 +503,16 @@ def project(session_id: str) -> dict:
             for file_index, local in enumerate(output_files, 1):
                 if not local.is_file():
                     continue
+                data = local.read_bytes()
                 remote = storage_service.out_path(
                     session_id, f"projection/{local.name}")
                 storage_service.upload_bytes(
-                    remote, local.read_bytes(),
+                    remote, data,
                     _CONTENT_TYPES.get(local.suffix.lower(), "application/octet-stream"),
                 )
                 files.append({"name": local.name, "path": remote,
-                              "size": local.stat().st_size})
+                              "size": len(data),
+                              "checksum": hashlib.sha256(data).hexdigest()})
                 _set_job(
                     session_id, "running",
                     0.80 + 0.18 * file_index / max(len(output_files), 1),

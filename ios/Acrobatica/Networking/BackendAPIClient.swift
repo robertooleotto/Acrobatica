@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import UIKit
 
 /// Client per il backend Python/FastAPI di Acrobatica.
@@ -584,6 +585,7 @@ actor BackendAPIClient {
         let name: String
         let url: String
         let size_bytes: Int
+        let checksum: String?
         var id: String { name }
     }
     struct MeshInfoResult: Codable {
@@ -640,30 +642,42 @@ actor BackendAPIClient {
         return try JSONDecoder().decode(MeshUploadResult.self, from: data)
     }
 
-    /// Scarica un file mesh (OBJ/USDZ/texture) su un file temporaneo locale e ne
-    /// ritorna l'URL — SceneKit carica da file, non da Data.
-    func downloadMeshFile(_ info: MeshFileInfo) async throws -> URL {
-        guard let remote = URL(string: info.url) else {
-            throw APIError.httpError(0, "URL mesh non valido")
-        }
-        let (tmp, resp) = try await urlSession.download(from: remote)
-        try assertHTTPOK(resp, data: Data())
-        let dest = FileManager.default.temporaryDirectory
-            .appendingPathComponent(info.name)
-        try? FileManager.default.removeItem(at: dest)
-        try FileManager.default.moveItem(at: tmp, to: dest)
-        return dest
-    }
-
-    /// Scarica nello stesso folder tutti i file che compongono una mesh OBJ.
-    /// MTL e texture vengono risolti da SceneKit tramite i nomi relativi.
-    func downloadMeshBundle(_ files: [MeshFileInfo]) async throws -> [String: URL] {
+    /// Mantiene mesh e texture in Application Support. La firma usa checksum,
+    /// nome e dimensione: un nuovo upload crea una revisione locale distinta.
+    private func downloadCachedAssetBundle(
+        sessionId: String,
+        group: String,
+        files: [MeshFileInfo]
+    ) async throws -> [String: URL] {
+        guard !files.isEmpty else { return [:] }
         let fileManager = FileManager.default
-        let directory = fileManager.temporaryDirectory
-            .appendingPathComponent("mesh-\(UUID().uuidString)", isDirectory: true)
-        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let applicationSupport = fileManager.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        var root = applicationSupport
+            .appendingPathComponent("Acrobatica", isDirectory: true)
+            .appendingPathComponent("AssetCache", isDirectory: true)
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        var resourceValues = URLResourceValues()
+        resourceValues.isExcludedFromBackup = true
+        try? root.setResourceValues(resourceValues)
 
-        var downloaded: [String: URL] = [:]
+        let namespace = root
+            .appendingPathComponent(cacheSafeName(sessionId), isDirectory: true)
+            .appendingPathComponent(cacheSafeName(group), isDirectory: true)
+        try fileManager.createDirectory(at: namespace, withIntermediateDirectories: true)
+        let fingerprint = assetFingerprint(files)
+        let directory = namespace.appendingPathComponent(fingerprint, isDirectory: true)
+        let marker = directory.appendingPathComponent(".complete")
+
+        if fileManager.fileExists(atPath: marker.path),
+           cachedFilesAreComplete(files, in: directory) {
+            return cachedFileMap(files, in: directory)
+        }
+
+        let staging = namespace.appendingPathComponent(
+            ".download-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: staging, withIntermediateDirectories: true)
+
         do {
             for info in files {
                 guard let remote = URL(string: info.url) else {
@@ -675,27 +689,138 @@ actor BackendAPIClient {
                 // Il backend espone nomi di file, non percorsi. lastPathComponent
                 // evita comunque che un nome remoto esca dalla cartella dedicata.
                 let name = URL(fileURLWithPath: info.name).lastPathComponent
-                let destination = directory.appendingPathComponent(name)
-                try? fileManager.removeItem(at: destination)
+                let destination = staging.appendingPathComponent(name)
                 try fileManager.moveItem(at: tmp, to: destination)
-                downloaded[info.name] = destination
+                let size = (try? destination.resourceValues(
+                    forKeys: [.fileSizeKey]).fileSize) ?? 0
+                guard info.size_bytes <= 0 || size == info.size_bytes else {
+                    throw APIError.httpError(0, "Download incompleto: \(name)")
+                }
+                if let expected = info.checksum?.lowercased(), !expected.isEmpty {
+                    let actual = try sha256(of: destination)
+                    guard actual == expected else {
+                        throw APIError.httpError(0, "Checksum non valido: \(name)")
+                    }
+                }
             }
-            return downloaded
+            try Data(fingerprint.utf8).write(
+                to: staging.appendingPathComponent(".complete"), options: .atomic)
+            if fileManager.fileExists(atPath: directory.path) {
+                try fileManager.removeItem(at: staging)
+            } else {
+                try fileManager.moveItem(at: staging, to: directory)
+            }
+            pruneCachedVersions(in: namespace, keeping: 2)
+            return cachedFileMap(files, in: directory)
         } catch {
-            try? fileManager.removeItem(at: directory)
+            try? fileManager.removeItem(at: staging)
             throw error
         }
     }
 
+    func downloadMeshFile(
+        _ info: MeshFileInfo,
+        sessionId: String,
+        cacheGroup: String
+    ) async throws -> URL {
+        let bundle = try await downloadCachedAssetBundle(
+            sessionId: sessionId, group: cacheGroup, files: [info])
+        guard let local = bundle[info.name] else {
+            throw APIError.httpError(0, "File mesh non disponibile in cache")
+        }
+        return local
+    }
+
+    /// Scarica nello stesso folder tutti i file che compongono una mesh OBJ.
+    /// MTL e texture vengono risolti da SceneKit tramite i nomi relativi.
+    func downloadMeshBundle(
+        _ files: [MeshFileInfo],
+        sessionId: String,
+        cacheGroup: String
+    ) async throws -> [String: URL] {
+        try await downloadCachedAssetBundle(
+            sessionId: sessionId, group: cacheGroup, files: files)
+    }
+
     /// Bundle necessario a SceneKit; report JSON/TXT restano disponibili nel
     /// manifest ma non devono bloccare l'apertura del modello nell'app.
-    func downloadProjectionBundle(_ files: [MeshFileInfo]) async throws -> [String: URL] {
+    func downloadProjectionBundle(
+        sessionId: String,
+        files: [MeshFileInfo]
+    ) async throws -> [String: URL] {
         let renderExtensions: Set<String> = ["obj", "mtl", "png", "jpg", "jpeg"]
         let renderFiles = files.filter {
             renderExtensions.contains(
                 URL(fileURLWithPath: $0.name).pathExtension.lowercased())
         }
-        return try await downloadMeshBundle(renderFiles)
+        return try await downloadCachedAssetBundle(
+            sessionId: sessionId, group: "projection", files: renderFiles)
+    }
+
+    private func cachedFilesAreComplete(
+        _ files: [MeshFileInfo],
+        in directory: URL
+    ) -> Bool {
+        files.allSatisfy { info in
+            let name = URL(fileURLWithPath: info.name).lastPathComponent
+            let local = directory.appendingPathComponent(name)
+            guard FileManager.default.fileExists(atPath: local.path) else { return false }
+            guard info.size_bytes > 0 else { return true }
+            let size = try? local.resourceValues(forKeys: [.fileSizeKey]).fileSize
+            return size == info.size_bytes
+        }
+    }
+
+    private func cachedFileMap(
+        _ files: [MeshFileInfo],
+        in directory: URL
+    ) -> [String: URL] {
+        Dictionary(uniqueKeysWithValues: files.map { info in
+            let name = URL(fileURLWithPath: info.name).lastPathComponent
+            return (info.name, directory.appendingPathComponent(name))
+        })
+    }
+
+    private func assetFingerprint(_ files: [MeshFileInfo]) -> String {
+        let descriptor = files
+            .map { "\($0.name):\($0.size_bytes):\($0.checksum ?? "-")" }
+            .sorted()
+            .joined(separator: "|")
+        let digest = SHA256.hash(data: Data(descriptor.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func sha256(of url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let data = try handle.read(upToCount: 1_048_576), !data.isEmpty {
+            hasher.update(data: data)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func cacheSafeName(_ value: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_."))
+        let scalars = value.unicodeScalars.map { allowed.contains($0) ? Character(String($0)) : "_" }
+        return String(scalars)
+    }
+
+    private func pruneCachedVersions(in namespace: URL, keeping count: Int) {
+        let keys: Set<URLResourceKey> = [.isDirectoryKey, .contentModificationDateKey]
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: namespace, includingPropertiesForKeys: Array(keys),
+            options: [.skipsHiddenFiles]) else { return }
+        let versions = entries.filter {
+            (try? $0.resourceValues(forKeys: keys).isDirectory) == true
+        }.sorted {
+            let lhs = try? $0.resourceValues(forKeys: keys).contentModificationDate
+            let rhs = try? $1.resourceValues(forKeys: keys).contentModificationDate
+            return (lhs ?? .distantPast) > (rhs ?? .distantPast)
+        }
+        for stale in versions.dropFirst(max(count, 1)) {
+            try? FileManager.default.removeItem(at: stale)
+        }
     }
 
     // MARK: - Keystone (Step 2: foto raddrizzate singolarmente)

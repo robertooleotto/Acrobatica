@@ -168,7 +168,8 @@ struct EditorMesh3DView: View {
                         userInfo: [NSLocalizedDescriptionKey:
                             result.error.isEmpty ? "Errore nel calcolo cloud" : result.error])
                 }
-                let bundle = try await BackendAPIClient.shared.downloadProjectionBundle(result.files)
+                let bundle = try await BackendAPIClient.shared.downloadProjectionBundle(
+                    sessionId: sid, files: result.files)
                 guard let main = result.main_obj, let url = bundle[main.name] else {
                     throw NSError(
                         domain: "AcrobaticaProjection", code: 1,
@@ -197,7 +198,8 @@ struct EditorMesh3DView: View {
                         domain: "AcrobaticaProjection", code: 5,
                         userInfo: [NSLocalizedDescriptionKey: "Nessuna texture completata"])
                 }
-                let bundle = try await BackendAPIClient.shared.downloadProjectionBundle(result.files)
+                let bundle = try await BackendAPIClient.shared.downloadProjectionBundle(
+                    sessionId: sid, files: result.files)
                 guard let url = bundle[main.name] else {
                     throw NSError(
                         domain: "AcrobaticaProjection", code: 6,
@@ -229,7 +231,8 @@ struct EditorMesh3DView: View {
             caricandoCloud = true
             toastCloud = "Scarico il risultato texturizzato…"
             defer { caricandoCloud = false }
-            let bundle = try await BackendAPIClient.shared.downloadProjectionBundle(result.files)
+            let bundle = try await BackendAPIClient.shared.downloadProjectionBundle(
+                sessionId: sid, files: result.files)
             guard let url = bundle[main.name] else {
                 throw NSError(
                     domain: "AcrobaticaProjection", code: 7,
@@ -8146,7 +8149,8 @@ struct EditorMesh3DCaricamentoView: View {
                 pronto = true
                 return
             }
-            meshFile = try await BackendAPIClient.shared.downloadMeshFile(main)
+            meshFile = try await BackendAPIClient.shared.downloadMeshFile(
+                main, sessionId: sessionId, cacheGroup: "mesh-current")
             // La geometria clean e la texture raw condividono il frame OC. Quando
             // il main e' un OBJ, scarica anche il modello raw come layer visivo.
             if main.name.lowercased().hasSuffix(".obj") {
@@ -8155,7 +8159,8 @@ struct EditorMesh3DCaricamentoView: View {
                     if let usdz = raw.files.first(where: {
                         $0.name.lowercased().hasSuffix(".usdz")
                     }) {
-                        textureFile = try? await BackendAPIClient.shared.downloadMeshFile(usdz)
+                        textureFile = try? await BackendAPIClient.shared.downloadMeshFile(
+                            usdz, sessionId: sessionId, cacheGroup: "mesh-raw")
                     } else if let rawOBJ = raw.main_obj ?? raw.files.first(where: {
                         $0.name.lowercased().hasSuffix(".obj")
                     }) {
@@ -8165,7 +8170,9 @@ struct EditorMesh3DCaricamentoView: View {
                                 .pathExtension.lowercased())
                         }
                         if let bundle = try? await BackendAPIClient.shared
-                            .downloadMeshBundle(bundleFiles) {
+                            .downloadMeshBundle(
+                                bundleFiles, sessionId: sessionId,
+                                cacheGroup: "mesh-raw") {
                             textureFile = bundle[rawOBJ.name]
                         }
                     }

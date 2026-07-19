@@ -502,7 +502,8 @@ private final class ComputoMetricoModel: ObservableObject {
             }
 
             messaggio = "Preparo lo sviluppo delle facciate…"
-            let bundle = try await BackendAPIClient.shared.downloadProjectionBundle(risultato.files)
+            let bundle = try await BackendAPIClient.shared.downloadProjectionBundle(
+                sessionId: sessionId, files: risultato.files)
             guard let objURL = bundle[main.name] else {
                 throw NSError(domain: "ComputoMetrico", code: 2,
                               userInfo: [NSLocalizedDescriptionKey:

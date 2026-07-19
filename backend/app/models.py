@@ -391,6 +391,7 @@ class MeshFileInfo(BaseModel):
     name: str
     url: str
     size_bytes: int
+    checksum: Optional[str] = None
 
 
 class MeshUploadResult(BaseModel):

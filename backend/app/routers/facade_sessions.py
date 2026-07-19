@@ -8,6 +8,7 @@ Le immagini vengono scaricate temporaneamente in memoria per il processing OpenC
 e ricaricate come output. Niente persistenza locale.
 """
 from __future__ import annotations
+import hashlib
 import json
 import math
 import os
@@ -1042,9 +1043,11 @@ async def upload_mesh(
         if ext not in _MESH_CONTENT_TYPES:
             raise HTTPException(400, f"Estensione mesh non supportata: '{name}'")
         data = await f.read()
+        checksum = hashlib.sha256(data).hexdigest()
         remote = _mesh_remote(session_id, kind, name)
         storage_service.upload_bytes(remote, data, _MESH_CONTENT_TYPES[ext])
-        manifest.append({"name": name, "size": len(data), "path": remote})
+        manifest.append({"name": name, "size": len(data), "path": remote,
+                         "checksum": checksum})
         if ext == ".obj" and first_obj is None:
             first_obj = name
         elif ext == ".usdz" and first_usdz is None:
@@ -1053,6 +1056,7 @@ async def upload_mesh(
             name=name,
             url=storage_service.signed_url(remote, expires_in_sec=3600),
             size_bytes=len(data),
+            checksum=checksum,
         ))
 
     existing = sess.get("result") or {}
@@ -1110,6 +1114,7 @@ def get_mesh(session_id: str, kind: Optional[str] = None):
             name=name,
             url=storage_service.signed_url(remote, expires_in_sec=3600),
             size_bytes=size,
+            checksum=e.get("checksum") if isinstance(e, dict) else None,
         )
         files.append(info)
         if name == entry.get("main_obj"):
