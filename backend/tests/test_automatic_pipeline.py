@@ -106,13 +106,19 @@ def test_texture_frames_follow_stable_names_when_local_ids_shift():
                 "id": 2, "nome": "Facciata - seg 1",
                 "normale": [0, 0, 1], "punto": [0, 0, 0],
                 "corners": [[0, 0, 0], [1, 0, 0], [1, 1, 0]],
-                "texture_frame": {"marker": "facade"},
+                "texture_frame": {
+                    "marker": "facade", "normale": [0, 0, 1],
+                    "punto": [0, 0, 0], "corners": [],
+                },
             },
             {
                 "id": 3, "nome": "Spalletta - seg 2",
                 "normale": [1, 0, 0], "punto": [1, 0, 0],
                 "corners": [[1, 0, 0], [1, 0, 1], [1, 1, 1]],
-                "texture_frame": {"marker": "reveal"},
+                "texture_frame": {
+                    "marker": "reveal", "normale": [1, 0, 0],
+                    "punto": [1, 0, 0], "corners": [],
+                },
             },
         ],
     }
@@ -133,5 +139,35 @@ def test_texture_frames_follow_stable_names_when_local_ids_shift():
 
     result = facade_sessions._preserve_texture_frames(reloaded, previous)
 
-    assert result["planes"][0]["texture_frame"] == {"marker": "facade"}
-    assert result["planes"][1]["texture_frame"] == {"marker": "reveal"}
+    assert result["planes"][0]["texture_frame"]["marker"] == "facade"
+    assert result["planes"][1]["texture_frame"]["marker"] == "reveal"
+
+
+def test_invalid_perpendicular_stored_frame_uses_valid_incoming_repair():
+    previous = {
+        "planes": [{
+            "id": 1, "nome": "Spalletta - seg 2",
+            "normale": [1, 0, 0], "punto": [1, 0, 0],
+            "corners": [[1, 0, 0], [1, 0, 1], [1, 1, 1]],
+            "texture_frame": {
+                "normale": [0, 0, 1], "punto": [0, 0, 0],
+                "corners": [[0, 0, 0], [1, 0, 0], [1, 1, 0]],
+            },
+        }],
+    }
+    repair = {
+        "normale": [1, 0, 0], "punto": [1, 0, 0],
+        "corners": [[1, 0, 0], [1, 0, 1], [1, 1, 1]],
+    }
+    payload = {
+        "planes": [{
+            "id": 1, "nome": "Spalletta - seg 2",
+            "normale": [1, 0, 0], "punto": [1, 0, 0],
+            "corners": [[1, 0, 0], [1, 0, 1], [1, 1, 1]],
+            "texture_frame": repair,
+        }],
+    }
+
+    result = facade_sessions._preserve_texture_frames(payload, previous)
+
+    assert result["planes"][0]["texture_frame"] == repair

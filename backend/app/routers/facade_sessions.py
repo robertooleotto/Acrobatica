@@ -1135,6 +1135,19 @@ def _texture_frame_snapshot(plane: dict) -> dict | None:
     return {key: plane[key] for key in keys}
 
 
+def _texture_frame_matches_plane(frame: dict | None, plane: dict) -> bool:
+    if not isinstance(frame, dict):
+        return False
+    frame_normal = np.asarray(frame.get("normale", []), dtype=float)
+    plane_normal = np.asarray(plane.get("normale", []), dtype=float)
+    if frame_normal.shape != (3,) or plane_normal.shape != (3,):
+        return False
+    denominator = float(np.linalg.norm(frame_normal) * np.linalg.norm(plane_normal))
+    if denominator < 1e-9:
+        return False
+    return abs(float(np.dot(frame_normal, plane_normal))) / denominator >= 0.5
+
+
 def _preserve_texture_frames(payload: dict, previous: dict | None = None) -> dict:
     """Keep the first projection frame while allowing reviewed geometry to move."""
     previous_planes = (previous or {}).get("planes") or []
@@ -1160,15 +1173,16 @@ def _preserve_texture_frames(payload: dict, previous: dict | None = None) -> dic
                  if plane.get("nome") else None)
         if prior is None:
             prior = previous_by_id.get(str(plane.get("id")))
-        frame = None
-        if isinstance(prior, dict) and isinstance(prior.get("texture_frame"), dict):
-            frame = prior["texture_frame"]
-        elif isinstance(plane.get("texture_frame"), dict):
-            # Supports migration of sessions created before texture frames were
-            # persisted. Future edits will preserve this imported snapshot.
-            frame = plane["texture_frame"]
-        elif isinstance(prior, dict):
-            frame = _texture_frame_snapshot(prior)
+        prior_frame = prior.get("texture_frame") if isinstance(prior, dict) else None
+        incoming_frame = plane.get("texture_frame")
+        frame = prior_frame if _texture_frame_matches_plane(prior_frame, plane) else None
+        if frame is None and _texture_frame_matches_plane(incoming_frame, plane):
+            # Permette di riparare un frame storico gia corrotto sullo storage.
+            frame = incoming_frame
+        if frame is None and isinstance(prior, dict):
+            prior_snapshot = _texture_frame_snapshot(prior)
+            if _texture_frame_matches_plane(prior_snapshot, plane):
+                frame = prior_snapshot
         if frame is None:
             frame = _texture_frame_snapshot(plane)
         if frame is not None:
