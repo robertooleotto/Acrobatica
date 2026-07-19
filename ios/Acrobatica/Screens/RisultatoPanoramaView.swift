@@ -1,5 +1,10 @@
 import SwiftUI
 
+private struct TexturePianoCopertina {
+    let url: URL
+    let piano: BackendAPIClient.ProjectionResult.Plane
+}
+
 /// Risultato del rilievo: panorama + scala metrica (2 tap) + aperture + m².
 /// CTA: genera preventivo, export.
 struct RisultatoPanoramaView: View {
@@ -23,7 +28,7 @@ struct RisultatoPanoramaView: View {
     @State private var errore: String?
     @State private var previewGrandeURL: URL?
     @State private var previewGrandeRuotaInVerticale = true
-    @State private var textureCopertinaURL: URL?
+    @State private var textureCopertina: TexturePianoCopertina?
     @State private var pipeline3DInCorso = false
     @State private var pipeline3DFallita = false
     @State private var pipeline3DProgresso = 0.0
@@ -96,12 +101,15 @@ struct RisultatoPanoramaView: View {
             }
         }
         .fullScreenCover(isPresented: $showMarcatura) {
-            if let url = stitchedUrl {
+            if let url = textureCopertina?.url ?? stitchedUrl {
                 MarcaturaFacciataCaricamentoView(
                     url: url,
                     ppm: metersPerPixel.map { 1.0 / $0 } ?? 110,
-                    nomeDocumento: "marcatura_\(rilievo.sessionId ?? rilievo.id.uuidString)",
+                    nomeDocumento: nomeDocumentoZone,
                     sessionId: rilievo.sessionId,
+                    planeIndex: textureCopertina?.piano.index,
+                    metriLarghezza: textureCopertina?.piano.width_m,
+                    metriAltezza: textureCopertina?.piano.height_m,
                     onChiudi: { showMarcatura = false }
                 )
             }
@@ -117,7 +125,7 @@ struct RisultatoPanoramaView: View {
         }
         .fullScreenCover(isPresented: $showFiniture) {
             ProposteFinituraView(
-                referenceURL: textureCopertinaURL ?? stitchedUrl,
+                referenceURL: textureCopertina?.url ?? stitchedUrl,
                 onChiudi: { showFiniture = false }
             )
         }
@@ -158,7 +166,7 @@ struct RisultatoPanoramaView: View {
 
     private var panoramaCard: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let url = textureCopertinaURL {
+            if let url = textureCopertina?.url {
                 Button {
                     previewGrandeRuotaInVerticale = false
                     previewGrandeURL = url
@@ -247,13 +255,13 @@ struct RisultatoPanoramaView: View {
                         kind: .secondary) {
                 showFiniture = true
             }
-            .disabled(textureCopertinaURL == nil && stitchedUrl == nil)
+            .disabled(textureCopertina == nil && stitchedUrl == nil)
 
-            BrandButton(title: "Segna zone (escluse / da rifare)", systemImage: "square.on.square.dashed",
+            BrandButton(title: "Rileva e segna zone", systemImage: "viewfinder",
                         kind: .secondary) {
                 showMarcatura = true
             }
-            .disabled(stitchedUrl == nil)
+            .disabled(textureCopertina == nil && stitchedUrl == nil)
 
             BrandButton(title: "Computo metrico", systemImage: "ruler",
                         kind: .secondary) {
@@ -281,7 +289,7 @@ struct RisultatoPanoramaView: View {
                     pipeline3DFallita = false
                     pipeline3DProgresso = 1
                     pipeline3DMessaggio = "Modello 3D texturizzato pronto"
-                    textureCopertinaURL = copertinaTexture(from: result)
+                    textureCopertina = copertinaTexture(from: result)
                     rilievo.areaLorda = result.total_area_m2
                     if !risultato3DAperto {
                         risultato3DAperto = true
@@ -316,7 +324,7 @@ struct RisultatoPanoramaView: View {
 
     private func copertinaTexture(
         from risultato: BackendAPIClient.ProjectionResult
-    ) -> URL? {
+    ) -> TexturePianoCopertina? {
         guard let piano = risultato.planes?.max(by: { $0.area_m2 < $1.area_m2 }) else {
             return nil
         }
@@ -325,7 +333,16 @@ struct RisultatoPanoramaView: View {
             $0.name == piano.file
                 || URL(fileURLWithPath: $0.name).lastPathComponent == nome
         }) else { return nil }
-        return URL(string: file.url)
+        guard let url = URL(string: file.url) else { return nil }
+        return TexturePianoCopertina(url: url, piano: piano)
+    }
+
+    private var nomeDocumentoZone: String {
+        let base = rilievo.sessionId ?? rilievo.id.uuidString
+        guard let indice = textureCopertina?.piano.index else {
+            return "marcatura_\(base)"
+        }
+        return "marcatura_\(base)_p\(indice)"
     }
 
     private func creaPreventivoDaRilievo() {

@@ -19,10 +19,11 @@ struct MarcaturaFacciataView: View {
          ppm: Double = 110,
          nomeDocumento: String = "marcatura_facciata",
          sessionId: String? = nil,
+         planeIndex: Int? = nil,
          onChiudi: (() -> Void)? = nil) {
         _model = StateObject(wrappedValue: MarcaturaEditorModel(
             immagine: immagine, ppm: ppm, nomeDocumento: nomeDocumento,
-            sessionId: sessionId))
+            sessionId: sessionId, planeIndex: planeIndex))
         self.onChiudi = onChiudi
     }
 
@@ -31,11 +32,15 @@ struct MarcaturaFacciataView: View {
             barraSuperiore
             areaCanvas
             if model.zonaSelezionata != nil { pannelloProprieta }
+            if model.aiDisponibile { barraRilevamentoAI }
             barraStrumenti
         }
         .background(EditorTheme.bg.ignoresSafeArea())
         .preferredColorScheme(.dark)
-        .task { await model.caricaProposte() }
+        .task {
+            await model.caricaProposte()
+            await model.caricaZoneAIEsistenti()
+        }
         .alert("Marcatura inviata", isPresented: Binding(
             get: { model.messaggioUploadOk != nil },
             set: { if !$0 { model.messaggioUploadOk = nil } }
@@ -64,6 +69,56 @@ struct MarcaturaFacciataView: View {
                     .ignoresSafeArea()
             }
         }
+    }
+
+    private var barraRilevamentoAI: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "viewfinder")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(EditorTheme.accento)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("GroundingDINO + SAM 2")
+                    .font(Theme.Typo.caption(11, .semibold))
+                    .foregroundStyle(EditorTheme.testo)
+                if model.aiInCorso {
+                    ProgressView(value: model.aiProgresso)
+                        .tint(EditorTheme.accento)
+                } else {
+                    Text(model.aiMessaggio)
+                        .font(Theme.Typo.caption(10))
+                        .foregroundStyle(model.aiErrore == nil
+                            ? EditorTheme.testoMuto : Theme.danger)
+                        .lineLimit(1)
+                }
+            }
+
+            Spacer(minLength: 4)
+
+            Button {
+                Task { await model.rilevaZoneAI() }
+            } label: {
+                if model.aiInCorso {
+                    ProgressView()
+                        .tint(.white)
+                        .frame(width: 86, height: 34)
+                } else {
+                    Label(model.zoneAICount > 0 ? "Ricalcola" : "Rileva AI",
+                          systemImage: "sparkles")
+                        .font(Theme.Typo.caption(11, .bold))
+                        .frame(width: 86, height: 34)
+                }
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.white)
+            .background(EditorTheme.accento,
+                        in: RoundedRectangle(cornerRadius: 7))
+            .disabled(model.aiInCorso)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(EditorTheme.panel)
+        .overlay(Rectangle().fill(EditorTheme.hair).frame(height: 1), alignment: .top)
     }
 
     // MARK: – Barra superiore
@@ -749,13 +804,20 @@ final class MarcaturaEditorModel: ObservableObject {
     let nomeDocumento: String
     /// Sessione backend a cui inviare la marcatura (nil = solo locale/share).
     let sessionId: String?
+    /// Piano della texture ortogonale mostrata. Serve per convertire UV SAM2 in pixel.
+    let planeIndex: Int?
 
     @Published var statoUpload: StatoUploadMarcatura = .nessuno
     @Published var messaggioUploadOk: String?
     @Published var messaggioUploadErrore: String?
     /// Banner informativo sulle zone proposte automaticamente (auto-dismiss).
     @Published var infoProposte: String?
+    @Published var aiInCorso = false
+    @Published var aiProgresso = 0.0
+    @Published var aiMessaggio = "Rileva automaticamente finestre e porte"
+    @Published var aiErrore: String?
     private var proposteRichieste = false
+    private let prefissoZonaAI = "AI · "
 
     @Published var zone: [ZonaFacciata] = []
     @Published var selezioneId: UUID?
@@ -779,17 +841,20 @@ final class MarcaturaEditorModel: ObservableObject {
     private let raggioManiglia: CGFloat = 26
 
     init(immagine: UIImage, ppm: Double, nomeDocumento: String,
-         sessionId: String? = nil) {
+         sessionId: String? = nil, planeIndex: Int? = nil) {
         self.immagine = immagine
         self.ppm = ppm
         self.nomeDocumento = nomeDocumento
         self.sessionId = sessionId
+        self.planeIndex = planeIndex
         carica()
     }
 
     var dimensioneImmagine: CGSize { immagine.size }
     var puoUndo: Bool { !undoStack.isEmpty }
     var puoRedo: Bool { !redoStack.isEmpty }
+    var aiDisponibile: Bool { sessionId != nil && planeIndex != nil }
+    var zoneAICount: Int { zone.filter { $0.nome.hasPrefix(prefissoZonaAI) }.count }
 
     var zonaSelezionata: ZonaFacciata? {
         zone.first { $0.id == selezioneId }
@@ -1052,6 +1117,94 @@ final class MarcaturaEditorModel: ObservableObject {
         zone.filter { $0.tipo == tipo && $0.visibile }.reduce(0) { $0 + $1.perimetroM }
     }
 
+    // MARK: GroundingDINO + SAM2
+
+    /// Importa il rilevamento gia calcolato senza rilanciare i modelli.
+    func caricaZoneAIEsistenti() async {
+        guard let sessionId, planeIndex != nil, zoneAICount == 0 else { return }
+        guard let result = try? await BackendAPIClient.shared.openingStatus(
+            sessionId: sessionId), result.state == "complete" else { return }
+        importaZoneAI(result, registra: false)
+    }
+
+    func rilevaZoneAI() async {
+        guard let sessionId, planeIndex != nil, !aiInCorso else { return }
+        aiInCorso = true
+        aiErrore = nil
+        aiProgresso = 0
+        aiMessaggio = "Accodo GroundingDINO"
+        defer { aiInCorso = false }
+
+        do {
+            var result = try await BackendAPIClient.shared.detectOpenings(
+                sessionId: sessionId)
+            while result.state == "queued" || result.state == "running" {
+                aiProgresso = result.progress
+                aiMessaggio = result.message
+                try await Task.sleep(for: .seconds(2))
+                result = try await BackendAPIClient.shared.openingStatus(
+                    sessionId: sessionId)
+            }
+            guard result.state == "complete" else {
+                throw NSError(
+                    domain: "AcrobaticaZoneAI", code: 1,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        result.error.isEmpty ? "Rilevamento non riuscito" : result.error])
+            }
+            aiProgresso = 1
+            importaZoneAI(result, registra: true)
+        } catch is CancellationError {
+            aiMessaggio = "Rilevamento interrotto"
+        } catch {
+            aiErrore = error.localizedDescription
+            aiMessaggio = error.localizedDescription
+        }
+    }
+
+    private func importaZoneAI(
+        _ result: BackendAPIClient.OpeningDetectionResult,
+        registra: Bool
+    ) {
+        guard let planeIndex else { return }
+        let aperture = result.openings.filter {
+            $0.plane_index == planeIndex && $0.excluded
+        }
+        if registra { registraUndo() }
+        zone.removeAll { $0.nome.hasPrefix(prefissoZonaAI) }
+
+        for apertura in aperture {
+            let punti = apertura.polygon_uv.compactMap { uv -> CGPoint? in
+                guard uv.count >= 2 else { return nil }
+                let u = min(max(uv[0], 0), 1)
+                let v = min(max(uv[1], 0), 1)
+                return CGPoint(
+                    x: CGFloat(u) * dimensioneImmagine.width,
+                    y: CGFloat(1 - v) * dimensioneImmagine.height)
+            }
+            guard punti.count >= 3 else { continue }
+            zone.append(ZonaFacciata(
+                nome: prefissoZonaAI + nomeApertura(apertura.type),
+                tipo: .esclusa,
+                puntiPx: punti,
+                ppm: ppm))
+        }
+        selezioneId = zone.last(where: { $0.nome.hasPrefix(prefissoZonaAI) })?.id
+        salva()
+        aiErrore = nil
+        aiMessaggio = aperture.isEmpty
+            ? "Nessuna apertura rilevata su questa faccia"
+            : "\(aperture.count) zone segmentate e modificabili"
+        mostraInfoProposte(aiMessaggio)
+    }
+
+    private func nomeApertura(_ tipo: String) -> String {
+        switch tipo {
+        case "door": return "Porta"
+        case "shop_window": return "Vetrina"
+        default: return "Finestra"
+        }
+    }
+
     // MARK: Pre-marcatura automatica (zone fuori-piano proposte dal backend)
 
     /// Scarica le zone "Esclusa" proposte (balconi/aggetti >15 cm dal piano)
@@ -1224,6 +1377,9 @@ struct MarcaturaFacciataCaricamentoView: View {
     let ppm: Double
     let nomeDocumento: String
     var sessionId: String? = nil
+    var planeIndex: Int? = nil
+    var metriLarghezza: Double? = nil
+    var metriAltezza: Double? = nil
     let onChiudi: () -> Void
 
     @State private var immagine: UIImage?
@@ -1233,9 +1389,10 @@ struct MarcaturaFacciataCaricamentoView: View {
         Group {
             if let immagine {
                 MarcaturaFacciataView(immagine: immagine,
-                                      ppm: ppm,
+                                      ppm: ppmEffettivo(immagine),
                                       nomeDocumento: nomeDocumento,
                                       sessionId: sessionId,
+                                      planeIndex: planeIndex,
                                       onChiudi: onChiudi)
             } else {
                 ZStack {
@@ -1274,6 +1431,17 @@ struct MarcaturaFacciataCaricamentoView: View {
         } catch {
             self.errore = error.localizedDescription
         }
+    }
+
+    private func ppmEffettivo(_ immagine: UIImage) -> Double {
+        var campioni: [Double] = []
+        if let metriLarghezza, metriLarghezza > 0 {
+            campioni.append(Double(immagine.size.width) / metriLarghezza)
+        }
+        if let metriAltezza, metriAltezza > 0 {
+            campioni.append(Double(immagine.size.height) / metriAltezza)
+        }
+        return campioni.isEmpty ? ppm : campioni.reduce(0, +) / Double(campioni.count)
     }
 }
 
