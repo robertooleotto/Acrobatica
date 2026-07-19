@@ -3753,6 +3753,12 @@ final class Mesh3DModel: ObservableObject {
                 ocTextureNode = radice
                 meshOriginale = em
                 installaMesh(em)
+                // La raw USDZ e' contemporaneamente geometria editabile e
+                // livello texturizzato. Registra materiali e triangoli dopo
+                // l'installazione, cosi' il Box la clippa durante il drag e il
+                // crop definitivo elimina anche le porzioni della texture OC.
+                registraPartiTexture(radice)
+                aggiornaClip()
                 mostraTexturaOC = true
             } else {
                 errore = "Mesh senza triangoli leggibili"
