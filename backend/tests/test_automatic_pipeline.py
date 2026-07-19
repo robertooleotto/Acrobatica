@@ -97,3 +97,41 @@ def test_plane_edits_preserve_the_first_texture_frame():
         "punto": [0, 0, 0],
         "corners": [[0, 0, 0], [1, 0, 0], [1, 1, 0]],
     }
+
+
+def test_texture_frames_follow_stable_names_when_local_ids_shift():
+    previous = {
+        "planes": [
+            {
+                "id": 2, "nome": "Facciata - seg 1",
+                "normale": [0, 0, 1], "punto": [0, 0, 0],
+                "corners": [[0, 0, 0], [1, 0, 0], [1, 1, 0]],
+                "texture_frame": {"marker": "facade"},
+            },
+            {
+                "id": 3, "nome": "Spalletta - seg 2",
+                "normale": [1, 0, 0], "punto": [1, 0, 0],
+                "corners": [[1, 0, 0], [1, 0, 1], [1, 1, 1]],
+                "texture_frame": {"marker": "reveal"},
+            },
+        ],
+    }
+    reloaded = {
+        "planes": [
+            {
+                "id": 1, "nome": "Facciata - seg 1",
+                "normale": [0, 0, 1], "punto": [0, 0, 0],
+                "corners": [[0, 0, 0], [1, 0, 0], [1, 1, 0]],
+            },
+            {
+                "id": 2, "nome": "Spalletta - seg 2",
+                "normale": [1, 0, 0], "punto": [1, 0, 0],
+                "corners": [[1, 0, 0], [1, 0, 1], [1, 1, 1]],
+            },
+        ],
+    }
+
+    result = facade_sessions._preserve_texture_frames(reloaded, previous)
+
+    assert result["planes"][0]["texture_frame"] == {"marker": "facade"}
+    assert result["planes"][1]["texture_frame"] == {"marker": "reveal"}

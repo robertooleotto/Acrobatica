@@ -1153,9 +1153,13 @@ def _preserve_texture_frames(payload: dict, previous: dict | None = None) -> dic
             output_planes.append(raw_plane)
             continue
         plane = dict(raw_plane)
-        prior = previous_by_id.get(str(plane.get("id")))
-        if prior is None and plane.get("nome"):
-            prior = previous_by_name.get(str(plane["nome"]))
+        # Gli ID locali vengono rinumerati quando l'app ricostruisce le facce.
+        # Il nome segmentato resta invece stabile; usarlo per primo impedisce di
+        # spostare il texture_frame sul piano precedente dopo una ricarica.
+        prior = (previous_by_name.get(str(plane.get("nome")))
+                 if plane.get("nome") else None)
+        if prior is None:
+            prior = previous_by_id.get(str(plane.get("id")))
         frame = None
         if isinstance(prior, dict) and isinstance(prior.get("texture_frame"), dict):
             frame = prior["texture_frame"]
