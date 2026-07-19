@@ -901,9 +901,9 @@ private enum SviluppoFacciateBuilder {
                 piani[indice].orizzontale = -corrente.orizzontale
                 piani[indice].minX = -corrente.maxX
                 piani[indice].maxX = -corrente.minX
-                // La faccia viene ribaltata per portare lo spigolo condiviso
-                // sul lato corretto: anche U deve seguire lo stesso ribaltamento.
-                piani[indice].uv = corrente.uv.map { SIMD2(1 - $0.x, $0.y) }
+                // Il ribaltamento geometrico apre rigidamente il piano attorno
+                // allo spigolo condiviso. Le UV restano legate ai loro vertici:
+                // invertirle qui specchierebbe una seconda volta la texture.
                 piani[indice].invertiU = true
             }
         }
