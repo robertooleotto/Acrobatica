@@ -37,7 +37,15 @@ _DETECTOR_MODEL = os.environ.get(
     "ACRO_OPENING_DETECTOR_MODEL", "IDEA-Research/grounding-dino-tiny")
 _SEGMENTER_MODEL = os.environ.get(
     "ACRO_OPENING_SEGMENTER_MODEL", "facebook/sam2.1-hiera-tiny")
-_PROMPT_LABELS = [["window", "door", "shop window"]]
+_PROMPT_LABELS = [[
+    "window",
+    "door",
+    "shop window",
+    "balcony door",
+    "French window",
+    "storefront",
+    "glass door",
+]]
 
 
 def _now_iso() -> str:
@@ -338,8 +346,10 @@ def _detect_boxes(image: Image.Image, runtime) -> list[dict]:
         outputs = model(**inputs)
     result = processor.post_process_grounded_object_detection(
         outputs, inputs.input_ids,
-        threshold=float(os.environ.get("ACRO_OPENING_BOX_THRESHOLD", "0.28")),
-        text_threshold=float(os.environ.get("ACRO_OPENING_TEXT_THRESHOLD", "0.22")),
+        # Il computo richiede alto richiamo: i falsi positivi sono revisionabili,
+        # mentre un'apertura non proposta non può essere recuperata da SAM2.
+        threshold=float(os.environ.get("ACRO_OPENING_BOX_THRESHOLD", "0.20")),
+        text_threshold=float(os.environ.get("ACRO_OPENING_TEXT_THRESHOLD", "0.17")),
         target_sizes=[image.size[::-1]],
     )[0]
     labels = result.get("text_labels")

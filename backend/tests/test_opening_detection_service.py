@@ -117,3 +117,8 @@ def test_uniform_regions_and_non_facade_planes_are_skipped():
     assert service._proposal_has_visual_detail(detailed, [10, 10, 90, 90])
     assert not service._plane_can_have_openings({"nome": "Spalletta 3"})
     assert service._plane_can_have_openings({"nome": "Facciata 1"})
+
+
+def test_opening_prompts_cover_occluded_balcony_and_storefront_types():
+    prompts = {label.lower() for label in service._PROMPT_LABELS[0]}
+    assert {"window", "door", "balcony door", "french window", "storefront"} <= prompts
