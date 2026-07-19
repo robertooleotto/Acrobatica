@@ -3544,6 +3544,7 @@ final class Mesh3DModel: ObservableObject {
         let node: SCNNode
         let sources: [SCNGeometrySource]
         let materials: [SCNMaterial]
+        let vertexCount: Int
         let triangles: [[SIMD3<UInt32>]]
         let centroids: [[SIMD3<Float>]]
     }
@@ -4159,6 +4160,7 @@ final class Mesh3DModel: ObservableObject {
                 node: node,
                 sources: geometry.sources,
                 materials: geometry.materials,
+                vertexCount: positions.count,
                 triangles: elementTriangles,
                 centroids: elementCentroids))
         }
@@ -4237,17 +4239,15 @@ final class Mesh3DModel: ObservableObject {
                     }
                     if keep {
                         let t = triangles[i]
-                        keptIndices.append(t.x)
-                        keptIndices.append(t.y)
-                        keptIndices.append(t.z)
+                        guard Int(t.x) < part.vertexCount,
+                              Int(t.y) < part.vertexCount,
+                              Int(t.z) < part.vertexCount
+                        else { continue }
+                        keptIndices.append(contentsOf: [t.x, t.y, t.z])
                     }
                 }
-                let data = keptIndices.withUnsafeBytes { Data($0) }
                 elements.append(SCNGeometryElement(
-                    data: data,
-                    primitiveType: .triangles,
-                    primitiveCount: keptIndices.count / 3,
-                    bytesPerIndex: MemoryLayout<UInt32>.size))
+                    indices: keptIndices, primitiveType: .triangles))
             }
             let geometry = SCNGeometry(sources: part.sources, elements: elements)
             geometry.materials = part.materials
@@ -4973,11 +4973,18 @@ final class Mesh3DModel: ObservableObject {
             f.poligono = p.corners.compactMap { c in
                 c.count == 3 ? SIMD3<Float>(c[0], c[1], c[2]) : nil
             }
-            if let tri = p.triangoli { f.triangoli = Set(tri) }   // maschera per la proiezione
+            if !adattaAllaMeshCorrente, let tri = p.triangoli {
+                // Gli indici appartengono esattamente alla revisione inviata al
+                // detector. Non importare mai riferimenti fuori dai buffer.
+                f.triangoli = Set(tri.filter { mesh.triangles.indices.contains($0) })
+            }
             facce.append(f)
         }
         if adattaAllaMeshCorrente {
-            for i in facce.indices where facce[i].triangoli.isEmpty {
+            // La mesh e' cambiata mentre il detector lavorava: gli indici remoti
+            // non sono piu' semanticamente validi anche quando rientrano nel
+            // nuovo range. Ricava nuovamente il supporto dal piano geometrico.
+            for i in facce.indices {
                 facce[i].triangoli = trovaSupportoPiano(facce[i])
             }
             facce.removeAll { $0.triangoli.isEmpty }
@@ -5347,15 +5354,24 @@ final class Mesh3DModel: ObservableObject {
         guard let i = facce.firstIndex(where: { $0.id == id }),
               let p = facce[i].pianoPunto, let n0 = facce[i].pianoNormale,
               !facce[i].triangoli.isEmpty else { return }
+        let triangoliValidi = facce[i].triangoli.filter {
+            mesh.triangles.indices.contains($0)
+        }
+        guard !triangoliValidi.isEmpty else {
+            facce[i].triangoli = []
+            facce[i].poligono = []
+            return
+        }
+        facce[i].triangoli = Set(triangoliValidi)
         let n = simd_normalize(n0)
         var right = simd_cross(gravitaSu, n)
         if simd_length(right) < 1e-5 { right = simd_cross(SIMD3(1, 0, 0), n) }
         right = simd_normalize(right)
         let up = simd_normalize(simd_cross(n, right))
         var xs: [Float] = [], ys: [Float] = []
-        xs.reserveCapacity(facce[i].triangoli.count * 3)
-        ys.reserveCapacity(facce[i].triangoli.count * 3)
-        for t in facce[i].triangoli {
+        xs.reserveCapacity(triangoliValidi.count * 3)
+        ys.reserveCapacity(triangoliValidi.count * 3)
+        for t in triangoliValidi {
             let tri = mesh.triangles[t]
             for v in [mesh.vertices[Int(tri.x)], mesh.vertices[Int(tri.y)], mesh.vertices[Int(tri.z)]] {
                 xs.append(simd_dot(v - p, right)); ys.append(simd_dot(v - p, up))

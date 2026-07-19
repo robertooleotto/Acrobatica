@@ -163,15 +163,40 @@ struct EditableMesh: @unchecked Sendable {
 
     static func leggiIndici(_ e: SCNGeometryElement) -> [UInt32]? {
         let n = e.primitiveCount * 3
-        guard n > 0 else { return nil }
+        guard n > 0, e.data.count >= n * e.bytesPerIndex else { return nil }
+        // Alcuni USDZ prodotti da Object Capture espongono bytesPerIndex = 4,
+        // ma SceneKit restituisce un buffer con stride di 8 byte per indice.
+        // Usare bytesPerIndex come passo legge alternativamente indice e
+        // padding, collegando vertici lontani dopo qualunque ricostruzione.
+        let packedSize = n * e.bytesPerIndex
+        let indexStride: Int
+        if e.data.count == packedSize {
+            indexStride = e.bytesPerIndex
+        } else if e.data.count.isMultiple(of: n),
+                  e.data.count / n >= e.bytesPerIndex {
+            indexStride = e.data.count / n
+        } else {
+            indexStride = e.bytesPerIndex
+        }
         var out: [UInt32] = []
         out.reserveCapacity(n)
         e.data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
             switch e.bytesPerIndex {
+            case 1:
+                for k in 0..<n {
+                    out.append(UInt32(raw.loadUnaligned(
+                        fromByteOffset: k * indexStride, as: UInt8.self)))
+                }
             case 2:
-                for k in 0..<n { out.append(UInt32(raw.load(fromByteOffset: k * 2, as: UInt16.self))) }
+                for k in 0..<n {
+                    out.append(UInt32(raw.loadUnaligned(
+                        fromByteOffset: k * indexStride, as: UInt16.self)))
+                }
             case 4:
-                for k in 0..<n { out.append(raw.load(fromByteOffset: k * 4, as: UInt32.self)) }
+                for k in 0..<n {
+                    out.append(raw.loadUnaligned(
+                        fromByteOffset: k * indexStride, as: UInt32.self))
+                }
             default:
                 break
             }
