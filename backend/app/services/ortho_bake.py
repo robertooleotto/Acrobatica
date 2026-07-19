@@ -457,16 +457,20 @@ def seal_texture_edges(image: np.ndarray) -> np.ndarray:
     """
     if image.ndim != 3 or image.shape[2] != 4:
         return image
-    missing = image[..., 3] < 255
-    if not missing.any():
+    # Il remap bilineare puo produrre alfa 1...254 su pixel perfettamente
+    # validi. Inpaintare anche quelli ricostruisce intere fasce da pochi pixel
+    # opachi e stira visivamente la facciata. Sono buchi solo i texel alfa zero.
+    missing = image[..., 3] == 0
+    if np.all(image[..., 3] == 255):
         return image
     if missing.all():
         return image
     result = image.copy()
-    result[..., :3] = cv2.inpaint(
-        image[..., :3], missing.astype(np.uint8) * 255,
-        3.0, cv2.INPAINT_TELEA,
-    )
+    if missing.any():
+        result[..., :3] = cv2.inpaint(
+            image[..., :3], missing.astype(np.uint8) * 255,
+            3.0, cv2.INPAINT_TELEA,
+        )
     result[..., 3] = 255
     return result
 

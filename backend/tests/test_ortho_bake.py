@@ -156,3 +156,17 @@ def test_seal_texture_edges_removes_transparent_sampling_gap():
 
     empty = np.zeros((4, 4, 4), np.uint8)
     assert np.array_equal(ortho_bake.seal_texture_edges(empty), empty)
+
+
+def test_seal_texture_edges_preserves_partially_opaque_remap_pixels():
+    image = np.zeros((6, 7, 4), np.uint8)
+    image[..., 0] = np.arange(7, dtype=np.uint8)[None, :] * 30
+    image[..., 1] = np.arange(6, dtype=np.uint8)[:, None] * 35
+    image[..., 2] = 120
+    image[..., 3] = 254
+    original_rgb = image[..., :3].copy()
+
+    sealed = ortho_bake.seal_texture_edges(image)
+
+    assert np.array_equal(sealed[..., :3], original_rgb)
+    assert np.all(sealed[..., 3] == 255)
