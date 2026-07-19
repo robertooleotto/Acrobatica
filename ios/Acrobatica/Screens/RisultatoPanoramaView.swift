@@ -289,7 +289,7 @@ struct RisultatoPanoramaView: View {
                     pipeline3DFallita = false
                     pipeline3DProgresso = 1
                     pipeline3DMessaggio = "Modello 3D texturizzato pronto"
-                    textureCopertina = copertinaTexture(from: result)
+                    await aggiornaCopertinaTexture(from: result)
                     rilievo.areaLorda = result.total_area_m2
                     if !risultato3DAperto {
                         risultato3DAperto = true
@@ -335,6 +335,29 @@ struct RisultatoPanoramaView: View {
         }) else { return nil }
         guard let url = URL(string: file.url) else { return nil }
         return TexturePianoCopertina(url: url, piano: piano)
+    }
+
+    @MainActor
+    private func aggiornaCopertinaTexture(
+        from risultato: BackendAPIClient.ProjectionResult
+    ) async {
+        guard let remota = copertinaTexture(from: risultato),
+              let sessionId = rilievo.sessionId else {
+            textureCopertina = copertinaTexture(from: risultato)
+            return
+        }
+        do {
+            let bundle = try await BackendAPIClient.shared.downloadProjectionBundle(
+                sessionId: sessionId, files: risultato.files)
+            let nome = URL(fileURLWithPath: remota.piano.file).lastPathComponent
+            let locale = bundle[remota.piano.file] ?? bundle.first(where: {
+                URL(fileURLWithPath: $0.key).lastPathComponent == nome
+            })?.value
+            textureCopertina = TexturePianoCopertina(
+                url: locale ?? remota.url, piano: remota.piano)
+        } catch {
+            textureCopertina = remota
+        }
     }
 
     private var nomeDocumentoZone: String {
@@ -412,7 +435,17 @@ private struct ProcessedFacadeImage: View {
 
     private func load() async {
         do {
-            let (data, _) = try await URLSession.shared.data(from: url)
+            let data: Data
+            if url.isFileURL {
+                data = try Data(contentsOf: url)
+            } else {
+                let (remoteData, response) = try await URLSession.shared.data(from: url)
+                if let http = response as? HTTPURLResponse,
+                   !(200..<300).contains(http.statusCode) {
+                    throw URLError(.badServerResponse)
+                }
+                data = remoteData
+            }
             guard let ui = UIImage(data: data) else {
                 await MainActor.run { failed = true }
                 return
@@ -460,7 +493,17 @@ private struct FacadeCoverImage: View {
 
     private func load() async {
         do {
-            let (data, _) = try await URLSession.shared.data(from: url)
+            let data: Data
+            if url.isFileURL {
+                data = try Data(contentsOf: url)
+            } else {
+                let (remoteData, response) = try await URLSession.shared.data(from: url)
+                if let http = response as? HTTPURLResponse,
+                   !(200..<300).contains(http.statusCode) {
+                    throw URLError(.badServerResponse)
+                }
+                data = remoteData
+            }
             guard let ui = UIImage(data: data) else {
                 await MainActor.run { failed = true }
                 return
@@ -513,7 +556,17 @@ private struct FacadeImageFullscreenView: View {
 
     private func load() async {
         do {
-            let (data, _) = try await URLSession.shared.data(from: url)
+            let data: Data
+            if url.isFileURL {
+                data = try Data(contentsOf: url)
+            } else {
+                let (remoteData, response) = try await URLSession.shared.data(from: url)
+                if let http = response as? HTTPURLResponse,
+                   !(200..<300).contains(http.statusCode) {
+                    throw URLError(.badServerResponse)
+                }
+                data = remoteData
+            }
             guard let ui = UIImage(data: data) else {
                 await MainActor.run { failed = true }
                 return
