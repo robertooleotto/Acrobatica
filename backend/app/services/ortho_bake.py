@@ -474,40 +474,25 @@ def seal_texture_edges(image: np.ndarray) -> np.ndarray:
 def _write_textured_mesh(out_dir: str, frames: list[tuple[int, str, str, PlaneFrame]]) -> tuple[str, str]:
     obj_name = "planes_textured.obj"
     mtl_name = "planes_textured.mtl"
-    all_corners = [point for _, _, _, frame in frames for point in frame.corners]
-    diagonal = (float(np.linalg.norm(np.ptp(np.asarray(all_corners), axis=0)))
-                if all_corners else 1.0)
-    weld_tolerance = max(diagonal * 1e-7, 1e-9)
-    vertices: list[np.ndarray] = []
-    frame_vertices: list[list[int]] = []
-    for _, _, _, frame in frames:
-        indices = []
-        for point in frame.corners:
-            shared = next(
-                (index for index, existing in enumerate(vertices)
-                 if np.linalg.norm(point - existing) <= weld_tolerance),
-                None,
-            )
-            if shared is None:
-                shared = len(vertices)
-                vertices.append(np.asarray(point, dtype=float))
-            indices.append(shared + 1)
-        frame_vertices.append(indices)
-
     obj = ["# Acrobatica textured planes", f"mtllib {mtl_name}"]
-    obj += [f"v {p[0]:.9g} {p[1]:.9g} {p[2]:.9g}" for p in vertices]
     mtl = ["# Acrobatica projected materials"]
+    vertex_offset = 1
     uv_offset = 1
-    for (index, name, texture, pf), vertex_indices in zip(frames, frame_vertices):
+    for index, name, texture, pf in frames:
         material = f"plane_{index}_{_sanitize(name)}"
         obj += [f"o {material}", f"g {material}", f"usemtl {material}"]
+        # SceneKit richiede i vertici locali dentro ciascun oggetto OBJ. Le
+        # coordinate dei bordi condivisi coincidono, ma gli indici restano
+        # separati per conservare correttamente materiale e UV di ogni piano.
+        obj += [f"v {p[0]:.9g} {p[1]:.9g} {p[2]:.9g}" for p in pf.corners]
         obj += [f"vt {uv[0]:.9g} {uv[1]:.9g}" for uv in pf.polygon_uv]
         for k in range(1, len(pf.corners) - 1):
             ids = (0, k, k + 1)
             obj.append("f " + " ".join(
-                f"{vertex_indices[q]}/{uv_offset + q}" for q in ids))
+                f"{vertex_offset + q}/{uv_offset + q}" for q in ids))
         mtl += [f"newmtl {material}", "Ka 1 1 1", "Kd 1 1 1",
                 "illum 1", f"map_Kd {texture}", ""]
+        vertex_offset += len(pf.corners)
         uv_offset += len(pf.corners)
     Path(out_dir, obj_name).write_text("\n".join(obj) + "\n")
     Path(out_dir, mtl_name).write_text("\n".join(mtl) + "\n")

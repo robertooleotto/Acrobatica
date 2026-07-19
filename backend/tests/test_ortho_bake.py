@@ -114,7 +114,7 @@ def test_bake_writes_textured_plane_bundle(tmp_path):
     assert "map_Kd plane_1_facciata.png" in (out / "planes_textured.mtl").read_text()
 
 
-def test_textured_mesh_welds_shared_positions_but_keeps_separate_uvs(tmp_path):
+def test_textured_mesh_keeps_scenekit_groups_with_matching_seams(tmp_path):
     def frame(corners):
         points = np.asarray(corners, dtype=float)
         return ortho_bake.PlaneFrame(
@@ -134,11 +134,14 @@ def test_textured_mesh_welds_shared_positions_but_keeps_separate_uvs(tmp_path):
     )
 
     lines = (tmp_path / "planes_textured.obj").read_text().splitlines()
-    assert len([line for line in lines if line.startswith("v ")]) == 6
+    vertices = [line for line in lines if line.startswith("v ")]
+    assert len(vertices) == 8
     assert len([line for line in lines if line.startswith("vt ")]) == 8
+    assert vertices[1] == vertices[4]
+    assert vertices[2] == vertices[7]
     faces = [line for line in lines if line.startswith("f ")]
     assert any(token.startswith("2/") for token in faces[0].split()[1:])
-    assert any(token.startswith("2/") for line in faces[2:] for token in line.split()[1:])
+    assert any(token.startswith("5/") for line in faces[2:] for token in line.split()[1:])
 
 
 def test_seal_texture_edges_removes_transparent_sampling_gap():
