@@ -11,13 +11,7 @@ struct SplashView: View {
         ZStack {
             Theme.navy.ignoresSafeArea()
             VStack(spacing: 20) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 24).fill(Theme.yellow)
-                        .frame(width: 84, height: 84)
-                    Image(systemName: "building.2.fill")
-                        .font(.system(size: 40, weight: .semibold))
-                        .foregroundStyle(Theme.navy)
-                }
+                AcrobaticaLogoMark(size: 84, cornerRadius: 20)
                 Text("Acrobatica")
                     .font(.system(size: 32, weight: .bold))
                     .foregroundStyle(.white)
@@ -59,13 +53,7 @@ struct LoginView: View {
         ScrollView {
             VStack(spacing: 22) {
                 VStack(spacing: 8) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 18).fill(Theme.yellow)
-                            .frame(width: 64, height: 64)
-                        Image(systemName: "building.2.fill")
-                            .font(.system(size: 30, weight: .semibold))
-                            .foregroundStyle(Theme.navy)
-                    }
+                    AcrobaticaLogoMark(size: 64, cornerRadius: 15)
                     Text("Acrobatica").font(.system(size: 26, weight: .bold)).foregroundStyle(Theme.navy)
                     Text("Rilievi di facciata dal suolo")
                         .font(Theme.Typo.body(14)).foregroundStyle(Theme.muted)

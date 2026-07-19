@@ -192,7 +192,25 @@ struct DSField: View {
     }
 }
 
-// MARK: - Wordmark (tile giallo + nome)
+// MARK: - Marchio
+
+struct AcrobaticaLogoMark: View {
+    var size: CGFloat
+    var cornerRadius: CGFloat? = nil
+
+    var body: some View {
+        Image("AcrobaticaLogo")
+            .resizable()
+            .scaledToFit()
+            .frame(width: size, height: size)
+            .clipShape(RoundedRectangle(
+                cornerRadius: cornerRadius ?? size * 0.22,
+                style: .continuous))
+            .accessibilityHidden(true)
+    }
+}
+
+// MARK: - Wordmark (icona app + nome)
 
 struct Wordmark: View {
     var size: CGFloat = 40
@@ -201,13 +219,7 @@ struct Wordmark: View {
 
     var body: some View {
         HStack(spacing: size * 0.3) {
-            ZStack {
-                RoundedRectangle(cornerRadius: size * 0.28).fill(Theme.yellow)
-                Image(systemName: "building.2.fill")
-                    .font(.system(size: size * 0.5, weight: .semibold))
-                    .foregroundStyle(Theme.navy)
-            }
-            .frame(width: size, height: size)
+            AcrobaticaLogoMark(size: size)
             Text("Acrobatica")
                 .font(.system(size: word, weight: .bold))
                 .foregroundStyle(onNavy ? .white : Theme.navy)

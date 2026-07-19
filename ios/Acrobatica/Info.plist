@@ -32,7 +32,14 @@
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Acrobatica salva le foto scattate nella tua libreria foto.</string>
 	<key>UILaunchScreen</key>
-	<dict/>
+	<dict>
+		<key>UIColorName</key>
+		<string>LaunchBackground</string>
+		<key>UIImageName</key>
+		<string>AcrobaticaLogo</string>
+		<key>UIImageRespectsSafeAreaInsets</key>
+		<true/>
+	</dict>
 	<key>UIRequiredDeviceCapabilities</key>
 	<array>
 		<string>arkit</string>
