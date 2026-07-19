@@ -209,12 +209,6 @@ struct RisultatoPanoramaView: View {
                 .padding(.vertical, 6)
             }
 
-            BrandButton(title: "Definisci facciata (4 tap)", systemImage: "viewfinder.rectangular",
-                        kind: .primary) {
-                showRectifyFacade = true
-            }
-            .disabled(rilievo.sessionId == nil || stitchedUrl == nil)
-
             if rectifiedFacadeUrl != nil {
                 BrandButton(title: metersPerPixel == nil ? "Imposta scala (2 tap)" :
                                 "Scala impostata ✓ — rivedi",
