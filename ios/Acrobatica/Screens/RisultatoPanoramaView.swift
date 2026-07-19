@@ -32,7 +32,6 @@ struct RisultatoPanoramaView: View {
             VStack(alignment: .leading, spacing: 18) {
                 panoramaCard
                 metriche
-                aperture
                 actionButtons
             }
             .padding(.horizontal, 16)
@@ -178,65 +177,11 @@ struct RisultatoPanoramaView: View {
         HStack(spacing: 12) {
             MetricCard(label: "Area lorda", value: areaString(rilievo.areaLorda))
             MetricCard(label: "Area netta", value: areaString(rilievo.areaNetta), highlight: true)
-            MetricCard(label: "Aperture",   value: "\(rilievo.aperture.count)")
         }
     }
 
     private func areaString(_ m2: Double) -> String {
         m2 > 0 ? String(format: "%.1f m²", m2) : "—"
-    }
-
-    // MARK: – Aperture
-
-    private var aperture: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Aperture").font(Theme.Typo.title(15)).foregroundStyle(Theme.navy)
-                Spacer()
-                Button {
-                    let nuova = Apertura(tipo: .finestra)
-                    rilievo.aperture.append(nuova)
-                } label: {
-                    Label("Aggiungi", systemImage: "plus")
-                        .font(Theme.Typo.caption(12, .semibold))
-                        .foregroundColor(Theme.navy)
-                }
-            }
-            if rilievo.aperture.isEmpty {
-                Text("Tocca le finestre/porte sul panorama, oppure aggiungi manualmente.")
-                    .font(Theme.Typo.body(13)).foregroundStyle(Theme.muted)
-            } else {
-                ForEach(rilievo.aperture) { a in
-                    HStack {
-                        Image(systemName: iconFor(a.tipo))
-                            .foregroundStyle(Theme.navy)
-                            .frame(width: 28)
-                        Text(a.tipo.rawValue.capitalized)
-                            .font(Theme.Typo.body(14))
-                            .foregroundStyle(Theme.navy)
-                        Spacer()
-                        if let m = a.areaM2 {
-                            Text(String(format: "%.2f m²", m)).font(Theme.Typo.caption(12))
-                                .foregroundStyle(Theme.muted)
-                        }
-                    }
-                    .padding(.vertical, 6)
-                    Divider()
-                }
-            }
-        }
-        .padding(14)
-        .background(Theme.white, in: RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Theme.hair, lineWidth: 1))
-    }
-
-    private func iconFor(_ t: Apertura.Tipo) -> String {
-        switch t {
-        case .finestra: return "rectangle.split.2x2"
-        case .porta:    return "door.right.hand.open"
-        case .balcone:  return "square.split.bottomrightquarter"
-        case .altro:    return "square.dashed"
-        }
     }
 
     // MARK: – Action buttons
