@@ -30,7 +30,6 @@ struct RisultatoPanoramaView: View {
     @State private var pipeline3DFallita = false
     @State private var pipeline3DProgresso = 0.0
     @State private var pipeline3DMessaggio = ""
-    @State private var risultato3DAperto = false
 
     var body: some View {
         ScrollView {
@@ -281,10 +280,6 @@ struct RisultatoPanoramaView: View {
                     pipeline3DMessaggio = "Modello 3D texturizzato pronto"
                     await aggiornaCopertinaTexture(from: result)
                     rilievo.areaLorda = result.total_area_m2
-                    if !risultato3DAperto {
-                        risultato3DAperto = true
-                        showEditor3D = true
-                    }
                     return
                 case "failed":
                     pipeline3DInCorso = false
