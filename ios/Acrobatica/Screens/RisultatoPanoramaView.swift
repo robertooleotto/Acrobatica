@@ -15,12 +15,15 @@ struct RisultatoPanoramaView: View {
     @State private var showMeasureScale = false
     @State private var showMarcatura = false      // editor marcatura zone (m²)
     @State private var showEditor3D = false        // editor 3D mesh (pulizia + piani)
+    @State private var showFiniture = false        // proposte colore/finitura intonaco
     @State private var showComputoMetrico = false  // sviluppo 2D e superfici dei piani
     @State private var rectifiedFacadeUrl: URL?
     @State private var metersPerPixel: Double?
     @State private var orthoComposite: URL?
     @State private var errore: String?
     @State private var previewGrandeURL: URL?
+    @State private var previewGrandeRuotaInVerticale = true
+    @State private var textureCopertinaURL: URL?
     @State private var pipeline3DInCorso = false
     @State private var pipeline3DFallita = false
     @State private var pipeline3DProgresso = 0.0
@@ -84,7 +87,10 @@ struct RisultatoPanoramaView: View {
             set: { if !$0 { previewGrandeURL = nil } }
         )) {
             if let url = previewGrandeURL {
-                FacadeImageFullscreenView(url: url) {
+                FacadeImageFullscreenView(
+                    url: url,
+                    ruotaInVerticale: previewGrandeRuotaInVerticale
+                ) {
                     previewGrandeURL = nil
                 }
             }
@@ -108,6 +114,12 @@ struct RisultatoPanoramaView: View {
             } else {
                 EditorMesh3DView(onChiudi: { showEditor3D = false })
             }
+        }
+        .fullScreenCover(isPresented: $showFiniture) {
+            ProposteFinituraView(
+                referenceURL: textureCopertinaURL ?? stitchedUrl,
+                onChiudi: { showFiniture = false }
+            )
         }
         .fullScreenCover(isPresented: $showComputoMetrico) {
             if let sid = rilievo.sessionId {
@@ -146,7 +158,15 @@ struct RisultatoPanoramaView: View {
 
     private var panoramaCard: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if elaborazioneInCorso {
+            if let url = textureCopertinaURL {
+                Button {
+                    previewGrandeRuotaInVerticale = false
+                    previewGrandeURL = url
+                } label: {
+                    FacadeCoverImage(url: url)
+                }
+                .buttonStyle(.plain)
+            } else if elaborazioneInCorso {
                 VStack(spacing: 8) {
                     ProgressView().tint(Theme.navy)
                     Text("Elaborazione (stitch + keystone)…")
@@ -155,6 +175,7 @@ struct RisultatoPanoramaView: View {
                 .frame(maxWidth: .infinity, minHeight: 200)
             } else if let url = stitchedUrl {
                 Button {
+                    previewGrandeRuotaInVerticale = true
                     previewGrandeURL = url
                 } label: {
                     ProcessedFacadeImage(url: url)
@@ -222,17 +243,23 @@ struct RisultatoPanoramaView: View {
                 showEditor3D = true
             }
 
-            BrandButton(title: "Computo metrico", systemImage: "ruler",
+            BrandButton(title: "Simula finitura", systemImage: "paintbrush.pointed.fill",
                         kind: .secondary) {
-                showComputoMetrico = true
+                showFiniture = true
             }
-            .disabled(rilievo.sessionId == nil)
+            .disabled(textureCopertinaURL == nil && stitchedUrl == nil)
 
             BrandButton(title: "Segna zone (escluse / da rifare)", systemImage: "square.on.square.dashed",
                         kind: .secondary) {
                 showMarcatura = true
             }
             .disabled(stitchedUrl == nil)
+
+            BrandButton(title: "Computo metrico", systemImage: "ruler",
+                        kind: .secondary) {
+                showComputoMetrico = true
+            }
+            .disabled(rilievo.sessionId == nil)
 
             BrandButton(title: "Genera preventivo", systemImage: "doc.text.fill",
                         kind: .ghost) {
@@ -254,6 +281,7 @@ struct RisultatoPanoramaView: View {
                     pipeline3DFallita = false
                     pipeline3DProgresso = 1
                     pipeline3DMessaggio = "Modello 3D texturizzato pronto"
+                    textureCopertinaURL = copertinaTexture(from: result)
                     rilievo.areaLorda = result.total_area_m2
                     if !risultato3DAperto {
                         risultato3DAperto = true
@@ -284,6 +312,20 @@ struct RisultatoPanoramaView: View {
             }
             try? await Task.sleep(for: .seconds(5))
         }
+    }
+
+    private func copertinaTexture(
+        from risultato: BackendAPIClient.ProjectionResult
+    ) -> URL? {
+        guard let piano = risultato.planes?.max(by: { $0.area_m2 < $1.area_m2 }) else {
+            return nil
+        }
+        let nome = URL(fileURLWithPath: piano.file).lastPathComponent
+        guard let file = risultato.files.first(where: {
+            $0.name == piano.file
+                || URL(fileURLWithPath: $0.name).lastPathComponent == nome
+        }) else { return nil }
+        return URL(string: file.url)
     }
 
     private func creaPreventivoDaRilievo() {
@@ -368,8 +410,57 @@ private struct ProcessedFacadeImage: View {
     }
 }
 
+/// Texture ortogonale del piano principale, usata come immagine di copertina.
+private struct FacadeCoverImage: View {
+    let url: URL
+    var height: CGFloat = 220
+    @State private var image: UIImage?
+    @State private var failed = false
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else if failed {
+                Image(systemName: "photo")
+                    .font(.system(size: 28, weight: .light))
+                    .foregroundStyle(Theme.muted)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ProgressView().tint(Theme.navy)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: height)
+        .background(Theme.grayBg)
+        .clipped()
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .task(id: url) { await load() }
+    }
+
+    private func load() async {
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            guard let ui = UIImage(data: data) else {
+                await MainActor.run { failed = true }
+                return
+            }
+            await MainActor.run {
+                image = ui
+                failed = false
+            }
+        } catch {
+            await MainActor.run { failed = true }
+        }
+    }
+}
+
 private struct FacadeImageFullscreenView: View {
     let url: URL
+    let ruotaInVerticale: Bool
     let onClose: () -> Void
     @State private var image: UIImage?
     @State private var failed = false
@@ -380,7 +471,8 @@ private struct FacadeImageFullscreenView: View {
                 Color.black.ignoresSafeArea()
                 if let image {
                     ScrollView([.horizontal, .vertical], showsIndicators: true) {
-                        Image(uiImage: image.acrobaticaPortraitOriented())
+                        Image(uiImage: ruotaInVerticale
+                              ? image.acrobaticaPortraitOriented() : image)
                             .resizable()
                             .scaledToFit()
                             .padding(12)
@@ -416,6 +508,191 @@ private struct FacadeImageFullscreenView: View {
         } catch {
             await MainActor.run { failed = true }
         }
+    }
+}
+
+private enum TipoFinituraIntonaco: String, CaseIterable, Identifiable {
+    case liscio = "Liscio"
+    case civile = "Civile fine"
+    case minerale = "Minerale"
+
+    var id: String { rawValue }
+    var intensita: Double {
+        switch self {
+        case .liscio: return 0.20
+        case .civile: return 0.16
+        case .minerale: return 0.12
+        }
+    }
+}
+
+private enum ColoreFinitura: String, CaseIterable, Identifiable {
+    case originale = "Originale"
+    case bianco = "Bianco"
+    case avorio = "Avorio"
+    case grigio = "Grigio chiaro"
+    case giallo = "Giallo tenue"
+    case rosa = "Rosa tenue"
+
+    var id: String { rawValue }
+    var colore: Color? {
+        switch self {
+        case .originale: return nil
+        case .bianco: return Color(hex: 0xF1F1EC)
+        case .avorio: return Color(hex: 0xDDD7C7)
+        case .grigio: return Color(hex: 0xAEB4B7)
+        case .giallo: return Color(hex: 0xD9BF6C)
+        case .rosa: return Color(hex: 0xC89A91)
+        }
+    }
+}
+
+private struct ProposteFinituraView: View {
+    let referenceURL: URL?
+    let onChiudi: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var finitura: TipoFinituraIntonaco = .liscio
+    @State private var colore: ColoreFinitura = .originale
+
+    var body: some View {
+        VStack(spacing: 0) {
+            barraSuperiore
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    anteprima
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Finitura intonaco")
+                            .font(Theme.Typo.caption(12, .semibold))
+                            .foregroundStyle(Theme.muted)
+                        Menu {
+                            ForEach(TipoFinituraIntonaco.allCases) { tipo in
+                                Button {
+                                    finitura = tipo
+                                } label: {
+                                    Label(tipo.rawValue,
+                                          systemImage: finitura == tipo ? "checkmark" : "circle")
+                                }
+                            }
+                        } label: {
+                            HStack {
+                                Image(systemName: "paintbrush.pointed")
+                                Text(finitura.rawValue)
+                                Spacer()
+                                Image(systemName: "chevron.up.chevron.down")
+                                    .font(.system(size: 11, weight: .semibold))
+                            }
+                            .font(Theme.Typo.body(15, .semibold))
+                            .foregroundStyle(Theme.navy)
+                            .padding(.horizontal, 14)
+                            .frame(height: 48)
+                            .background(Theme.white,
+                                        in: RoundedRectangle(cornerRadius: 8))
+                            .overlay(RoundedRectangle(cornerRadius: 8)
+                                .stroke(Theme.hair2, lineWidth: 1))
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Colore")
+                            .font(Theme.Typo.caption(12, .semibold))
+                            .foregroundStyle(Theme.muted)
+                        LazyVGrid(
+                            columns: Array(
+                                repeating: GridItem(.flexible(), spacing: 8),
+                                count: ColoreFinitura.allCases.count),
+                            spacing: 8
+                        ) {
+                            ForEach(ColoreFinitura.allCases) { campione in
+                                Button {
+                                    colore = campione
+                                } label: {
+                                    ZStack {
+                                        Circle()
+                                            .fill(campione.colore ?? Theme.white)
+                                        if campione == .originale {
+                                            Image(systemName: "circle.slash")
+                                                .font(.system(size: 19, weight: .medium))
+                                                .foregroundStyle(Theme.muted)
+                                        } else if colore == campione {
+                                            Image(systemName: "checkmark")
+                                                .font(.system(size: 13, weight: .bold))
+                                                .foregroundStyle(Theme.navy)
+                                        }
+                                    }
+                                    .frame(width: 38, height: 38)
+                                    .overlay(Circle().stroke(
+                                        colore == campione ? Theme.navy : Theme.hair2,
+                                        lineWidth: colore == campione ? 2 : 1))
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel(campione.rawValue)
+                            }
+                        }
+                    }
+                }
+                .padding(16)
+                .padding(.bottom, 24)
+            }
+        }
+        .background(Theme.paper.ignoresSafeArea())
+    }
+
+    private var barraSuperiore: some View {
+        HStack(spacing: 12) {
+            Button(action: chiudi) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 16, weight: .semibold))
+                    .frame(width: 38, height: 38)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Theme.navy)
+            .accessibilityLabel("Chiudi")
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Proposte di finitura")
+                    .font(Theme.Typo.title(18))
+                    .foregroundStyle(Theme.navy)
+                Text("Intonaco")
+                    .font(Theme.Typo.caption(12))
+                    .foregroundStyle(Theme.muted)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Theme.white)
+        .overlay(alignment: .bottom) { Divider() }
+    }
+
+    private var anteprima: some View {
+        ZStack {
+            if let referenceURL {
+                FacadeCoverImage(url: referenceURL, height: 330)
+            } else {
+                Image(systemName: "building.2")
+                    .font(.system(size: 38, weight: .light))
+                    .foregroundStyle(Theme.muted)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 330)
+                    .background(Theme.grayBg)
+            }
+            if let tinta = colore.colore {
+                tinta
+                    .opacity(finitura.intensita)
+                    .blendMode(.color)
+                    .allowsHitTesting(false)
+            }
+        }
+        .frame(height: 330)
+        .clipped()
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func chiudi() {
+        dismiss()
+        onChiudi()
     }
 }
 
