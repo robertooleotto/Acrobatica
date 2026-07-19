@@ -422,6 +422,22 @@ def _segment_boxes(image: Image.Image, boxes: list[list[float]], runtime) -> lis
     return [np.asarray(mask).squeeze() for mask in masks]
 
 
+def _mask_fills_tile(mask: np.ndarray) -> bool:
+    """Riconosce quando SAM ha segmentato il tassello anziche un'apertura."""
+    binary = np.asarray(mask).squeeze() > 0
+    if binary.ndim != 2 or not binary.any() or float(binary.mean()) < 0.30:
+        return False
+    height, width = binary.shape
+    margin = max(2, int(round(min(height, width) * 0.003)))
+    touches = (
+        bool(binary[:, :margin].any()),
+        bool(binary[:, width - margin:].any()),
+        bool(binary[:margin, :].any()),
+        bool(binary[height - margin:, :].any()),
+    )
+    return sum(touches) >= 3
+
+
 def _segment_polygons_tiled(
     image: Image.Image, proposals: list[dict], runtime,
     segmenter: Callable = _segment_boxes,
@@ -450,6 +466,8 @@ def _segment_polygons_tiled(
             if local.shape != expected:
                 local = cv2.resize(
                     local, expected[::-1], interpolation=cv2.INTER_NEAREST)
+            if _mask_fills_tile(local):
+                continue
             output[index] = _mask_polygon(
                 local,
                 expected,

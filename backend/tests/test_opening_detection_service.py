@@ -144,6 +144,24 @@ def test_tiled_segmentation_returns_polygons_in_original_coordinates():
     assert max(vs) == pytest.approx(1 - 500 / 1799, abs=0.002)
 
 
+def test_tiled_segmentation_rejects_a_mask_that_is_the_whole_tile():
+    image = service.Image.new("RGB", (4096, 3520))
+    proposals = [{
+        "box": [0, 0, 2048, 2048],
+        "score": 0.5,
+        "label": "shop window",
+        "_tile": (0, 0, 2048, 2048),
+    }]
+
+    def segmenter(tile, boxes, runtime):
+        return [np.ones((tile.height, tile.width), np.uint8)]
+
+    polygons = service._segment_polygons_tiled(
+        image, proposals, runtime=None, segmenter=segmenter)
+
+    assert polygons == [[]]
+
+
 def test_opening_prompts_cover_occluded_balcony_and_storefront_types():
     prompts = {label.lower() for label in service._PROMPT_LABELS[0]}
     assert {"window", "door", "balcony door", "french window", "storefront"} <= prompts
