@@ -42,6 +42,13 @@ actor BackendAPIClient {
     /// anche se chiamata in parallelo (l'actor serializza), evitando sessioni doppie.
     private var cachedSessionId: String?
 
+    private var assetCacheRoot: URL {
+        FileManager.default.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Acrobatica", isDirectory: true)
+            .appendingPathComponent("AssetCache", isDirectory: true)
+    }
+
     func ensureSession() async throws -> String {
         if let s = cachedSessionId { return s }
         let s = try await createSession()
@@ -651,11 +658,7 @@ actor BackendAPIClient {
     ) async throws -> [String: URL] {
         guard !files.isEmpty else { return [:] }
         let fileManager = FileManager.default
-        let applicationSupport = fileManager.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        var root = applicationSupport
-            .appendingPathComponent("Acrobatica", isDirectory: true)
-            .appendingPathComponent("AssetCache", isDirectory: true)
+        var root = assetCacheRoot
         try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
         var resourceValues = URLResourceValues()
         resourceValues.isExcludedFromBackup = true
@@ -755,6 +758,38 @@ actor BackendAPIClient {
         }
         return try await downloadCachedAssetBundle(
             sessionId: sessionId, group: "projection", files: renderFiles)
+    }
+
+    /// Ultima revisione completa gia presente sul dispositivo, senza rete.
+    func cachedAssetBundle(
+        sessionId: String,
+        cacheGroup: String
+    ) -> [String: URL]? {
+        let namespace = assetCacheRoot
+            .appendingPathComponent(cacheSafeName(sessionId), isDirectory: true)
+            .appendingPathComponent(cacheSafeName(cacheGroup), isDirectory: true)
+        let keys: Set<URLResourceKey> = [.isDirectoryKey, .contentModificationDateKey]
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: namespace, includingPropertiesForKeys: Array(keys),
+            options: [.skipsHiddenFiles]) else { return nil }
+        let versions = entries.filter { entry in
+            guard (try? entry.resourceValues(forKeys: keys).isDirectory) == true else {
+                return false
+            }
+            return FileManager.default.fileExists(
+                atPath: entry.appendingPathComponent(".complete").path)
+        }.sorted {
+            let lhs = try? $0.resourceValues(forKeys: keys).contentModificationDate
+            let rhs = try? $1.resourceValues(forKeys: keys).contentModificationDate
+            return (lhs ?? .distantPast) > (rhs ?? .distantPast)
+        }
+        guard let latest = versions.first,
+              let files = try? FileManager.default.contentsOfDirectory(
+                at: latest, includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]), !files.isEmpty else { return nil }
+        return Dictionary(uniqueKeysWithValues: files.map {
+            ($0.lastPathComponent, $0)
+        })
     }
 
     private func cachedFilesAreComplete(
