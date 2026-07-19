@@ -265,29 +265,15 @@ def _opening_type(label: str) -> str:
     return "unknown"
 
 
-def _plane_can_have_openings(plane: dict) -> bool:
-    name = str(plane.get("nome") or plane.get("tipo") or "").lower()
-    return not any(word in name for word in ("spalletta", "falda", "orizzontale"))
-
-
-def _proposal_has_visual_detail(image: np.ndarray, box: list[float]) -> bool:
-    height, width = image.shape[:2]
-    x0 = min(max(int(np.floor(box[0])), 0), width - 1)
-    y0 = min(max(int(np.floor(box[1])), 0), height - 1)
-    x1 = min(max(int(np.ceil(box[2])), x0 + 1), width)
-    y1 = min(max(int(np.ceil(box[3])), y0 + 1), height)
-    crop = image[y0:y1, x0:x1]
-    if crop.size == 0:
-        return False
-    gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
-    if float(gray.std()) < 5.0:
-        return False
-    edges = cv2.Canny(gray, 40, 120)
-    return float(np.count_nonzero(edges)) / float(edges.size) >= 0.003
-
-
-def _mask_polygon(mask: np.ndarray, image_size: tuple[int, int]) -> list[list[float]]:
+def _mask_polygon(
+    mask: np.ndarray,
+    image_size: tuple[int, int],
+    *,
+    offset: tuple[int, int] = (0, 0),
+    canvas_size: tuple[int, int] | None = None,
+) -> list[list[float]]:
     height, width = image_size
+    canvas_height, canvas_width = canvas_size or image_size
     binary = (np.asarray(mask).squeeze() > 0).astype(np.uint8) * 255
     if binary.shape != (height, width):
         binary = cv2.resize(binary, (width, height), interpolation=cv2.INTER_NEAREST)
@@ -302,8 +288,9 @@ def _mask_polygon(mask: np.ndarray, image_size: tuple[int, int]) -> list[list[fl
     polygon = cv2.approxPolyDP(contour, epsilon, True).reshape(-1, 2)
     if len(polygon) < 3:
         return []
-    return [[round(float(x) / max(width - 1, 1), 6),
-             round(1.0 - float(y) / max(height - 1, 1), 6)]
+    offset_x, offset_y = offset
+    return [[round((float(x) + offset_x) / max(canvas_width - 1, 1), 6),
+             round(1.0 - (float(y) + offset_y) / max(canvas_height - 1, 1), 6)]
             for x, y in polygon]
 
 
@@ -357,7 +344,6 @@ def _detect_boxes(image: Image.Image, runtime) -> list[dict]:
         labels = result.get("labels")
     if labels is None:
         labels = []
-    image_array = np.asarray(image.convert("RGB"))
     proposals = []
     for box, score, label in zip(result["boxes"], result["scores"], labels):
         coordinates = [float(value) for value in box.tolist()]
@@ -367,13 +353,61 @@ def _detect_boxes(image: Image.Image, runtime) -> list[dict]:
             min(max(coordinates[2], 0.0), float(image.width)),
             min(max(coordinates[3], 0.0), float(image.height)),
         ]
-        if not _proposal_has_visual_detail(image_array, coordinates):
-            continue
         proposals.append({
             "box": coordinates,
             "score": float(score.item()),
             "label": str(label),
         })
+    return _deduplicate(proposals)
+
+
+def _axis_starts(length: int, tile_size: int, overlap: int) -> list[int]:
+    if length <= tile_size:
+        return [0]
+    step = max(tile_size - overlap, 1)
+    starts = list(range(0, length - tile_size + 1, step))
+    last = length - tile_size
+    if starts[-1] != last:
+        starts.append(last)
+    return starts
+
+
+def _tile_bounds(
+    image_size: tuple[int, int], tile_size: int, overlap: int,
+) -> list[tuple[int, int, int, int]]:
+    width, height = image_size
+    tile_size = max(int(tile_size), 256)
+    overlap = min(max(int(overlap), 0), tile_size - 1)
+    return [
+        (x, y, min(x + tile_size, width), min(y + tile_size, height))
+        for y in _axis_starts(height, tile_size, overlap)
+        for x in _axis_starts(width, tile_size, overlap)
+    ]
+
+
+def _detect_boxes_tiled(
+    image: Image.Image, runtime, *, tile_size: int, overlap: int,
+    detector: Callable = _detect_boxes,
+) -> list[dict]:
+    """Scansiona tutto il piano a tile sovrapposti e riporta i box in pixel 4K."""
+    proposals = []
+    for x0, y0, x1, y1 in _tile_bounds(image.size, tile_size, overlap):
+        tile = image.crop((x0, y0, x1, y1))
+        for raw in detector(tile, runtime):
+            box = [
+                float(raw["box"][0]) + x0, float(raw["box"][1]) + y0,
+                float(raw["box"][2]) + x0, float(raw["box"][3]) + y0,
+            ]
+            center_x = (box[0] + box[2]) * 0.5
+            center_y = (box[1] + box[3]) * 0.5
+            core_left = x0 + overlap * 0.5 if x0 > 0 else 0.0
+            core_right = x1 - overlap * 0.5 if x1 < image.width else float(image.width)
+            core_top = y0 + overlap * 0.5 if y0 > 0 else 0.0
+            core_bottom = y1 - overlap * 0.5 if y1 < image.height else float(image.height)
+            if not (core_left <= center_x <= core_right
+                    and core_top <= center_y <= core_bottom):
+                continue
+            proposals.append({**raw, "box": box, "_tile": (x0, y0, x1, y1)})
     return _deduplicate(proposals)
 
 
@@ -386,6 +420,43 @@ def _segment_boxes(image: Image.Image, boxes: list[list[float]], runtime) -> lis
         outputs = model(**inputs, multimask_output=False)
     masks = processor.post_process_masks(outputs.pred_masks.cpu(), inputs["original_sizes"])[0]
     return [np.asarray(mask).squeeze() for mask in masks]
+
+
+def _segment_polygons_tiled(
+    image: Image.Image, proposals: list[dict], runtime,
+    segmenter: Callable = _segment_boxes,
+) -> list[list[list[float]]]:
+    """Segmenta per tile e converte subito le maschere in coordinate globali."""
+    if not proposals:
+        return []
+    grouped: dict[tuple[int, int, int, int], list[tuple[int, dict]]] = {}
+    full = (0, 0, image.width, image.height)
+    for index, proposal in enumerate(proposals):
+        bounds = tuple(proposal.get("_tile") or full)
+        grouped.setdefault(bounds, []).append((index, proposal))
+
+    output: list[list[list[float]]] = [[] for _ in proposals]
+    for (x0, y0, x1, y1), items in grouped.items():
+        tile = image.crop((x0, y0, x1, y1))
+        local_boxes = [
+            [item["box"][0] - x0, item["box"][1] - y0,
+             item["box"][2] - x0, item["box"][3] - y0]
+            for _, item in items
+        ]
+        masks = segmenter(tile, local_boxes, runtime)
+        for (index, _), mask in zip(items, masks):
+            local = (np.asarray(mask).squeeze() > 0).astype(np.uint8)
+            expected = (y1 - y0, x1 - x0)
+            if local.shape != expected:
+                local = cv2.resize(
+                    local, expected[::-1], interpolation=cv2.INTER_NEAREST)
+            output[index] = _mask_polygon(
+                local,
+                expected,
+                offset=(x0, y0),
+                canvas_size=(image.height, image.width),
+            )
+    return output
 
 
 def _read_texture(path: Path) -> tuple[Image.Image, np.ndarray | None]:
@@ -420,9 +491,10 @@ def detect_openings(
         if sess is None:
             raise InputsMissing("Sessione non trovata")
         projection = _projection(sess)
-        all_planes = projection.get("planes", [])
-        planes = [plane for plane in all_planes if _plane_can_have_openings(plane)]
+        planes = projection.get("planes", [])
         files = _file_map(projection)
+        tile_size = int(os.environ.get("ACRO_OPENING_TILE_SIZE", "2048"))
+        tile_overlap = int(os.environ.get("ACRO_OPENING_TILE_OVERLAP", "384"))
 
         with tempfile.TemporaryDirectory(prefix="acro_openings_") as td:
             root = Path(td)
@@ -442,17 +514,9 @@ def detect_openings(
             grounding = grounding_loader()
             proposals_by_plane: dict[int, list[dict]] = {}
             for done, (plane, path) in enumerate(textures, 1):
-                image, alpha = _read_texture(path)
-                proposals = _detect_boxes(image, grounding)
-                if alpha is not None:
-                    filtered = []
-                    for proposal in proposals:
-                        x0, y0, x1, y1 = [int(round(v)) for v in proposal["box"]]
-                        crop = alpha[max(y0, 0):min(y1, alpha.shape[0]),
-                                     max(x0, 0):min(x1, alpha.shape[1])]
-                        if crop.size and np.count_nonzero(crop) / crop.size >= 0.35:
-                            filtered.append(proposal)
-                    proposals = filtered
+                image, _ = _read_texture(path)
+                proposals = _detect_boxes_tiled(
+                    image, grounding, tile_size=tile_size, overlap=tile_overlap)
                 proposals_by_plane[int(plane["index"])] = proposals
                 _set_job(session_id, "running", 0.05 + 0.38 * done / len(textures),
                          f"Cerco aperture: faccia {done}/{len(textures)}")
@@ -467,9 +531,8 @@ def detect_openings(
                 plane_index = int(plane["index"])
                 proposals = proposals_by_plane.get(plane_index, [])
                 image, _ = _read_texture(path)
-                masks = _segment_boxes(image, [item["box"] for item in proposals], sam)
-                for proposal, mask in zip(proposals, masks):
-                    polygon = _mask_polygon(mask, (image.height, image.width))
+                polygons = _segment_polygons_tiled(image, proposals, sam)
+                for proposal, polygon in zip(proposals, polygons):
                     kind = _opening_type(proposal["label"])
                     candidate = {
                         "id": _stable_id(plane_index, kind, polygon),

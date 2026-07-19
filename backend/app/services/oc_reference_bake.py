@@ -832,6 +832,7 @@ def bake_planes(
     coverage_photos: int = 100,
     crop: float = 0.9,
     scale_m_per_mesh_unit: float = 1.0,
+    target_long_edge_px: int = 0,
     photo_resolver=None,
     progress=None,
     log=print,
@@ -849,8 +850,12 @@ def bake_planes(
     up_world = ob._unit(np.asarray(
         planes_doc.get("shared_extrusion_direction")
         or pb.get("up", [0.0, 1.0, 0.0]), float))
-    texel_m = texel_mm / 1000.0
     planes = planes_doc.get("planes", [])
+    texel_m = ob.resolve_texel_m(
+        planes, up_world, vertices, faces, texel_mm / 1000.0,
+        scale_m_per_mesh_unit, target_long_edge_px,
+    )
+    texel_mm = texel_m * 1000.0
     frames: list[tuple[int, str, str, ob.PlaneFrame]] = []
     results: list[dict] = []
     reports: list[dict] = []

@@ -437,6 +437,8 @@ def project(session_id: str) -> dict:
                 return str(local)
 
             texel_mm = float(os.environ.get("ACRO_PROJECTION_TEXEL_MM", "20"))
+            target_long_edge_px = int(os.environ.get(
+                "ACRO_PROJECTION_TARGET_LONG_EDGE_PX", "4096"))
             max_photos = int(os.environ.get("ACRO_PROJECTION_REGISTER_PHOTOS", "20"))
             registration_ceiling = int(os.environ.get(
                 "ACRO_PROJECTION_MAX_REGISTER_PHOTOS", "80"))
@@ -456,6 +458,7 @@ def project(session_id: str) -> dict:
                         str(raw_reference["mtl"]), inp["poses"],
                         str(inp["photos"]), inp["planes"], str(out_dir),
                         texel_mm=texel_mm, max_photos=max_photos,
+                        target_long_edge_px=target_long_edge_px,
                         registration_ceiling=registration_ceiling,
                         coverage_photos=coverage_photos, crop=0.9,
                         scale_m_per_mesh_unit=scale,
@@ -472,6 +475,7 @@ def project(session_id: str) -> dict:
                     summary = ortho_bake.bake_planes(
                         str(inp["mesh"]), inp["poses"], str(inp["photos"]),
                         inp["planes"], str(out_dir), texel_mm=texel_mm,
+                        target_long_edge_px=target_long_edge_px,
                         max_photos=max_photos, occlusion=False, facing_min=0.342,
                         crop=0.9, scale_m_per_mesh_unit=scale,
                         photo_resolver=resolve_photo,
@@ -486,6 +490,7 @@ def project(session_id: str) -> dict:
                 summary = ortho_bake.bake_planes(
                     str(inp["mesh"]), inp["poses"], str(inp["photos"]),
                     inp["planes"], str(out_dir), texel_mm=texel_mm,
+                    target_long_edge_px=target_long_edge_px,
                     max_photos=max_photos, occlusion=False, facing_min=0.342,
                     crop=0.9, scale_m_per_mesh_unit=scale,
                     photo_resolver=resolve_photo,

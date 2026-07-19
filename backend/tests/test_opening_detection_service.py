@@ -107,16 +107,41 @@ def test_deduplicate_keeps_best_overlapping_box():
     assert [item["score"] for item in result] == [0.9, 0.8]
 
 
-def test_uniform_regions_and_non_facade_planes_are_skipped():
-    blank = np.full((100, 100, 3), 180, np.uint8)
-    detailed = blank.copy()
-    detailed[20:80, 20:23] = 20
-    detailed[20:23, 20:80] = 20
+def test_tiles_cover_the_full_4k_image_without_gaps():
+    bounds = service._tile_bounds((4096, 3520), tile_size=2048, overlap=384)
+    coverage = np.zeros((3520, 4096), np.uint8)
+    for x0, y0, x1, y1 in bounds:
+        coverage[y0:y1, x0:x1] = 1
 
-    assert not service._proposal_has_visual_detail(blank, [10, 10, 90, 90])
-    assert service._proposal_has_visual_detail(detailed, [10, 10, 90, 90])
-    assert not service._plane_can_have_openings({"nome": "Spalletta 3"})
-    assert service._plane_can_have_openings({"nome": "Facciata 1"})
+    assert coverage.all()
+    assert bounds[0][:2] == (0, 0)
+    assert bounds[-1][2:] == (4096, 3520)
+
+
+def test_tiled_segmentation_returns_polygons_in_original_coordinates():
+    image = service.Image.new("RGB", (3000, 1800))
+    proposals = [{
+        "box": [1700, 500, 1900, 800],
+        "score": 0.9,
+        "label": "window",
+        "_tile": (1200, 200, 2600, 1600),
+    }]
+
+    def segmenter(tile, boxes, runtime):
+        mask = np.zeros((tile.height, tile.width), np.uint8)
+        x0, y0, x1, y1 = (int(value) for value in boxes[0])
+        mask[y0:y1, x0:x1] = 1
+        return [mask]
+
+    polygons = service._segment_polygons_tiled(
+        image, proposals, runtime=None, segmenter=segmenter)
+
+    us = [point[0] for point in polygons[0]]
+    vs = [point[1] for point in polygons[0]]
+    assert min(us) == pytest.approx(1700 / 2999, abs=0.002)
+    assert max(us) == pytest.approx(1899 / 2999, abs=0.002)
+    assert min(vs) == pytest.approx(1 - 799 / 1799, abs=0.002)
+    assert max(vs) == pytest.approx(1 - 500 / 1799, abs=0.002)
 
 
 def test_opening_prompts_cover_occluded_balcony_and_storefront_types():

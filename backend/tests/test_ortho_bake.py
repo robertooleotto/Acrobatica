@@ -74,6 +74,37 @@ def test_plane_frame_prefers_reviewed_corners_over_support_triangles(tmp_path):
     assert frame.area_m2 == pytest.approx(1.44)
 
 
+def test_target_resolution_uses_one_density_for_all_planes(tmp_path):
+    mesh = tmp_path / "mesh.obj"
+    _write_mesh(mesh)
+    vertices, faces = ortho_bake.load_obj(mesh)
+    main = {
+        **_plane(),
+        "corners": [[0, 0, 0], [4, 0, 0], [4, 3, 0], [0, 3, 0]],
+    }
+    side = {
+        **_plane(),
+        "nome": "spalletta",
+        "corners": [[0, 0, 0], [1, 0, 0], [1, 3, 0], [0, 3, 0]],
+    }
+
+    texel_m = ortho_bake.resolve_texel_m(
+        [main, side], np.array([0, 1, 0.0]), vertices, faces,
+        requested_texel_m=0.02, scale_m_per_mesh_unit=1.0,
+        target_long_edge_px=4096,
+    )
+    main_frame = ortho_bake.plane_frame(
+        main, np.array([0, 1, 0.0]), vertices, faces, texel_m)
+    side_frame = ortho_bake.plane_frame(
+        side, np.array([0, 1, 0.0]), vertices, faces, texel_m)
+
+    assert main_frame is not None
+    assert side_frame is not None
+    assert (main_frame.tex_w, main_frame.tex_h) == (4096, 3072)
+    assert (side_frame.tex_w, side_frame.tex_h) == (1024, 3072)
+    assert main_frame.texel_m == side_frame.texel_m
+
+
 def test_bake_writes_textured_plane_bundle(tmp_path):
     mesh = tmp_path / "mesh.obj"
     _write_mesh(mesh)

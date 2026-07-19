@@ -29,7 +29,7 @@ import cv2
 import numpy as np
 
 # Limite prudente di texel per piano: oltre, si abbassa la risoluzione (memoria).
-_MAX_TEXELS = 6_000_000
+_MAX_TEXELS = 17_000_000
 _TEX_CLAMP = (8, 8000)          # come il viewer: min/max lato in texel
 _TOP_CAMERA_SLOTS = 12
 
@@ -178,6 +178,28 @@ def plane_frame(plane: dict, up_world: np.ndarray, V: np.ndarray,
     th = min(max(th, _TEX_CLAMP[0]), _TEX_CLAMP[1])
     return PlaneFrame(origin, u, v, pts, pu, width_world, height_world,
                       width_m, height_m, area_m2, tw, th, texel_m)
+
+
+def resolve_texel_m(
+    planes: list[dict], up_world: np.ndarray, vertices: np.ndarray,
+    faces: np.ndarray, requested_texel_m: float,
+    scale_m_per_mesh_unit: float, target_long_edge_px: int,
+) -> float:
+    """Sceglie una densita unica portando la faccia dominante al target."""
+    if target_long_edge_px <= 0:
+        return requested_texel_m
+    spans = []
+    for plane in planes:
+        frame = plane_frame(
+            plane, up_world, vertices, faces, requested_texel_m,
+            scale_m_per_mesh_unit=scale_m_per_mesh_unit,
+        )
+        if frame is not None:
+            spans.append(max(frame.width_m, frame.height_m))
+    if not spans:
+        return requested_texel_m
+    target_texel_m = max(spans) / float(target_long_edge_px)
+    return min(requested_texel_m, max(target_texel_m, 1e-4))
 
 
 class Occluder:
@@ -507,6 +529,7 @@ def bake_planes(mesh_path: str, poses: dict, photos_dir: str, planes_doc: dict,
                 out_dir: str, texel_mm: float = 8.0, max_photos: int = 80,
                 occlusion: bool = False, facing_min: float = 0.20,
                 crop: float = 0.9, scale_m_per_mesh_unit: float = 1.0,
+                target_long_edge_px: int = 0,
                 log=print, progress=None, photo_resolver=None,
                 available_photo_keys=None) -> dict:
     """Bake di tutti i piani del documento. Ritorna un riepilogo (piani, aree, file).
@@ -523,8 +546,12 @@ def bake_planes(mesh_path: str, poses: dict, photos_dir: str, planes_doc: dict,
     up_world = _unit(np.asarray(
         planes_doc.get("shared_extrusion_direction")
         or pb.get("up", [0.0, 1.0, 0.0]), float))
-    texel_m = texel_mm / 1000.0
     planes = planes_doc.get("planes", [])
+    texel_m = resolve_texel_m(
+        planes, up_world, V, faces, texel_mm / 1000.0,
+        scale_m_per_mesh_unit, target_long_edge_px,
+    )
+    texel_mm = texel_m * 1000.0
     log(f"mesh {len(V)} v / {len(faces)} f · camere {len(cams)} · piani {len(planes)} · "
         f"texel {texel_mm}mm · occlusione {'on' if occ.enabled else 'off'}")
 
