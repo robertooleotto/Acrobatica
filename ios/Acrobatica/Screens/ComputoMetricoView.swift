@@ -21,7 +21,9 @@ private struct InquadraturaSviluppo: Equatable {
 /// facciate usando l'ultimo bundle di piani texturizzati prodotto dal backend.
 struct ComputoMetricoView: View {
     let sessionId: String
+    let avviaRilevamentoAutomatico: Bool
     let onChiudi: () -> Void
+    let onMetricheAggiornate: ((Double, Double) -> Void)?
 
     @StateObject private var model = ComputoMetricoModel()
     @Environment(\.dismiss) private var dismiss
@@ -34,6 +36,19 @@ struct ComputoMetricoView: View {
     }()
     @State private var posizioneFaccia = 0
     @State private var aperturaSelezionataID: String?
+    @State private var rilevamentoAutomaticoAvviato = false
+
+    init(
+        sessionId: String,
+        avviaRilevamentoAutomatico: Bool = false,
+        onChiudi: @escaping () -> Void,
+        onMetricheAggiornate: ((Double, Double) -> Void)? = nil
+    ) {
+        self.sessionId = sessionId
+        self.avviaRilevamentoAutomatico = avviaRilevamentoAutomatico
+        self.onChiudi = onChiudi
+        self.onMetricheAggiornate = onMetricheAggiornate
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -49,7 +64,13 @@ struct ComputoMetricoView: View {
             }
         }
         .background(Theme.paper.ignoresSafeArea())
-        .task(id: sessionId) { await model.carica(sessionId: sessionId) }
+        .task(id: sessionId) {
+            await model.carica(sessionId: sessionId)
+            guard avviaRilevamentoAutomatico, !rilevamentoAutomaticoAvviato else { return }
+            rilevamentoAutomaticoAvviato = true
+            modalita = .aperture
+            await model.avviaRilevamento(sessionId: sessionId)
+        }
         .onChange(of: model.numeroPiani) { numero in
             guard numero > 0, let piani = model.documento?.piani else {
                 posizioneFaccia = 0
@@ -58,6 +79,12 @@ struct ComputoMetricoView: View {
             posizioneFaccia = piani.indices.max {
                 piani[$0].areaM2 < piani[$1].areaM2
             } ?? 0
+        }
+        .onChange(of: model.areaTotale) { _ in
+            onMetricheAggiornate?(model.areaTotale, model.areaNetta)
+        }
+        .onChange(of: model.areaNetta) { _ in
+            onMetricheAggiornate?(model.areaTotale, model.areaNetta)
         }
         .onChange(of: model.aperture.map(\.id)) { ids in
             if let current = aperturaSelezionataID, ids.contains(current) { return }
@@ -77,10 +104,10 @@ struct ComputoMetricoView: View {
             .accessibilityLabel("Chiudi")
 
             VStack(alignment: .leading, spacing: 1) {
-                Text("Computo metrico")
+                Text(avviaRilevamentoAutomatico ? "Rileva e segna zone" : "Computo metrico")
                     .font(Theme.Typo.title(18))
                     .foregroundStyle(Theme.navy)
-                Text("Sviluppo delle facciate")
+                Text(avviaRilevamentoAutomatico ? "Tutte le facciate" : "Sviluppo delle facciate")
                     .font(Theme.Typo.caption(12))
                     .foregroundStyle(Theme.muted)
             }

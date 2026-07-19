@@ -5,16 +5,13 @@ private struct TexturePianoCopertina {
     let piano: BackendAPIClient.ProjectionResult.Plane
 }
 
-/// Risultato del rilievo: panorama + scala metrica (2 tap) + aperture + m².
-/// CTA: genera preventivo, export.
+/// Dettaglio operativo di una facciata.
 struct RisultatoPanoramaView: View {
     @ObservedObject var rilievo: Rilievo
-    @EnvironmentObject var app: AppState
     @State private var elaborazioneInCorso = false
     @State private var stitchedUrl: URL?
     @State private var keystoneUrls: [URL] = []
     @State private var modScala: Bool = false
-    @State private var preventivoCreato: Preventivo?
     @State private var showTapPiano = false       // legacy: 3D-triangulation (sperimentale)
     @State private var showRectifyFacade = false  // NUOVO: 2D homography 4-tap
     @State private var showMeasureScale = false
@@ -46,7 +43,7 @@ struct RisultatoPanoramaView: View {
             .padding(.bottom, 32)
         }
         .background(Theme.paper)
-        .navigationTitle(rilievo.nome)
+        .navigationTitle(rilievo.nomeOrientato)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -132,7 +129,11 @@ struct RisultatoPanoramaView: View {
         .fullScreenCover(isPresented: $showComputoMetrico) {
             if let sid = rilievo.sessionId {
                 ComputoMetricoView(sessionId: sid,
-                                   onChiudi: { showComputoMetrico = false })
+                                   onChiudi: { showComputoMetrico = false },
+                                   onMetricheAggiornate: { lorda, netta in
+                                       rilievo.areaLorda = lorda
+                                       rilievo.areaNetta = netta
+                                   })
             }
         }
         .fullScreenCover(isPresented: $showTapPiano) {
@@ -150,12 +151,6 @@ struct RisultatoPanoramaView: View {
                     onAnnulla: { showTapPiano = false }
                 )
             }
-        }
-        .navigationDestination(isPresented: Binding(
-            get: { preventivoCreato != nil },
-            set: { if !$0 { preventivoCreato = nil } }
-        )) {
-            if let p = preventivoCreato { AnteprimaPreventivoView(preventivo: p) }
         }
         .alert("Errore", isPresented: Binding(get: { errore != nil }, set: { if !$0 { errore = nil } })) {
             Button("OK") { errore = nil }
@@ -246,16 +241,10 @@ struct RisultatoPanoramaView: View {
                 }
             }
 
-            BrandButton(title: "Editor 3D mesh (pulizia / piani)", systemImage: "cube.transparent",
+            BrandButton(title: "Editor 3D", systemImage: "cube.transparent",
                         kind: .secondary) {
                 showEditor3D = true
             }
-
-            BrandButton(title: "Simula finitura", systemImage: "paintbrush.pointed.fill",
-                        kind: .secondary) {
-                showFiniture = true
-            }
-            .disabled(textureCopertina == nil && stitchedUrl == nil)
 
             BrandButton(title: "Rileva e segna zone", systemImage: "viewfinder",
                         kind: .secondary) {
@@ -269,10 +258,11 @@ struct RisultatoPanoramaView: View {
             }
             .disabled(rilievo.sessionId == nil)
 
-            BrandButton(title: "Genera preventivo", systemImage: "doc.text.fill",
-                        kind: .ghost) {
-                creaPreventivoDaRilievo()
+            BrandButton(title: "Simula finitura", systemImage: "paintbrush.pointed.fill",
+                        kind: .secondary) {
+                showFiniture = true
             }
+            .disabled(textureCopertina == nil && stitchedUrl == nil)
         }
     }
 
@@ -343,7 +333,9 @@ struct RisultatoPanoramaView: View {
     ) async {
         guard let remota = copertinaTexture(from: risultato),
               let sessionId = rilievo.sessionId else {
-            textureCopertina = copertinaTexture(from: risultato)
+            let copertina = copertinaTexture(from: risultato)
+            textureCopertina = copertina
+            rilievo.panoramaUrl = copertina?.url
             return
         }
         do {
@@ -355,8 +347,10 @@ struct RisultatoPanoramaView: View {
             })?.value
             textureCopertina = TexturePianoCopertina(
                 url: locale ?? remota.url, piano: remota.piano)
+            rilievo.panoramaUrl = locale ?? remota.url
         } catch {
             textureCopertina = remota
+            rilievo.panoramaUrl = remota.url
         }
     }
 
@@ -366,23 +360,6 @@ struct RisultatoPanoramaView: View {
             return "marcatura_\(base)"
         }
         return "marcatura_\(base)_p\(indice)"
-    }
-
-    private func creaPreventivoDaRilievo() {
-        let n = app.nuovoNumeroPreventivo()
-        let cantiereNome = "Cantiere"
-        let p = Preventivo(numero: n,
-                           clienteNome: "—",
-                           cantiereNome: cantiereNome,
-                           voci: [
-                            VoceLavoro(descrizione: "Tinteggiatura facciata",
-                                       quantita: max(rilievo.areaNetta, 1),
-                                       unita: "m²",
-                                       prezzoUnitario: 18)
-                           ],
-                           rilievoId: rilievo.id)
-        app.preventivi.insert(p, at: 0)
-        preventivoCreato = p
     }
 
     // MARK: – Backend elaborazione
@@ -617,9 +594,10 @@ private enum ColoreFinitura: String, CaseIterable, Identifiable {
     }
 }
 
-private struct ProposteFinituraView: View {
+struct ProposteFinituraView: View {
     let referenceURL: URL?
     let onChiudi: () -> Void
+    var onConferma: ((String) -> Void)? = nil
 
     @Environment(\.dismiss) private var dismiss
     @State private var finitura: TipoFinituraIntonaco = .liscio
@@ -699,6 +677,17 @@ private struct ProposteFinituraView: View {
                                 .buttonStyle(.plain)
                                 .accessibilityLabel(campione.rawValue)
                             }
+                        }
+                    }
+
+                    if onConferma != nil {
+                        BrandButton(
+                            title: "Applica a tutte le facciate",
+                            systemImage: "checkmark",
+                            kind: .primary
+                        ) {
+                            onConferma?("\(finitura.rawValue) · \(colore.rawValue)")
+                            chiudi()
                         }
                     }
                 }
@@ -793,11 +782,14 @@ struct MetricCard: View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label.uppercased())
                 .font(.system(size: 10, weight: .semibold))
-                .kerning(0.5)
                 .foregroundStyle(Theme.muted)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
             Text(value)
                 .font(.system(size: 22, weight: .bold))
                 .foregroundStyle(highlight ? Theme.navy : Theme.navy.opacity(0.85))
+                .lineLimit(1)
+                .minimumScaleFactor(0.58)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)

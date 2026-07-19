@@ -36,9 +36,13 @@ extension AppState {
                         aperture: [Apertura(tipo: .finestra, areaM2: 2.10),
                                    Apertura(tipo: .finestra, areaM2: 2.10),
                                    Apertura(tipo: .porta, areaM2: 4.20)],
-                        stato: .elaborato),
-                Rilievo(nome: "Facciata Est", areaNetta: 0, stato: .inCattura),
-            ])
+                        stato: .elaborato, orientamentoManuale: .nord),
+                Rilievo(nome: "Facciata Est", areaNetta: 0, stato: .inCattura,
+                        orientamentoManuale: .est),
+            ],
+            finitureScelte: ["Civile fine · Avorio"],
+            squadra: ["Carlo Marchetti", "Luca Ferri", "Marco Riva"],
+            oreProgrammate: 96)
         let villa = Cantiere(
             nome: "Villa Bianchi", cliente: "Bianchi Andrea",
             indirizzo: "Via dei Tigli 3, Monza",
@@ -47,8 +51,11 @@ extension AppState {
                         areaLorda: 212.6, areaNetta: 178.9,
                         aperture: [Apertura(tipo: .finestra, areaM2: 1.80),
                                    Apertura(tipo: .finestra, areaM2: 1.80)],
-                        stato: .completato),
-            ])
+                        stato: .completato, orientamentoManuale: .sud),
+            ],
+            finitureScelte: ["Liscio · Bianco"],
+            squadra: ["Carlo Marchetti", "Luca Ferri"],
+            oreProgrammate: 48)
         let capannone = Cantiere(
             nome: "Capannone Logistica Sud", cliente: "MV Immobiliare",
             indirizzo: "Z.I. Lotto 7, Pavia")
@@ -61,8 +68,12 @@ extension AppState {
             rilievi: [
                 Rilievo(nome: "Facciata (mesh OC)",
                         sessionId: "c1ee30e8-8b23-4ad4-8135-fa5d2f664a98",
-                        areaNetta: 0, stato: .elaborato),
-            ])
+                        areaNetta: 0, stato: .elaborato,
+                        orientamentoManuale: .sud),
+            ],
+            finitureScelte: ["Liscio · Originale"],
+            squadra: ["Carlo Marchetti", "Luca Ferri"],
+            oreProgrammate: 40)
         cantieri = [casaTest, garibaldi, villa, capannone]
 
         // ── Preventivi ─────────────────────────────────────────

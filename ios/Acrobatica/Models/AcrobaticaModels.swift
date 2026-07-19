@@ -10,23 +10,56 @@ final class Cantiere: ObservableObject, Identifiable {
     @Published var indirizzo: String
     @Published var dataCreazione: Date
     @Published var rilievi: [Rilievo]
+    @Published var finitureScelte: [String]
+    @Published var squadra: [String]
+    @Published var oreProgrammate: Double
 
     init(id: UUID = UUID(),
          nome: String,
          cliente: String,
          indirizzo: String = "",
          dataCreazione: Date = .now,
-         rilievi: [Rilievo] = []) {
+         rilievi: [Rilievo] = [],
+         finitureScelte: [String] = [],
+         squadra: [String] = [],
+         oreProgrammate: Double = 0) {
         self.id = id
         self.nome = nome
         self.cliente = cliente
         self.indirizzo = indirizzo
         self.dataCreazione = dataCreazione
         self.rilievi = rilievi
+        self.finitureScelte = finitureScelte
+        self.squadra = squadra
+        self.oreProgrammate = oreProgrammate
     }
+
+    var areaLordaTotale: Double { rilievi.reduce(0) { $0 + $1.areaLorda } }
+    var areaNettaTotale: Double { rilievi.reduce(0) { $0 + $1.areaNetta } }
 }
 
 // MARK: - Rilievo (= survey = facciata) — wraps i CapturedFacadePhoto
+
+enum OrientamentoFacciata: String, CaseIterable, Identifiable, Codable {
+    case nord = "Nord"
+    case nordEst = "Nord-est"
+    case est = "Est"
+    case sudEst = "Sud-est"
+    case sud = "Sud"
+    case sudOvest = "Sud-ovest"
+    case ovest = "Ovest"
+    case nordOvest = "Nord-ovest"
+    case nonDefinito = "Da orientare"
+
+    var id: String { rawValue }
+
+    static func da(gradi: Double?) -> OrientamentoFacciata {
+        guard let gradi, gradi.isFinite else { return .nonDefinito }
+        let normalizzati = gradi.truncatingRemainder(dividingBy: 360) + 360
+        let indice = Int(((normalizzati.truncatingRemainder(dividingBy: 360)) + 22.5) / 45) % 8
+        return [.nord, .nordEst, .est, .sudEst, .sud, .sudOvest, .ovest, .nordOvest][indice]
+    }
+}
 
 final class Rilievo: ObservableObject, Identifiable {
     let id: UUID
@@ -39,6 +72,8 @@ final class Rilievo: ObservableObject, Identifiable {
     @Published var aperture: [Apertura]
     @Published var stato: Stato
     @Published var creatoIl: Date
+    @Published var headingGradi: Double?
+    @Published var orientamentoManuale: OrientamentoFacciata?
 
     enum Stato: String, Codable {
         case bozza      = "Bozza"
@@ -56,7 +91,9 @@ final class Rilievo: ObservableObject, Identifiable {
          areaNetta: Double = 0,
          aperture: [Apertura] = [],
          stato: Stato = .bozza,
-         creatoIl: Date = .now) {
+         creatoIl: Date = .now,
+         headingGradi: Double? = nil,
+         orientamentoManuale: OrientamentoFacciata? = nil) {
         self.id = id
         self.nome = nome
         self.sessionId = sessionId
@@ -67,13 +104,33 @@ final class Rilievo: ObservableObject, Identifiable {
         self.aperture = aperture
         self.stato = stato
         self.creatoIl = creatoIl
+        self.headingGradi = headingGradi
+        self.orientamentoManuale = orientamentoManuale
     }
 
     func aggiungiFrame(_ p: CapturedFacadePhoto) {
         frameCatturati.append(p)
+        if headingGradi == nil, p.cameraTransform.count >= 11 {
+            // Con ARKit `.gravityAndHeading`: +X = est, -Z = nord. La colonna
+            // Z della camera punta verso l'operatore, cioe la normale uscente
+            // della facciata che sta fotografando.
+            let est = Double(p.cameraTransform[8])
+            let nord = -Double(p.cameraTransform[10])
+            var bearing = atan2(est, nord) * 180 / .pi
+            if bearing < 0 { bearing += 360 }
+            headingGradi = bearing
+        }
     }
     func rimuoviUltimoFrame() {
         _ = frameCatturati.popLast()
+    }
+
+    var orientamento: OrientamentoFacciata {
+        orientamentoManuale ?? OrientamentoFacciata.da(gradi: headingGradi)
+    }
+
+    var nomeOrientato: String {
+        orientamento == .nonDefinito ? nome : "Facciata \(orientamento.rawValue)"
     }
 }
 

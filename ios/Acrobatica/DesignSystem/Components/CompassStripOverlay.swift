@@ -3,10 +3,9 @@ import SwiftUI
 /// Compass strip stile iPhone Camera Pro: nastro orizzontale di 60° visibili,
 /// indicatore centrale fisso, tick ogni 10° con label ogni 30°.
 ///
-/// Lo yaw è quello ARKit (eulerAngles.y) — relativo alla posa di partenza della
-/// sessione. Per il rilievo facciate questo è esattamente quello che serve:
-/// vuoi sapere se "stai ancora guardando lo stesso muro" rispetto ai primi
-/// scatti, non l'orientamento magnetico assoluto.
+/// Lo yaw è quello ARKit (eulerAngles.y), allineato al nord dalla sessione
+/// `.gravityAndHeading`. Il riferimento del primo scatto continua a indicare
+/// se la camera sta guardando lo stesso muro.
 ///
 /// Lettura: il numero al centro è il bearing corrente. I tick scorrono sotto
 /// l'indicatore quando ruoti il telefono.

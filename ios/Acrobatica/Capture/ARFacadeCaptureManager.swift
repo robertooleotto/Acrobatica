@@ -78,8 +78,7 @@ final class ARFacadeCaptureManager: NSObject, ObservableObject {
     @Published private(set) var currentRollDeg: Float = 0
     /// Pitch corrente in gradi (live, da ARKit eulerAngles.x).
     @Published private(set) var currentPitchDeg: Float = 0
-    /// Yaw corrente in radianti (live, da ARKit eulerAngles.y). Riferimento:
-    /// posa di partenza della sessione (.gravity worldAlignment).
+    /// Yaw corrente in radianti (live, da ARKit eulerAngles.y), riferito al nord.
     @Published private(set) var currentYawRad: Float = 0
     /// Quando è partita l'ARKit session corrente (in unix-epoch ms). Le foto
     /// scattate PRIMA di questo timestamp hanno coordinate `camera_transform`
@@ -150,7 +149,7 @@ final class ARFacadeCaptureManager: NSObject, ObservableObject {
         // CPU/termico (e la batteria) durante catture lunghe.
         config.planeDetection = []
         config.environmentTexturing = .none
-        config.worldAlignment = .gravity
+        config.worldAlignment = .gravityAndHeading
 
         if enableSceneReconstructionMesh,
            ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {

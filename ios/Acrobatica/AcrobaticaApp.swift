@@ -64,6 +64,11 @@ struct AppFlowView: View {
                         flow.phase = .main
                         debugEditorChiuso = true
                     })
+            } else if let rawIndex = ProcessInfo.processInfo.environment["DEBUG_BUILDING_INDEX"],
+                      let index = Int(rawIndex), app.cantieri.indices.contains(index) {
+                NavigationStack {
+                    DettaglioCantiereView(cantiere: app.cantieri[index])
+                }
             } else {
                 contenutoNormale
             }
