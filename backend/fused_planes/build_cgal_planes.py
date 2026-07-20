@@ -99,6 +99,24 @@ def build_corners(plane, F):
     return corners, w, hh
 
 
+def classify_plane(plane, main_normal):
+    """Classify a candidate before applying type-specific support filters."""
+    tilt = abs(float(plane["n"] @ [0, 1, 0]))
+    if tilt > 0.30:
+        return "falda"
+    if abs(float(plane["n"] @ main_normal)) > 0.5:
+        return "facciata"
+    return "spalla"
+
+
+def minimum_candidate_area(plane_type, min_area, relative_floor):
+    # Narrow reveals naturally have less support than the main facade. Their
+    # validity is checked later against the regularized perimeter segments.
+    if plane_type == "spalla":
+        return min_area
+    return max(min_area, relative_floor)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -110,7 +128,7 @@ def main():
     ap.add_argument("--minr", type=int, default=25)
     ap.add_argument("--min-area", type=float, default=0.05)  # unità OC² (~1.8 m²)
     ap.add_argument("--relative-min-area", type=float, default=0.035,
-                    help="quota minima rispetto al maggiore piano verticale")
+                    help="quota minima per facciate/falde rispetto al maggiore piano verticale")
     ap.add_argument("--cop-ang", type=float, default=8.0)
     ap.add_argument("--cop-off", type=float, default=0.08)
     args = ap.parse_args()
@@ -123,20 +141,20 @@ def main():
     main_vertical = max(vertical, key=lambda p: p["area"], default=None)
     relative_floor = (main_vertical["area"] * args.relative_min_area
                       if main_vertical is not None else 0.0)
-    merged = [p for p in merged if p["area"] >= max(args.min_area, relative_floor)]
     main_n = main_vertical["n"] if main_vertical is not None else np.array([0, 0, 1.])
+    candidates = []
+    for plane in merged:
+        plane_type = classify_plane(plane, main_n)
+        area_floor = minimum_candidate_area(
+            plane_type, args.min_area, relative_floor)
+        if plane["area"] >= area_floor:
+            candidates.append((plane, plane_type))
+
     planes = []
-    for i, p in enumerate(merged):
+    for i, (p, tipo) in enumerate(candidates):
         corners, w, h = build_corners(p, F)
         if corners is None:
             continue
-        tilt = abs(float(p["n"] @ [0, 1, 0]))
-        if tilt > 0.30:
-            tipo = "falda"
-        elif abs(float(p["n"] @ main_n)) > 0.5:
-            tipo = "facciata"
-        else:
-            tipo = "spalla"
         nome = {"facciata": "Facciata", "spalla": "Spalletta", "falda": "Falda"}[tipo]
         planes.append({
             "id": i, "nome": f"{nome} {i + 1}", "tipo": tipo,

@@ -1,9 +1,14 @@
 import json
 import math
 
+import numpy as np
 import pytest
 
-from fused_planes.build_cgal_planes import convex_hull_indices
+from fused_planes.build_cgal_planes import (
+    classify_plane,
+    convex_hull_indices,
+    minimum_candidate_area,
+)
 from fused_planes.build_fused_planes import (
     build_planes,
     coalesce_plane_segments,
@@ -16,6 +21,17 @@ def test_convex_hull_excludes_interior_points():
     points = [[0, 0], [2, 0], [2, 2], [0, 2], [1, 1]]
     hull = convex_hull_indices(points)
     assert set(hull) == {0, 1, 2, 3}
+
+
+def test_narrow_reveal_does_not_inherit_main_facade_area_floor():
+    main_normal = np.array([0.0, 0.0, 1.0])
+    reveal = {"n": np.array([1.0, 0.0, 0.0])}
+    facade = {"n": np.array([0.0, 0.0, 1.0])}
+
+    assert classify_plane(reveal, main_normal) == "spalla"
+    assert classify_plane(facade, main_normal) == "facciata"
+    assert minimum_candidate_area("spalla", 0.05, 0.80) == 0.05
+    assert minimum_candidate_area("facciata", 0.05, 0.80) == 0.80
 
 
 def test_pick_best_slice_uses_stable_lower_middle_ring(tmp_path):
