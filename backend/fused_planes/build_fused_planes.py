@@ -85,12 +85,13 @@ def point_on_plane_with_y(base, normal, point, y):
 
 def original_planes_by_id(path):
     data = json.load(open(path))
+    coordinate_scale = 1.0 if data.get("scale") == "metric" else SCALE
     out = {}
     for plane in data["planes"]:
         normal = norm(plane["normale"])
         out[plane["id"]] = {
             "normal": normal,
-            "point": [v * SCALE for v in plane["punto"]],
+            "point": [v * coordinate_scale for v in plane["punto"]],
             "name": plane["nome"],
             "type": plane["tipo"],
         }
@@ -140,14 +141,14 @@ def robust_facade_samples(samples, max_offset_from_main=0.55):
     return refined if refined else inliers
 
 
-def fit_perimeter_planes(stack, planes_path, max_angle=18.0):
+def fit_perimeter_planes(stack, planes_path, max_dist=2.5, max_angle=18.0):
     planes = load_planes(planes_path, True)
     vertical_by_id = {p["id"]: p for p in planes}
     samples = {p["id"]: [] for p in planes}
 
     for slice_data in stack["slices"]:
         segments = assign_segments(
-            slice_data, planes, max_dist=2.5, max_angle=max_angle)
+            slice_data, planes, max_dist=max_dist, max_angle=max_angle)
         for seg in segments:
             plane_id = seg.get("plane_id")
             if plane_id is None:
@@ -551,6 +552,7 @@ def run(stack_path, fusion_path, planes_path, out_dir, viewer_bundle=None):
     fusion = json.load(open(fusion_path))
     original_by_id = fit_perimeter_planes(
         stack, planes_path,
+        max_dist=float(fusion.get("stats", {}).get("max_dist", 2.5)),
         max_angle=float(fusion.get("stats", {}).get("max_angle", 18.0)))
     ymin, ymax = useful_height_bounds(stack)
     planes = build_planes(fusion, original_by_id, ymin, ymax)

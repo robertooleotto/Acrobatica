@@ -11,6 +11,7 @@ Uso:  python build_slice_stack.py mesh_metric.obj out_stack.json
 import argparse
 import concurrent.futures as cf
 import json
+import math
 import os
 import subprocess
 import tempfile
@@ -41,8 +42,10 @@ def slice_at(slicer, mesh, y, angle, max_offset, min_length):
     with tempfile.NamedTemporaryFile("r", suffix=".json", delete=False) as tf:
         out = tf.name
     try:
-        subprocess.run([slicer, mesh, f"{y:.6f}", out, str(max_offset), str(min_length),
-                        str(angle)], check=True, capture_output=True)
+        command = [slicer, mesh, f"{y:.6f}", out, str(max_offset), str(min_length)]
+        if angle is not None:
+            command.append(str(angle))
+        subprocess.run(command, check=True, capture_output=True)
         d = json.load(open(out))
     finally:
         os.unlink(out)
@@ -60,17 +63,19 @@ def slice_batch(slicer, mesh, ys, angle, max_offset, min_length):
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as of:
             output_path = of.name
 
+        command = [
+            slicer,
+            mesh,
+            "--batch",
+            heights_path,
+            output_path,
+            str(max_offset),
+            str(min_length),
+        ]
+        if angle is not None:
+            command.append(str(angle))
         subprocess.run(
-            [
-                slicer,
-                mesh,
-                "--batch",
-                heights_path,
-                output_path,
-                str(max_offset),
-                str(min_length),
-                str(angle),
-            ],
+            command,
             check=True,
             capture_output=True,
         )
@@ -86,13 +91,38 @@ def slice_batch(slicer, mesh, ys, angle, max_offset, min_length):
                 os.unlink(path)
 
 
+def estimate_global_angle(results, min_edge=0.30):
+    """Estimate orthogonal building axes from per-contour CGAL regularization."""
+    cosine_sum = sine_sum = total = 0.0
+    for _, contours in results:
+        if not contours:
+            continue
+        main = max(contours, key=lambda contour: float(contour.get("length", 0.0)))
+        points = main.get("regularized") or main.get("raw") or []
+        for a, b in zip(points, points[1:]):
+            dx = float(b[0]) - float(a[0])
+            dz = float(b[2]) - float(a[2])
+            length = math.hypot(dx, dz)
+            if length < min_edge:
+                continue
+            angle = math.atan2(dz, dx)
+            weight = min(length, 5.0)
+            # Fourfold circular mean: equivalent directions repeat every 90°.
+            cosine_sum += weight * math.cos(4.0 * angle)
+            sine_sum += weight * math.sin(4.0 * angle)
+            total += weight
+    if total <= 1e-9 or math.hypot(cosine_sum, sine_sum) / total < 0.15:
+        raise ValueError("perimetro senza orientamento principale stabile")
+    return math.degrees(math.atan2(sine_sum, cosine_sum) / 4.0) % 90.0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("mesh")
     ap.add_argument("out")
     ap.add_argument("--step", type=float, default=0.3)
-    ap.add_argument("--angle", type=float, default=28.0)
+    ap.add_argument("--angle", default="auto", help="gradi oppure 'auto'")
     ap.add_argument("--max-offset", type=float, default=0.20)
     ap.add_argument("--min-length", type=float, default=0.30)
     ap.add_argument("--slicer", default=SLICER_DEFAULT)
@@ -106,12 +136,13 @@ def main():
     while y < ymax:
         ys.append(round(y, 6)); y += args.step
 
+    requested_angle = None if str(args.angle).lower() == "auto" else float(args.angle)
     try:
         results = slice_batch(
             args.slicer,
             args.mesh,
             ys,
-            args.angle,
+            requested_angle,
             args.max_offset,
             args.min_length,
         )
@@ -121,13 +152,19 @@ def main():
 
         def work(iy):
             i, yy = iy
-            cs = slice_at(args.slicer, args.mesh, yy, args.angle, args.max_offset, args.min_length)
+            cs = slice_at(
+                args.slicer, args.mesh, yy, requested_angle,
+                args.max_offset, args.min_length)
             return i, yy, cs
 
         results = [None] * len(ys)
         with cf.ThreadPoolExecutor(max_workers=args.jobs) as ex:
             for i, yy, cs in ex.map(work, enumerate(ys)):
                 results[i] = (yy, cs)
+
+    angle = requested_angle if requested_angle is not None else estimate_global_angle(results)
+    if requested_angle is None:
+        print(f"orientamento dal solo perimetro: {angle:.2f} deg")
 
     slices = []
     for i, (yy, cs) in enumerate(results):
@@ -146,7 +183,7 @@ def main():
     stack = {
         "step_m": args.step,
         "scale": "metric",
-        "global_angle_deg": args.angle,
+        "global_angle_deg": angle,
         "ymin": ymin,
         "ymax": ymax,
         "mesh": {"vertices": verts, "faces": faces},

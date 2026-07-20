@@ -120,6 +120,7 @@ def join_segments(slice_data, planes, segments):
 
 def load_planes(path, verticalize):
     data = json.load(open(path))
+    coordinate_scale = 1.0 if data.get("scale") == "metric" else SCALE
     out = []
     color_i = 0
     for p in data["planes"]:
@@ -135,13 +136,14 @@ def load_planes(path, verticalize):
         dx = -n[2]
         dz = n[0]
         angle = math.degrees(math.atan2(dz, dx)) % 180.0
-        corners = [[v[0] * SCALE, v[1] * SCALE, v[2] * SCALE] for v in p.get("corners", [])]
+        corners = [[v[0] * coordinate_scale, v[1] * coordinate_scale,
+                    v[2] * coordinate_scale] for v in p.get("corners", [])]
         out.append({
             "id": p["id"],
             "name": p["nome"],
             "type": p["tipo"],
             "normal": n,
-            "point": [v * SCALE for v in p["punto"]],
+            "point": [v * coordinate_scale for v in p["punto"]],
             "angle": angle,
             "corners": corners,
             "color": PALETTE[color_i % len(PALETTE)],

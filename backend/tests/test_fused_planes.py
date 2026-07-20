@@ -16,6 +16,9 @@ from fused_planes.build_fused_planes import (
     robust_facade_samples,
 )
 from fused_planes.build_slice_stack import slice_batch
+from fused_planes.build_slice_stack import estimate_global_angle
+from fused_planes.build_perimeter_planes import build_candidates
+from fused_planes.analysis_frame import estimate_oc_to_arkit
 from fused_planes.run import (
     candidate_is_persistent,
     dominant_angle,
@@ -66,6 +69,68 @@ def test_batch_slicer_loads_all_requested_heights_in_one_process(tmp_path, monke
         (0.15, [{"length": 0.15}]),
         (0.45, [{"length": 0.45}]),
     ]
+
+
+def test_global_perimeter_angle_is_derived_in_the_rotated_mesh_frame():
+    angle = math.radians(37.0)
+    direction = [math.cos(angle), 0.0, math.sin(angle)]
+    perpendicular = [-direction[2], 0.0, direction[0]]
+    results = [(0.15, [{"length": 20.0, "regularized": [
+        [0.0, 0.15, 0.0],
+        [direction[0] * 10.0, 0.15, direction[2] * 10.0],
+        [direction[0] * 10.0 + perpendicular[0] * 5.0, 0.15,
+         direction[2] * 10.0 + perpendicular[2] * 5.0],
+    ]}])]
+    assert estimate_global_angle(results) == pytest.approx(37.0, abs=0.01)
+
+
+def test_perimeter_candidates_require_vertical_persistence():
+    slices = []
+    for index in range(12):
+        points = [[0.0, index * 0.3, 0.0], [8.0, index * 0.3, 0.0]]
+        if index == 5:
+            points += [[8.0, index * 0.3, 2.0], [9.0, index * 0.3, 2.0]]
+        slices.append({
+            "index": index,
+            "y": index * 0.3,
+            "contours": [{"regularized": points}],
+        })
+    result = build_candidates({"slices": slices}, 0.0)
+    assert len(result["planes"]) == 1
+    assert result["planes"][0]["slice_count"] == 12
+
+
+def test_oc_to_arkit_similarity_is_estimated_per_session():
+    scale = 2.5
+    theta = math.radians(31.0)
+    rotation = np.array([
+        [math.cos(theta), 0.0, math.sin(theta)],
+        [0.0, 1.0, 0.0],
+        [-math.sin(theta), 0.0, math.cos(theta)],
+    ])
+    translation = np.array([4.0, -2.0, 7.0])
+    source = np.array([[0.0, 0.0, 0.0], [1.0, 0.2, 0.0],
+                       [0.0, 1.0, 1.0], [2.0, 0.0, 1.0]])
+    target = scale * (rotation @ source.T).T + translation
+    oc_poses = {
+        str(index): {"translation": point.tolist()}
+        for index, point in enumerate(source)
+    }
+    photos = []
+    for index, center in enumerate(target):
+        transform = np.eye(4)
+        transform[:3, 3] = center
+        photos.append({
+            "order_index": index,
+            "metadata": {"camera_transform": transform.flatten(order="F").tolist()},
+        })
+
+    document = estimate_oc_to_arkit(oc_poses, photos)
+
+    assert document["scale"] == pytest.approx(scale)
+    assert np.asarray(document["R"]) == pytest.approx(rotation)
+    assert np.asarray(document["t"]) == pytest.approx(translation)
+    assert document["max_error_m"] < 1e-10
 
 
 def test_final_types_follow_direction_families_not_candidate_labels():
@@ -229,3 +294,33 @@ def test_detected_planes_return_mesh_frame_and_metric_measurements():
     assert plane["corners"][1] == [1.0, 0.0, 0.0]
     assert plane["area_m2"] == 8.0
     assert plane["w"] == 2.0
+
+
+def test_detected_planes_are_returned_from_analysis_to_original_oc_frame():
+    theta = math.radians(90.0)
+    rotation = np.array([
+        [math.cos(theta), 0.0, math.sin(theta)],
+        [0.0, 1.0, 0.0],
+        [-math.sin(theta), 0.0, math.cos(theta)],
+    ])
+    scale = 2.0
+    translation = np.array([10.0, 3.0, -5.0])
+    oc_corners = np.array([
+        [0.0, 0.0, 0.0], [2.0, 0.0, 0.0],
+        [2.0, 4.0, 0.0], [0.0, 4.0, 0.0],
+    ])
+    analysis_corners = scale * (rotation @ oc_corners.T).T + translation
+    analysis_normal = rotation @ np.array([0.0, 0.0, 1.0])
+    fused = {"planes": [{
+        "nome": "Facciata", "tipo": "facciata",
+        "punto": analysis_corners.mean(axis=0).tolist(),
+        "normale": analysis_normal.tolist(),
+        "corners": analysis_corners.tolist(),
+        "area_m2": 8.0, "w": 2.0, "h": 4.0,
+    }]}
+
+    plane = to_detected_planes(
+        fused, analysis_similarity=(scale, rotation, translation))["planes"][0]
+
+    assert np.asarray(plane["corners"]) == pytest.approx(oc_corners)
+    assert plane["normale"] == pytest.approx([0.0, 0.0, 1.0])

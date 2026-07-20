@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Engine detector 'fused' per il backend: incapsula la pipeline slice-contours
 -> fused planes. Dalla mesh OC genera
-i piani candidati CGAL, taglia le fette, li fonde e restituisce i piani in frame
-OC (per l'overlay sull'editor) con area in m² reali.
+allinea una copia nel frame ARKit, screma i perimetri persistenti e restituisce
+i piani nel frame OC originale con area in m² reali.
 
 Uso: python -m scripts.detect_planes_fused mesh.obj --out /tmp/piani --scale 6.0927
 """
@@ -22,14 +22,19 @@ def main():
     ap.add_argument("mesh")
     ap.add_argument("--out", required=True, help="base output (scrive <out>.json)")
     ap.add_argument("--scale", type=float, required=True, help="scala metri per unita mesh")
+    ap.add_argument("--transform", help="similarita OC->ARKit completa")
     ap.add_argument("--up", type=float, nargs=3, default=[0.0, 1.0, 0.0])  # ignorato
     ap.add_argument("--slice-index", default="auto")
     args = ap.parse_args()
 
     with tempfile.TemporaryDirectory(prefix="fused_") as wd:
-        subprocess.run([sys.executable, _RUN, "--oc-mesh", args.mesh,
-                        "--scale", str(args.scale), "--slice-index", str(args.slice_index),
-                        "--out-dir", wd], check=True)
+        command = [sys.executable, _RUN, "--oc-mesh", args.mesh,
+                   "--slice-index", str(args.slice_index), "--out-dir", wd]
+        if args.transform:
+            command += ["--transform", args.transform]
+        else:
+            command += ["--scale", str(args.scale)]
+        subprocess.run(command, check=True)
         det = json.load(open(os.path.join(wd, "detected_planes.json")))
 
     doc = {"up": args.up, "engine": "fused", "planes": det["planes"],
