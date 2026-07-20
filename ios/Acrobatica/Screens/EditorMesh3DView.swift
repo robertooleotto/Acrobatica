@@ -3554,11 +3554,15 @@ final class Mesh3DModel: ObservableObject {
         let z: Int
     }
     private var ocTextureParts: [OCTexturePart] = []
+    /// Corrispondenza 1:1 fra i triangoli editabili correnti e quelli della
+    /// geometria OC texturizzata. Disponibile quando l'editor nasce dalla raw.
+    private var textureTriangleIds: [Int]?
+    private var textureTriangleIdsOriginali: [Int]?
     var haTexturaOC: Bool { ocTextureNode != nil }
     @Published var puoUndo = false
     @Published var puoRedo = false
-    private var undoStack: [(EditableMesh, Set<Int>, [FacciaProxy])] = []
-    private var redoStack: [(EditableMesh, Set<Int>, [FacciaProxy])] = []
+    private var undoStack: [(EditableMesh, Set<Int>, [FacciaProxy], [Int]?)] = []
+    private var redoStack: [(EditableMesh, Set<Int>, [FacciaProxy], [Int]?)] = []
     private let maxUndo = 8
 
     // Creazione faccia per punti
@@ -3647,6 +3651,9 @@ final class Mesh3DModel: ObservableObject {
     /// Installa la mesh editabile: render, statistiche, scala marker, frame.
     private func installaMesh(_ m: EditableMesh) {
         mesh = m
+        textureTriangleIds = textureTriangleIdsOriginali.flatMap {
+            $0.count == m.triangleCount ? $0 : nil
+        }
         selezione = []
         facce = []; facciaAttivaId = nil; pianiGenerati = 0; mostraPiani = false
         annullaRevisionePiani()
@@ -3758,7 +3765,7 @@ final class Mesh3DModel: ObservableObject {
                 // livello texturizzato. Registra materiali e triangoli dopo
                 // l'installazione, cosi' il Box la clippa durante il drag e il
                 // crop definitivo elimina anche le porzioni della texture OC.
-                registraPartiTexture(radice)
+                registraPartiTexture(radice, associaDirettamente: true)
                 aggiornaClip()
                 mostraTexturaOC = true
             } else {
@@ -3826,7 +3833,7 @@ final class Mesh3DModel: ObservableObject {
             radice.isHidden = true
             contentNode.addChildNode(radice)
             ocTextureNode = radice
-            registraPartiTexture(radice)
+            registraPartiTexture(radice, associaDirettamente: true)
             sincronizzaTextureConMesh()
             mostraTexturaOC = true
             return true
@@ -4124,7 +4131,10 @@ final class Mesh3DModel: ObservableObject {
 
     /// Conserva sorgenti, materiali e triangoli originali del livello OC. Gli
     /// elementi possono cosi' essere ricostruiti senza perdere UV e texture.
-    private func registraPartiTexture(_ root: SCNNode) {
+    private func registraPartiTexture(
+        _ root: SCNNode,
+        associaDirettamente: Bool = false
+    ) {
         ocTextureParts = []
         root.enumerateHierarchy { node, _ in
             guard let geometry = node.geometry,
@@ -4164,6 +4174,41 @@ final class Mesh3DModel: ObservableObject {
                 triangles: elementTriangles,
                 centroids: elementCentroids))
         }
+        let total = ocTextureParts.reduce(0) { partial, part in
+            partial + part.triangles.reduce(0) { $0 + $1.count }
+        }
+        var directMatch = associaDirettamente && total == mesh.triangleCount
+        if directMatch {
+            let (lo, hi) = mesh.aabb
+            let tolerance = max(simd_length(hi - lo) * 0.0002, 1e-5)
+            let sampleStep = max(1, total / 256)
+            var globalIndex = 0
+            var checked = 0
+            var matched = 0
+            for part in ocTextureParts {
+                for centroids in part.centroids {
+                    for centroid in centroids {
+                        if globalIndex.isMultiple(of: sampleStep) {
+                            checked += 1
+                            let editable = mesh.centroid(mesh.triangles[globalIndex])
+                            if simd_distance(centroid, editable) <= tolerance {
+                                matched += 1
+                            }
+                        }
+                        globalIndex += 1
+                    }
+                }
+            }
+            directMatch = checked > 0 && matched * 100 >= checked * 98
+        }
+        if directMatch {
+            let ids = Array(0..<total)
+            textureTriangleIds = ids
+            textureTriangleIdsOriginali = ids
+        } else {
+            textureTriangleIds = nil
+            textureTriangleIdsOriginali = nil
+        }
     }
 
     /// Ritaglia la topologia raw texturizzata sulla superficie clean corrente.
@@ -4171,6 +4216,11 @@ final class Mesh3DModel: ObservableObject {
     /// nello spazio con una griglia e distanza punto-triangolo.
     private func sincronizzaTextureConMesh() {
         guard !ocTextureParts.isEmpty, !mesh.triangles.isEmpty else { return }
+
+        if let ids = textureTriangleIds, ids.count == mesh.triangleCount {
+            sincronizzaTextureDirettamente(ids)
+            return
+        }
 
         let (lo, hi) = mesh.aabb
         let extent = max(hi.x - lo.x, max(hi.y - lo.y, hi.z - lo.z))
@@ -4254,6 +4304,55 @@ final class Mesh3DModel: ObservableObject {
             part.node.geometry = geometry
         }
         aggiornaClip()
+    }
+
+    /// Percorso veloce per la raw Object Capture: il taglio cambia soltanto la
+    /// compattezza degli array, non l'identita' dei triangoli originali.
+    private func sincronizzaTextureDirettamente(_ ids: [Int]) {
+        let total = ocTextureParts.reduce(0) { partial, part in
+            partial + part.triangles.reduce(0) { $0 + $1.count }
+        }
+        var kept = [Bool](repeating: false, count: total)
+        for id in ids where kept.indices.contains(id) { kept[id] = true }
+
+        var originalId = 0
+        for part in ocTextureParts {
+            var elements: [SCNGeometryElement] = []
+            elements.reserveCapacity(part.triangles.count)
+            for triangles in part.triangles {
+                var indices: [UInt32] = []
+                indices.reserveCapacity(triangles.count * 3)
+                for triangle in triangles {
+                    if kept[originalId],
+                       Int(triangle.x) < part.vertexCount,
+                       Int(triangle.y) < part.vertexCount,
+                       Int(triangle.z) < part.vertexCount {
+                        indices.append(contentsOf: [triangle.x, triangle.y, triangle.z])
+                    }
+                    originalId += 1
+                }
+                elements.append(SCNGeometryElement(
+                    indices: indices, primitiveType: .triangles))
+            }
+            let geometry = SCNGeometry(sources: part.sources, elements: elements)
+            geometry.materials = part.materials
+            part.node.geometry = geometry
+        }
+        aggiornaClip()
+    }
+
+    private func rimappaTexture(_ remap: [Int]) {
+        guard let oldIds = textureTriangleIds, oldIds.count == remap.count else {
+            textureTriangleIds = nil
+            return
+        }
+        let newCount = remap.max().map { $0 + 1 } ?? 0
+        var newIds = [Int](repeating: -1, count: newCount)
+        for oldIndex in remap.indices {
+            let newIndex = remap[oldIndex]
+            if newIndex >= 0 { newIds[newIndex] = oldIds[oldIndex] }
+        }
+        textureTriangleIds = newIds
     }
 
     /// Distanza quadrata fra un punto e un triangolo (Real-Time Collision
@@ -4528,6 +4627,7 @@ final class Mesh3DModel: ObservableObject {
         annullaRevisionePiani()
         registraUndo()
         let remap = mesh.elimina(sel)
+        rimappaTexture(remap)
         meshRevision += 1
         rimappaFacce(remap)
         if !inverti { ritagliaPianiAlBox() }
@@ -4679,6 +4779,7 @@ final class Mesh3DModel: ObservableObject {
         annullaRevisionePiani()
         registraUndo()
         let remap = mesh.elimina(selezione)
+        rimappaTexture(remap)
         meshRevision += 1
         rimappaFacce(remap)
         selezione = []
@@ -4688,7 +4789,7 @@ final class Mesh3DModel: ObservableObject {
 
     func registraUndo() {
         invalidaPianiTexturizzatiLocali()
-        undoStack.append((mesh, selezione, facce))
+        undoStack.append((mesh, selezione, facce, textureTriangleIds))
         if undoStack.count > maxUndo { undoStack.removeFirst() }
         redoStack.removeAll()
         puoUndo = true; puoRedo = false
@@ -4715,10 +4816,10 @@ final class Mesh3DModel: ObservableObject {
     }
 
     func undo() {
-        guard let (m, s, f) = undoStack.popLast() else { return }
+        guard let (m, s, f, textureIds) = undoStack.popLast() else { return }
         annullaRevisionePiani()
-        redoStack.append((mesh, selezione, facce))
-        mesh = m; selezione = s; facce = f
+        redoStack.append((mesh, selezione, facce, textureTriangleIds))
+        mesh = m; selezione = s; facce = f; textureTriangleIds = textureIds
         meshRevision += 1
         workspaceRevision += 1
         puoUndo = !undoStack.isEmpty; puoRedo = true
@@ -4726,10 +4827,10 @@ final class Mesh3DModel: ObservableObject {
     }
 
     func redo() {
-        guard let (m, s, f) = redoStack.popLast() else { return }
+        guard let (m, s, f, textureIds) = redoStack.popLast() else { return }
         annullaRevisionePiani()
-        undoStack.append((mesh, selezione, facce))
-        mesh = m; selezione = s; facce = f
+        undoStack.append((mesh, selezione, facce, textureTriangleIds))
+        mesh = m; selezione = s; facce = f; textureTriangleIds = textureIds
         meshRevision += 1
         workspaceRevision += 1
         puoUndo = true; puoRedo = !redoStack.isEmpty
@@ -4940,9 +5041,12 @@ final class Mesh3DModel: ObservableObject {
         do {
             let r = try await BackendAPIClient.shared.detectPlanes(
                 sessionId: sessionId, up: [0, 1, 0])
-            applicaPianiRilevati(
-                r.planes,
-                adattaAllaMeshCorrente: meshRevision != revisionAtStart)
+            guard meshRevision == revisionAtStart else {
+                cursoreInfo = "Mesh modificata: ricalcolo piani necessario"
+                segmentando = false
+                return
+            }
+            applicaPianiRilevati(r.planes)
             cursoreInfo = "Piani riconosciuti: \(facce.count)"
         } catch {
             cursoreInfo = "Riconoscimento fallito: \(error.localizedDescription)"
@@ -4953,7 +5057,6 @@ final class Mesh3DModel: ObservableObject {
     /// Sostituisce le facce coi piani rilevati dal backend (quad + tipo).
     func applicaPianiRilevati(
         _ planes: [BackendAPIClient.DetectedPlane],
-        adattaAllaMeshCorrente: Bool = false,
         registraModifica: Bool = true
     ) {
         if registraModifica { registraUndo() }
@@ -4973,22 +5076,12 @@ final class Mesh3DModel: ObservableObject {
             f.poligono = p.corners.compactMap { c in
                 c.count == 3 ? SIMD3<Float>(c[0], c[1], c[2]) : nil
             }
-            if !adattaAllaMeshCorrente, let tri = p.triangoli {
+            if let tri = p.triangoli {
                 // Gli indici appartengono esattamente alla revisione inviata al
                 // detector. Non importare mai riferimenti fuori dai buffer.
                 f.triangoli = Set(tri.filter { mesh.triangles.indices.contains($0) })
             }
             facce.append(f)
-        }
-        if adattaAllaMeshCorrente {
-            // La mesh e' cambiata mentre il detector lavorava: gli indici remoti
-            // non sono piu' semanticamente validi anche quando rientrano nel
-            // nuovo range. Ricava nuovamente il supporto dal piano geometrico.
-            for i in facce.indices {
-                facce[i].triangoli = trovaSupportoPiano(facce[i])
-            }
-            facce.removeAll { $0.triangoli.isEmpty }
-            for id in facce.map(\.id) { generaPoligono(perFaccia: id) }
         }
         facciaAttivaId = facce.first?.id
         pianiGenerati = facce.count

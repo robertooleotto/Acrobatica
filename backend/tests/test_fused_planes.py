@@ -110,6 +110,45 @@ def test_shared_extrusion_makes_facade_and_reveal_rectangular():
     assert planes[0]["corners"][2] == pytest.approx(planes[1]["corners"][3], abs=1e-8)
 
 
+def test_nearly_parallel_neighbors_do_not_create_remote_edges():
+    fusion = {
+        "planes": [],
+        "segments": [
+            {
+                "index": 0, "plane_id": 1,
+                "joined_a": [0.0, 2.0, 0.0],
+                "joined_b": [4.0, 2.0, 0.0],
+                "length": 4.0, "distance": 0.0, "angle_diff": 0.0,
+            },
+            {
+                "index": 1, "plane_id": 2,
+                "joined_a": [4.0, 2.0, 0.0],
+                "joined_b": [8.0, 2.0, 0.05],
+                "length": 4.0, "distance": 0.0, "angle_diff": 0.0,
+            },
+        ],
+    }
+    sources = {
+        1: {
+            "id": 1, "name": "Facciata 1", "type": "facciata",
+            "point": [0.0, 0.0, 0.0], "normal": [0.0, 0.0, 1.0],
+            "fit_weight": 100.0,
+        },
+        2: {
+            "id": 2, "name": "Facciata 2", "type": "facciata",
+            "point": [0.0, 0.0, 1.0], "normal": [0.02, 0.0, 0.9998],
+            "fit_weight": 100.0,
+        },
+    }
+
+    planes = build_planes(fusion, sources, ymin=0.0, ymax=10.0)
+
+    assert len(planes) == 2
+    assert max(abs(value) for plane in planes for corner in plane["corners"]
+               for value in corner) < 20.0
+    assert max(plane["w"] for plane in planes) < 10.0
+
+
 def test_detected_planes_return_mesh_frame_and_metric_measurements():
     fused = {"planes": [{
         "nome": "Facciata 1", "tipo": "facciata", "punto": [2.0, 4.0, 6.0],

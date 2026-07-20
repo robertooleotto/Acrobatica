@@ -52,7 +52,9 @@ def intersect_planes_at_y(plane_a, plane_b, y):
     ca = plane_constant(na, plane_a["point"]) - na[1] * y
     cb = plane_constant(nb, plane_b["point"]) - nb[1] * y
     det = na[0] * nb[2] - nb[0] * na[2]
-    if abs(det) <= 1e-9:
+    # Due piani quasi paralleli si incontrano a centinaia di metri dalla mesh.
+    # Non e' uno spigolo architettonico utilizzabile: conserva il bordo rilevato.
+    if abs(det) <= 0.15:
         return None
     x = (ca * nb[2] - cb * na[2]) / det
     z = (na[0] * cb - nb[0] * ca) / det
@@ -342,6 +344,10 @@ def build_planes(fusion, original_by_id, ymin, ymax):
         reference_y,
         sum(point[2] for point in reference_points) / len(reference_points),
     ]
+    xs = [point[0] for point in reference_points]
+    zs = [point[2] for point in reference_points]
+    perimeter_span = math.hypot(max(xs) - min(xs), max(zs) - min(zs))
+    max_edge_adjustment = max(1.0, min(5.0, perimeter_span * 0.08))
     sources = {
         plane_id: regularize_plane_for_extrusion(source, extrusion, reference_y)
         for plane_id, source in raw_sources.items()
@@ -356,6 +362,8 @@ def build_planes(fusion, original_by_id, ymin, ymax):
         point = None
         if neighbor and neighbor["id"] != current["id"]:
             point = intersect_planes_at_y(current, neighbor, reference_y)
+            if point is not None and xz_dist(point, original_point) > max_edge_adjustment:
+                point = None
         if point is None:
             projected = project_keep_y(original_point, current["normal"], current["point"])
             point = point_on_plane_with_y(
@@ -386,6 +394,10 @@ def build_planes(fusion, original_by_id, ymin, ymax):
 
         reference_a = reference_edge_point(a, current, prev_plane)
         reference_b = reference_edge_point(b, current, next_plane)
+        expected_width = max(xz_dist(a, b), 0.1)
+        if xz_dist(reference_a, reference_b) > expected_width + 2.0 * max_edge_adjustment:
+            reference_a = reference_edge_point(a, current, None)
+            reference_b = reference_edge_point(b, current, None)
         bottom_a = translated(reference_a, lower_offset)
         bottom_b = translated(reference_b, lower_offset)
         top_b = translated(reference_b, upper_offset)
