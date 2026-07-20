@@ -109,12 +109,9 @@ def classify_plane(plane, main_normal):
     return "spalla"
 
 
-def minimum_candidate_area(plane_type, min_area, relative_floor):
-    # Narrow reveals naturally have less support than the main facade. Their
-    # validity is checked later against the regularized perimeter segments.
-    if plane_type == "spalla":
-        return min_area
-    return max(min_area, relative_floor)
+def filter_candidates_by_area(planes, min_area):
+    """Apply only a scale-local noise floor; semantic labels are irrelevant."""
+    return [plane for plane in planes if plane["area"] >= min_area]
 
 
 def main():
@@ -127,8 +124,6 @@ def main():
     ap.add_argument("--maxa", type=float, default=25.0)
     ap.add_argument("--minr", type=int, default=25)
     ap.add_argument("--min-area", type=float, default=0.05)  # unità OC² (~1.8 m²)
-    ap.add_argument("--relative-min-area", type=float, default=0.035,
-                    help="quota minima per facciate/falde rispetto al maggiore piano verticale")
     ap.add_argument("--cop-ang", type=float, default=8.0)
     ap.add_argument("--cop-off", type=float, default=0.08)
     args = ap.parse_args()
@@ -139,16 +134,11 @@ def main():
 
     vertical = [p for p in merged if abs(float(p["n"] @ [0, 1, 0])) <= 0.35]
     main_vertical = max(vertical, key=lambda p: p["area"], default=None)
-    relative_floor = (main_vertical["area"] * args.relative_min_area
-                      if main_vertical is not None else 0.0)
     main_n = main_vertical["n"] if main_vertical is not None else np.array([0, 0, 1.])
-    candidates = []
-    for plane in merged:
-        plane_type = classify_plane(plane, main_n)
-        area_floor = minimum_candidate_area(
-            plane_type, args.min_area, relative_floor)
-        if plane["area"] >= area_floor:
-            candidates.append((plane, plane_type))
+    candidates = [
+        (plane, classify_plane(plane, main_n))
+        for plane in filter_candidates_by_area(merged, args.min_area)
+    ]
 
     planes = []
     for i, (p, tipo) in enumerate(candidates):

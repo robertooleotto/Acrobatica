@@ -319,6 +319,60 @@ def coalesce_plane_segments(segments, max_unassigned_bridge=2.0):
     return out
 
 
+def classify_final_plane_types(planes, direction_tolerance_deg=20.0,
+                               facade_family_ratio=0.40):
+    """Assign semantic types after geometry exists, using direction families."""
+    if not planes:
+        return planes
+    cosine = math.cos(math.radians(direction_tolerance_deg))
+    parent = list(range(len(planes)))
+
+    def find(index):
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    directions = []
+    for plane in planes:
+        normal = norm(plane["normale"])
+        horizontal = math.hypot(normal[0], normal[2])
+        directions.append(
+            [normal[0] / horizontal, normal[2] / horizontal]
+            if horizontal > 1e-9 else [0.0, 0.0])
+
+    for i in range(len(planes)):
+        for j in range(i + 1, len(planes)):
+            similarity = abs(dot(
+                [directions[i][0], 0.0, directions[i][1]],
+                [directions[j][0], 0.0, directions[j][1]],
+            ))
+            if similarity >= cosine:
+                parent[find(i)] = find(j)
+
+    family_widths = {}
+    for index, plane in enumerate(planes):
+        root = find(index)
+        family_widths[root] = family_widths.get(root, 0.0) + float(plane.get("w", 0.0))
+    dominant_width = max(family_widths.values(), default=0.0)
+
+    counters = {"facciata": 0, "spalla": 0}
+    for index, plane in enumerate(planes):
+        family_width = family_widths[find(index)]
+        plane_type = (
+            "facciata"
+            if dominant_width <= 1e-9
+            or family_width >= dominant_width * facade_family_ratio
+            else "spalla"
+        )
+        counters[plane_type] += 1
+        label = "Facciata" if plane_type == "facciata" else "Spalletta"
+        plane["tipo"] = plane_type
+        plane["nome"] = f"{label} {counters[plane_type]} · seg {plane['id']}"
+        plane["classification"] = "post_geometry_direction_family"
+    return planes
+
+
 def build_planes(fusion, original_by_id, ymin, ymax):
     by_id = {p["id"]: p for p in fusion["planes"]}
     out = []
@@ -435,7 +489,7 @@ def build_planes(fusion, original_by_id, ymin, ymax):
             "h": height,
             "n_triangoli": 2,
         })
-    return out
+    return classify_final_plane_types(out)
 
 
 def write_viewer(out_dir, data, bundle_path):

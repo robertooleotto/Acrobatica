@@ -124,7 +124,7 @@ def load_planes(path, verticalize):
     color_i = 0
     for p in data["planes"]:
         n = p["normale"]
-        if abs(n[1]) > 0.35:
+        if abs(n[1]) > 0.30:
             continue
         if verticalize:
             nx, _, nz = n

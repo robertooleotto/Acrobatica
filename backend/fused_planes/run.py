@@ -22,6 +22,9 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+
+from assign_slice_to_planes import assign_segments, load_planes  # noqa: E402
 
 
 def sh(cmd):
@@ -97,6 +100,64 @@ def dominant_angle(planes_path):
     return math.degrees(math.atan2(float(nx), -float(nz))) % 180.0
 
 
+def candidate_is_persistent(slice_count, total_slices, y_span, support_length,
+                            min_ratio=0.15, min_count=3,
+                            min_y_span=1.5, min_support_length=8.0):
+    required = max(min_count, math.ceil(total_slices * min_ratio))
+    return (slice_count >= required and y_span >= min_y_span
+            and support_length >= min_support_length)
+
+
+def validate_candidates_with_slices(stack_path, planes_path, output_path,
+                                    max_dist=2.5, max_angle=14.0):
+    """Keep planes that repeatedly explain the perimeter, regardless of label."""
+    stack = json.load(open(stack_path))
+    document = json.load(open(planes_path))
+    planes = load_planes(planes_path, True)
+    stats = {
+        plane["id"]: {"slices": set(), "ys": [], "length": 0.0}
+        for plane in planes
+    }
+    for slice_index, slice_data in enumerate(stack.get("slices", [])):
+        for segment in assign_segments(slice_data, planes, max_dist, max_angle):
+            plane_id = segment.get("plane_id")
+            if plane_id is None:
+                continue
+            item = stats[plane_id]
+            item["slices"].add(slice_index)
+            item["ys"].append(float(slice_data["y"]))
+            item["length"] += float(segment.get("length", 0.0))
+
+    total_slices = len(stack.get("slices", []))
+    accepted = set()
+    summary = {}
+    for plane_id, item in stats.items():
+        y_span = (max(item["ys"]) - min(item["ys"])) if item["ys"] else 0.0
+        slice_count = len(item["slices"])
+        keep = candidate_is_persistent(
+            slice_count, total_slices, y_span, item["length"])
+        summary[str(plane_id)] = {
+            "slices": slice_count,
+            "y_span": y_span,
+            "support_length": item["length"],
+            "accepted": keep,
+        }
+        if keep:
+            accepted.add(plane_id)
+
+    validated = dict(document)
+    validated["planes"] = [
+        plane for plane in document.get("planes", [])
+        if plane.get("id") in accepted
+    ]
+    validated["slice_validation"] = summary
+    with open(output_path, "w") as output:
+        json.dump(validated, output)
+    if not validated["planes"]:
+        raise RuntimeError("Nessun candidato planare persiste lungo le fette")
+    return validated
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -158,6 +219,13 @@ def main():
     sh([py, os.path.join(HERE, "simplify_stack.py"), stack_before, stack,
         "--source-key", "raw", "--angle-deg", str(angle),
         "--line-tolerance", str(args.line_tolerance), "--min-edge", str(args.min_edge)])
+
+    validated_planes = os.path.join(out, "validated_cgal_planes.json")
+    validated = validate_candidates_with_slices(
+        stack, args_planes, validated_planes,
+        max_dist=args.max_dist, max_angle=args.max_angle)
+    print(f"[validate] candidati persistenti = {len(validated['planes'])}")
+    args_planes = validated_planes
 
     # (a) scelta fetta: auto o indice esplicito
     if str(args.slice_index) == "auto":

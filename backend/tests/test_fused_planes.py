@@ -7,14 +7,20 @@ import pytest
 from fused_planes.build_cgal_planes import (
     classify_plane,
     convex_hull_indices,
-    minimum_candidate_area,
+    filter_candidates_by_area,
 )
 from fused_planes.build_fused_planes import (
     build_planes,
+    classify_final_plane_types,
     coalesce_plane_segments,
     robust_facade_samples,
 )
-from fused_planes.run import dominant_angle, pick_best_slice, to_detected_planes
+from fused_planes.run import (
+    candidate_is_persistent,
+    dominant_angle,
+    pick_best_slice,
+    to_detected_planes,
+)
 
 
 def test_convex_hull_excludes_interior_points():
@@ -23,15 +29,36 @@ def test_convex_hull_excludes_interior_points():
     assert set(hull) == {0, 1, 2, 3}
 
 
-def test_narrow_reveal_does_not_inherit_main_facade_area_floor():
+def test_candidate_area_filter_does_not_depend_on_semantic_type():
     main_normal = np.array([0.0, 0.0, 1.0])
-    reveal = {"n": np.array([1.0, 0.0, 0.0])}
-    facade = {"n": np.array([0.0, 0.0, 1.0])}
+    reveal = {"n": np.array([1.0, 0.0, 0.0]), "area": 0.10}
+    facade = {"n": np.array([0.0, 0.0, 1.0]), "area": 0.10}
 
     assert classify_plane(reveal, main_normal) == "spalla"
     assert classify_plane(facade, main_normal) == "facciata"
-    assert minimum_candidate_area("spalla", 0.05, 0.80) == 0.05
-    assert minimum_candidate_area("facciata", 0.05, 0.80) == 0.80
+    assert filter_candidates_by_area([reveal, facade], 0.05) == [reveal, facade]
+
+
+def test_candidate_requires_persistence_across_slices():
+    assert candidate_is_persistent(12, 60, 8.0, 30.0)
+    assert not candidate_is_persistent(5, 60, 8.0, 30.0)
+    assert not candidate_is_persistent(20, 60, 1.0, 30.0)
+
+
+def test_final_types_follow_direction_families_not_candidate_labels():
+    planes = [
+        {"id": 0, "nome": "candidate", "tipo": "spalla",
+         "normale": [0.0, 0.0, 1.0], "w": 10.0},
+        {"id": 1, "nome": "candidate", "tipo": "facciata",
+         "normale": [1.0, 0.0, 0.0], "w": 2.0},
+        {"id": 2, "nome": "candidate", "tipo": "spalla",
+         "normale": [0.0, 0.0, -1.0], "w": 10.0},
+    ]
+
+    classified = classify_final_plane_types(planes)
+
+    assert [plane["tipo"] for plane in classified] == [
+        "facciata", "spalla", "facciata"]
 
 
 def test_pick_best_slice_uses_stable_lower_middle_ring(tmp_path):
