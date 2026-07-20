@@ -4212,8 +4212,8 @@ final class Mesh3DModel: ObservableObject {
     }
 
     /// Ritaglia la topologia raw texturizzata sulla superficie clean corrente.
-    /// Le due mesh hanno triangolazioni diverse, quindi l'associazione e' fatta
-    /// nello spazio con una griglia e distanza punto-triangolo.
+    /// La pulizia elimina triangoli senza spostarli: i centroidi permettono una
+    /// corrispondenza lineare anche dopo la compattazione degli indici OBJ.
     private func sincronizzaTextureConMesh() {
         guard !ocTextureParts.isEmpty, !mesh.triangles.isEmpty else { return }
 
@@ -4224,47 +4224,53 @@ final class Mesh3DModel: ObservableObject {
 
         let (lo, hi) = mesh.aabb
         let extent = max(hi.x - lo.x, max(hi.y - lo.y, hi.z - lo.z))
-        let sampleStep = max(1, mesh.triangles.count / 5_000)
-        var sampledEdges: [Float] = []
-        sampledEdges.reserveCapacity(5_001)
-        for i in stride(from: 0, to: mesh.triangles.count, by: sampleStep) {
-            let t = mesh.triangles[i]
-            let a = mesh.vertices[Int(t.x)]
-            let b = mesh.vertices[Int(t.y)]
-            let c = mesh.vertices[Int(t.z)]
-            sampledEdges.append(max(simd_length(a - b), max(simd_length(b - c), simd_length(c - a))))
-        }
-        sampledEdges.sort()
-        let medianEdge = sampledEdges[sampledEdges.count / 2]
-        let tolerance = max(extent * 0.001, medianEdge * 1.5)
-        let cellSize = max(tolerance * 4, extent * 0.002)
+        let tolerance = max(extent * 0.00001, 2e-5)
+        let cellSize = tolerance * 4
 
         func key(_ p: SIMD3<Float>) -> TextureGridKey {
             TextureGridKey(
-                x: Int(floor(Double(p.x / cellSize))),
-                y: Int(floor(Double(p.y / cellSize))),
-                z: Int(floor(Double(p.z / cellSize))))
+                x: Int((p.x / cellSize).rounded()),
+                y: Int((p.y / cellSize).rounded()),
+                z: Int((p.z / cellSize).rounded()))
         }
 
+        let cleanCentroids = mesh.triangles.map(mesh.centroid)
         var grid: [TextureGridKey: [Int]] = [:]
         grid.reserveCapacity(mesh.triangles.count / 2)
-        let pad = SIMD3<Float>(repeating: tolerance)
-        for (index, t) in mesh.triangles.enumerated() {
-            let a = mesh.vertices[Int(t.x)]
-            let b = mesh.vertices[Int(t.y)]
-            let c = mesh.vertices[Int(t.z)]
-            let minKey = key(simd_min(a, simd_min(b, c)) - pad)
-            let maxKey = key(simd_max(a, simd_max(b, c)) + pad)
-            for x in minKey.x...maxKey.x {
-                for y in minKey.y...maxKey.y {
-                    for z in minKey.z...maxKey.z {
-                        grid[TextureGridKey(x: x, y: y, z: z), default: []].append(index)
-                    }
-                }
-            }
+        for (index, centroid) in cleanCentroids.enumerated() {
+            grid[key(centroid), default: []].append(index)
         }
 
         let maxDistance2 = tolerance * tolerance
+        var mappedIds = [Int](repeating: -1, count: mesh.triangleCount)
+        func cleanTriangle(for point: SIMD3<Float>) -> Int? {
+            let center = key(point)
+            if let candidates = grid[center],
+               let match = candidates.first(where: { index in
+                   mappedIds[index] < 0 &&
+                       simd_length_squared(cleanCentroids[index] - point) <= maxDistance2
+               }) {
+                return match
+            }
+            for x in (center.x - 1)...(center.x + 1) {
+                for y in (center.y - 1)...(center.y + 1) {
+                    for z in (center.z - 1)...(center.z + 1) {
+                        if x == center.x, y == center.y, z == center.z { continue }
+                        let neighbor = TextureGridKey(x: x, y: y, z: z)
+                        if let candidates = grid[neighbor],
+                           let match = candidates.first(where: { index in
+                               mappedIds[index] < 0 &&
+                                   simd_length_squared(cleanCentroids[index] - point) <= maxDistance2
+                           }) {
+                            return match
+                        }
+                    }
+                }
+            }
+            return nil
+        }
+
+        var originalId = 0
         for part in ocTextureParts {
             var elements: [SCNGeometryElement] = []
             elements.reserveCapacity(part.triangles.count)
@@ -4274,26 +4280,19 @@ final class Mesh3DModel: ObservableObject {
                 var keptIndices: [UInt32] = []
                 keptIndices.reserveCapacity(triangles.count * 3)
                 for i in triangles.indices {
+                    let currentOriginalId = originalId
+                    originalId += 1
                     let p = centroids[i]
-                    guard let candidates = grid[key(p)] else { continue }
-                    var keep = false
-                    for cleanIndex in candidates {
-                        let t = mesh.triangles[cleanIndex]
-                        let a = mesh.vertices[Int(t.x)]
-                        let b = mesh.vertices[Int(t.y)]
-                        let c = mesh.vertices[Int(t.z)]
-                        if Self.distanza2(punto: p, triangolo: (a, b, c)) <= maxDistance2 {
-                            keep = true
-                            break
-                        }
-                    }
-                    if keep {
+                    if let cleanIndex = cleanTriangle(for: p) {
                         let t = triangles[i]
                         guard Int(t.x) < part.vertexCount,
                               Int(t.y) < part.vertexCount,
                               Int(t.z) < part.vertexCount
                         else { continue }
                         keptIndices.append(contentsOf: [t.x, t.y, t.z])
+                        if mappedIds[cleanIndex] < 0 {
+                            mappedIds[cleanIndex] = currentOriginalId
+                        }
                     }
                 }
                 elements.append(SCNGeometryElement(
@@ -4302,6 +4301,10 @@ final class Mesh3DModel: ObservableObject {
             let geometry = SCNGeometry(sources: part.sources, elements: elements)
             geometry.materials = part.materials
             part.node.geometry = geometry
+        }
+        if !mappedIds.contains(-1) {
+            textureTriangleIds = mappedIds
+            textureTriangleIdsOriginali = mappedIds
         }
         aggiornaClip()
     }
@@ -4353,54 +4356,6 @@ final class Mesh3DModel: ObservableObject {
             if newIndex >= 0 { newIds[newIndex] = oldIds[oldIndex] }
         }
         textureTriangleIds = newIds
-    }
-
-    /// Distanza quadrata fra un punto e un triangolo (Real-Time Collision
-    /// Detection, regioni di Voronoi). Evita proiezioni false vicino ai bordi.
-    nonisolated private static func distanza2(
-        punto p: SIMD3<Float>,
-        triangolo: (SIMD3<Float>, SIMD3<Float>, SIMD3<Float>)
-    ) -> Float {
-        let (a, b, c) = triangolo
-        let ab = b - a
-        let ac = c - a
-        let ap = p - a
-        let d1 = simd_dot(ab, ap)
-        let d2 = simd_dot(ac, ap)
-        if d1 <= 0, d2 <= 0 { return simd_length_squared(ap) }
-
-        let bp = p - b
-        let d3 = simd_dot(ab, bp)
-        let d4 = simd_dot(ac, bp)
-        if d3 >= 0, d4 <= d3 { return simd_length_squared(bp) }
-
-        let vc = d1 * d4 - d3 * d2
-        if vc <= 0, d1 >= 0, d3 <= 0 {
-            let v = d1 / (d1 - d3)
-            return simd_length_squared(p - (a + v * ab))
-        }
-
-        let cp = p - c
-        let d5 = simd_dot(ab, cp)
-        let d6 = simd_dot(ac, cp)
-        if d6 >= 0, d5 <= d6 { return simd_length_squared(cp) }
-
-        let vb = d5 * d2 - d1 * d6
-        if vb <= 0, d2 >= 0, d6 <= 0 {
-            let w = d2 / (d2 - d6)
-            return simd_length_squared(p - (a + w * ac))
-        }
-
-        let va = d3 * d6 - d5 * d4
-        if va <= 0, d4 - d3 >= 0, d5 - d6 >= 0 {
-            let w = (d4 - d3) / ((d4 - d3) + (d5 - d6))
-            return simd_length_squared(p - (b + w * (c - b)))
-        }
-
-        let denom = 1 / (va + vb + vc)
-        let v = vb * denom
-        let w = vc * denom
-        return simd_length_squared(p - (a + ab * v + ac * w))
     }
 
     nonisolated private static func caricaOBJEditabile(_ url: URL) -> EditableMesh? {
