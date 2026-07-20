@@ -50,6 +50,42 @@ def slice_at(slicer, mesh, y, angle, max_offset, min_length):
     return contours
 
 
+def slice_batch(slicer, mesh, ys, angle, max_offset, min_length):
+    """Slice every height after loading the mesh once in the native process."""
+    heights_path = output_path = None
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as hf:
+            heights_path = hf.name
+            hf.write("\n".join(f"{y:.6f}" for y in ys))
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as of:
+            output_path = of.name
+
+        subprocess.run(
+            [
+                slicer,
+                mesh,
+                "--batch",
+                heights_path,
+                output_path,
+                str(max_offset),
+                str(min_length),
+                str(angle),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        with open(output_path) as f:
+            payload = json.load(f)
+        slices = payload.get("slices", [])
+        if len(slices) != len(ys):
+            raise ValueError(f"batch slicer: attese {len(ys)} fette, ricevute {len(slices)}")
+        return [(float(item["y"]), item.get("contours", [])) for item in slices]
+    finally:
+        for path in (heights_path, output_path):
+            if path and os.path.exists(path):
+                os.unlink(path)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -70,15 +106,28 @@ def main():
     while y < ymax:
         ys.append(round(y, 6)); y += args.step
 
-    def work(iy):
-        i, yy = iy
-        cs = slice_at(args.slicer, args.mesh, yy, args.angle, args.max_offset, args.min_length)
-        return i, yy, cs
+    try:
+        results = slice_batch(
+            args.slicer,
+            args.mesh,
+            ys,
+            args.angle,
+            args.max_offset,
+            args.min_length,
+        )
+    except (OSError, subprocess.CalledProcessError, json.JSONDecodeError, ValueError) as exc:
+        # Keep compatibility with older locally installed slicers during upgrades.
+        print(f"batch slicer non disponibile ({exc}); uso modalita per-fetta")
 
-    results = [None] * len(ys)
-    with cf.ThreadPoolExecutor(max_workers=args.jobs) as ex:
-        for i, yy, cs in ex.map(work, enumerate(ys)):
-            results[i] = (yy, cs)
+        def work(iy):
+            i, yy = iy
+            cs = slice_at(args.slicer, args.mesh, yy, args.angle, args.max_offset, args.min_length)
+            return i, yy, cs
+
+        results = [None] * len(ys)
+        with cf.ThreadPoolExecutor(max_workers=args.jobs) as ex:
+            for i, yy, cs in ex.map(work, enumerate(ys)):
+                results[i] = (yy, cs)
 
     slices = []
     for i, (yy, cs) in enumerate(results):

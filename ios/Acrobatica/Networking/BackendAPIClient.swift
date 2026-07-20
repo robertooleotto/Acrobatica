@@ -441,6 +441,9 @@ actor BackendAPIClient {
         if let up { payload["up"] = up }
         if let meshKind { payload["mesh_kind"] = meshKind }
         req.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        // La mesh OC grezza puo superare un milione di triangoli: CGAL la
+        // ripara, seziona e fonde nello stesso job prima di rispondere.
+        req.timeoutInterval = 600
         let (data, resp) = try await urlSession.data(for: req)
         try assertHTTPOK(resp, data: data)
         return try JSONDecoder().decode(DetectPlanesResult.self, from: data)

@@ -1,6 +1,10 @@
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
 #include <CGAL/IO/polygon_mesh_io.h>
+#include <CGAL/IO/polygon_soup_io.h>
 #include <CGAL/Polygon_mesh_slicer.h>
+#include <CGAL/Polygon_mesh_processing/orient_polygon_soup.h>
+#include <CGAL/Polygon_mesh_processing/polygon_soup_to_polygon_mesh.h>
+#include <CGAL/Polygon_mesh_processing/repair_polygon_soup.h>
 #include <CGAL/Shape_regularization/regularize_contours.h>
 #include <CGAL/Shape_regularization/Contours/Longest_direction_2.h>
 #include <CGAL/Shape_regularization/Contours/User_defined_directions_2.h>
@@ -19,8 +23,10 @@ using Point_2 = Kernel::Point_2;
 using Point_3 = Kernel::Point_3;
 using Plane_3 = Kernel::Plane_3;
 using Mesh = CGAL::Surface_mesh<Point_3>;
+using Slicer = CGAL::Polygon_mesh_slicer<Mesh, Kernel>;
 
 namespace Contours = CGAL::Shape_regularization::Contours;
+namespace PMP = CGAL::Polygon_mesh_processing;
 
 static bool same_point_2(const Point_2& a, const Point_2& b, const double eps = 1e-7) {
   const double dx = CGAL::to_double(a.x() - b.x());
@@ -45,11 +51,11 @@ static double length_2(const std::vector<Point_2>& pts, const bool closed) {
   return out;
 }
 
-static void write_point(std::ofstream& out, const Point_2& p, const double y) {
+static void write_point(std::ostream& out, const Point_2& p, const double y) {
   out << "[" << CGAL::to_double(p.x()) << "," << y << "," << CGAL::to_double(p.y()) << "]";
 }
 
-static void write_polyline(std::ofstream& out, const std::vector<Point_2>& pts, const double y) {
+static void write_polyline(std::ostream& out, const std::vector<Point_2>& pts, const double y) {
   out << "[";
   for (std::size_t i = 0; i < pts.size(); ++i) {
     if (i) out << ",";
@@ -83,35 +89,39 @@ static std::vector<Kernel::Direction_2> edge_directions_for(
   return out;
 }
 
-int main(int argc, char** argv) {
-  if (argc < 4) {
-    std::cerr << "uso: slice_contours mesh.obj y out.json [max_offset=0.20] [min_length=0.30] [global_angle_deg=nan]\n";
-    return 1;
-  }
-  const std::string mesh_path = argv[1];
-  const double y = std::atof(argv[2]);
-  const std::string out_path = argv[3];
-  const double max_offset = argc > 4 ? std::atof(argv[4]) : 0.20;
-  const double min_length = argc > 5 ? std::atof(argv[5]) : 0.30;
-  const bool use_global_angle = argc > 6;
-  const double global_angle_deg = use_global_angle ? std::atof(argv[6]) : 0.0;
+struct Item {
+  std::vector<Point_2> raw;
+  std::vector<Point_2> regularized;
+  bool closed = false;
+  double length = 0.0;
+};
 
-  Mesh mesh;
-  if (!CGAL::IO::read_polygon_mesh(mesh_path, mesh) || mesh.is_empty()) {
-    std::cerr << "lettura mesh fallita: " << mesh_path << "\n";
-    return 1;
+static bool load_mesh(const std::string& mesh_path, Mesh& mesh) {
+  if (!CGAL::IO::read_polygon_mesh(mesh_path, mesh)) {
+    std::vector<Point_3> points;
+    std::vector<std::vector<std::size_t>> polygons;
+    if (!CGAL::IO::read_polygon_soup(mesh_path, points, polygons)) {
+      return false;
+    }
+    PMP::repair_polygon_soup(points, polygons);
+    PMP::orient_polygon_soup(points, polygons);
+    PMP::polygon_soup_to_polygon_mesh(points, polygons, mesh);
   }
+  return !mesh.is_empty();
+}
 
-  CGAL::Polygon_mesh_slicer<Mesh, Kernel> slicer(mesh);
+static std::vector<Item> slice_items(
+  Slicer& slicer,
+  const double y,
+  const double max_offset,
+  const double min_length,
+  const bool use_global_angle,
+  const double global_angle_deg,
+  std::size_t& raw_count
+) {
   std::vector<std::vector<Point_3>> polylines_3;
   slicer(Plane_3(0.0, 1.0, 0.0, -y), std::back_inserter(polylines_3));
-
-  struct Item {
-    std::vector<Point_2> raw;
-    std::vector<Point_2> regularized;
-    bool closed = false;
-    double length = 0.0;
-  };
+  raw_count = polylines_3.size();
   std::vector<Item> items;
   for (const auto& poly3 : polylines_3) {
     if (poly3.size() < 2) continue;
@@ -159,18 +169,21 @@ int main(int argc, char** argv) {
   std::sort(items.begin(), items.end(), [](const Item& a, const Item& b) {
     return a.length > b.length;
   });
+  return items;
+}
 
-  std::ofstream out(out_path);
-  if (!out) {
-    std::cerr << "scrittura fallita: " << out_path << "\n";
-    return 1;
-  }
-  out << std::fixed << std::setprecision(8);
+static void write_slice_json(
+  std::ostream& out,
+  const Mesh& mesh,
+  const double y,
+  const std::vector<Item>& items,
+  const std::size_t raw_count
+) {
   out << "{";
   out << "\"y\":" << y << ",";
   out << "\"mesh_vertices\":" << mesh.number_of_vertices() << ",";
   out << "\"mesh_faces\":" << mesh.number_of_faces() << ",";
-  out << "\"raw_polyline_count\":" << polylines_3.size() << ",";
+  out << "\"raw_polyline_count\":" << raw_count << ",";
   out << "\"contours\":[";
   for (std::size_t i = 0; i < items.size(); ++i) {
     if (i) out << ",";
@@ -184,19 +197,62 @@ int main(int argc, char** argv) {
     out << "}";
   }
   out << "]}";
+}
 
-  std::cout << "slicer raw=" << polylines_3.size()
-            << " kept=" << items.size()
-            << " y=" << y
-            << " max_offset=" << max_offset
-            << " min_length=" << min_length
-            << " global_angle=" << (use_global_angle ? global_angle_deg : -1.0) << "\n";
-  for (std::size_t i = 0; i < std::min<std::size_t>(items.size(), 12); ++i) {
-    std::cout << "  " << i + 1
-              << " len=" << items[i].length
-              << " raw_pts=" << items[i].raw.size()
-              << " reg_pts=" << items[i].regularized.size()
-              << " closed=" << items[i].closed << "\n";
+int main(int argc, char** argv) {
+  if (argc < 4) {
+    std::cerr << "uso: slice_contours mesh.obj y out.json [max_offset] [min_length] [angle]\n"
+              << "  o: slice_contours mesh.obj --batch heights.txt out.json [max_offset] [min_length] [angle]\n";
+    return 1;
   }
+  const std::string mesh_path = argv[1];
+  const bool batch = std::string(argv[2]) == "--batch";
+  if (batch && argc < 5) return 1;
+  const int option_start = batch ? 5 : 4;
+  const std::string out_path = batch ? argv[4] : argv[3];
+  const double max_offset = argc > option_start ? std::atof(argv[option_start]) : 0.20;
+  const double min_length = argc > option_start + 1 ? std::atof(argv[option_start + 1]) : 0.30;
+  const bool use_global_angle = argc > option_start + 2;
+  const double global_angle_deg = use_global_angle ? std::atof(argv[option_start + 2]) : 0.0;
+
+  Mesh mesh;
+  if (!load_mesh(mesh_path, mesh)) {
+    std::cerr << "lettura mesh fallita: " << mesh_path << "\n";
+    return 1;
+  }
+  std::vector<double> heights;
+  if (batch) {
+    std::ifstream input(argv[3]);
+    double y = 0.0;
+    while (input >> y) heights.push_back(y);
+  } else {
+    heights.push_back(std::atof(argv[2]));
+  }
+  if (heights.empty()) {
+    std::cerr << "nessuna quota da elaborare\n";
+    return 1;
+  }
+
+  std::ofstream out(out_path);
+  if (!out) {
+    std::cerr << "scrittura fallita: " << out_path << "\n";
+    return 1;
+  }
+  out << std::fixed << std::setprecision(8);
+  if (batch) out << "{\"slices\":[";
+  Slicer slicer(mesh);
+  for (std::size_t h = 0; h < heights.size(); ++h) {
+    std::size_t raw_count = 0;
+    const auto items = slice_items(
+      slicer, heights[h], max_offset, min_length,
+      use_global_angle, global_angle_deg, raw_count);
+    if (batch && h) out << ",";
+    write_slice_json(out, mesh, heights[h], items, raw_count);
+    std::cout << "slicer raw=" << raw_count
+              << " kept=" << items.size()
+              << " y=" << heights[h] << "\n";
+  }
+  if (batch) out << "]}";
+
   return 0;
 }

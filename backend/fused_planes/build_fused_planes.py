@@ -140,13 +140,14 @@ def robust_facade_samples(samples, max_offset_from_main=0.55):
     return refined if refined else inliers
 
 
-def fit_perimeter_planes(stack, planes_path):
+def fit_perimeter_planes(stack, planes_path, max_angle=18.0):
     planes = load_planes(planes_path, True)
     vertical_by_id = {p["id"]: p for p in planes}
     samples = {p["id"]: [] for p in planes}
 
     for slice_data in stack["slices"]:
-        segments = assign_segments(slice_data, planes, max_dist=2.5, max_angle=14.0)
+        segments = assign_segments(
+            slice_data, planes, max_dist=2.5, max_angle=max_angle)
         for seg in segments:
             plane_id = seg.get("plane_id")
             if plane_id is None:
@@ -548,7 +549,9 @@ def run(stack_path, fusion_path, planes_path, out_dir, viewer_bundle=None):
 
     stack = json.load(open(stack_path))
     fusion = json.load(open(fusion_path))
-    original_by_id = fit_perimeter_planes(stack, planes_path)
+    original_by_id = fit_perimeter_planes(
+        stack, planes_path,
+        max_angle=float(fusion.get("stats", {}).get("max_angle", 18.0)))
     ymin, ymax = useful_height_bounds(stack)
     planes = build_planes(fusion, original_by_id, ymin, ymax)
     data = {

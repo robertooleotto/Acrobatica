@@ -4,6 +4,10 @@
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
 #include <CGAL/Surface_mesh.h>
 #include <CGAL/IO/polygon_mesh_io.h>
+#include <CGAL/IO/polygon_soup_io.h>
+#include <CGAL/Polygon_mesh_processing/orient_polygon_soup.h>
+#include <CGAL/Polygon_mesh_processing/polygon_soup_to_polygon_mesh.h>
+#include <CGAL/Polygon_mesh_processing/repair_polygon_soup.h>
 #include <CGAL/Shape_detection/Region_growing/Region_growing.h>
 #include <CGAL/Shape_detection/Region_growing/Polygon_mesh.h>
 #include <cmath>
@@ -18,19 +22,43 @@ typedef CGAL::Surface_mesh<Point> Mesh;
 typedef Mesh::Face_index Face;
 
 namespace SD = CGAL::Shape_detection::Polygon_mesh;
+namespace PMP = CGAL::Polygon_mesh_processing;
 typedef SD::One_ring_neighbor_query<Mesh>                             Neighbor_query;
 typedef SD::Least_squares_plane_fit_region<Kernel, Mesh>             Region_type;
 typedef SD::Least_squares_plane_fit_sorting<Kernel, Mesh, Neighbor_query> Sorting;
 typedef CGAL::Shape_detection::Region_growing<Neighbor_query, Region_type> Region_growing;
 
 int main(int argc, char** argv) {
-  if (argc < 2) { std::cerr << "uso: rg mesh.obj [maxd=0.05] [maxa=25] [minr=50]\n"; return 1; }
+  if (argc < 2) { std::cerr << "uso: rg mesh.obj [maxd=0.05] [maxa=25] [minr=50] [mesh_riparata.obj]\n"; return 1; }
   const double maxd = argc > 2 ? atof(argv[2]) : 0.05;
   const double maxa = argc > 3 ? atof(argv[3]) : 25.0;
   const std::size_t minr = argc > 4 ? (std::size_t)atoi(argv[4]) : 50;
 
   Mesh mesh;
-  if (!CGAL::IO::read_polygon_mesh(argv[1], mesh)) { std::cerr << "lettura fallita\n"; return 1; }
+  if (!CGAL::IO::read_polygon_mesh(argv[1], mesh)) {
+    // Gli OBJ esportati da ModelIO possono contenere più submesh che condividono
+    // bordi non-manifold. Non è un errore geometrico, ma Surface_mesh li rifiuta.
+    // Ripariamo solo la connettività della polygon soup, conservando le coordinate.
+    std::vector<Point> points;
+    std::vector<std::vector<std::size_t>> polygons;
+    if (!CGAL::IO::read_polygon_soup(argv[1], points, polygons)) {
+      std::cerr << "lettura fallita\n";
+      return 1;
+    }
+    PMP::repair_polygon_soup(points, polygons);
+    PMP::orient_polygon_soup(points, polygons);
+    PMP::polygon_soup_to_polygon_mesh(points, polygons, mesh);
+    if (num_faces(mesh) == 0) {
+      std::cerr << "polygon soup senza facce utilizzabili\n";
+      return 1;
+    }
+    std::cout << "polygon soup riparata: ";
+  }
+  if (argc > 5 && !CGAL::IO::write_polygon_mesh(
+        argv[5], mesh, CGAL::parameters::stream_precision(17))) {
+    std::cerr << "scrittura mesh riparata fallita\n";
+    return 1;
+  }
   std::cout << num_vertices(mesh) << " vertici, " << num_faces(mesh) << " facce\n";
   std::cout << "parametri: maxd=" << maxd << " m, maxa=" << maxa << " deg, minr=" << minr << "\n";
 

@@ -1409,8 +1409,7 @@ _BACKEND_ROOT = Path(__file__).resolve().parents[2]
 def detect_planes(session_id: str, payload: Optional[dict] = Body(None)):
     """Rileva i piani fondendo regioni CGAL e perimetri orizzontali regolarizzati.
     `up` indica la gravita nel frame mesh; `scale_m_per_mesh_unit` imposta la scala
-    reale della sessione. Open3D e istogrammi restano fallback automatici. Ritorna
-    le facce saldate e pronte per l'editor 3D."""
+    reale della sessione. Ritorna le facce saldate e pronte per l'editor 3D."""
     sess = session_store.get_session(session_id)
     if sess is None:
         raise HTTPException(404, "Sessione non trovata")
@@ -1461,7 +1460,7 @@ def detect_planes(session_id: str, payload: Optional[dict] = Body(None)):
                              str(mesh_local), "--out", str(out_base)]
                 fused_cmd += ["--scale", str(oc_scale)]
                 subprocess.run(fused_cmd, cwd=str(_BACKEND_ROOT), check=True,
-                               capture_output=True, text=True, timeout=300)
+                               capture_output=True, text=True, timeout=600)
                 with open(str(out_base) + ".json") as fh:
                     doc = json.load(fh)
                 raw_planes = doc.get("planes", [])
@@ -1469,6 +1468,16 @@ def detect_planes(session_id: str, payload: Optional[dict] = Body(None)):
             except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
                 doc = None
                 engine_error = ("fused: " + ((getattr(e, "stderr", "") or "") + str(e)))[-400:]
+
+        # La mesh OC grezza richiede la riparazione topologica e la fusione con
+        # le sezioni. Il fallback Open3D produce poligoni indipendenti non
+        # saldabili e non deve essere presentato come un risultato equivalente.
+        if doc is None and requested_kind == "raw" and fused_enabled:
+            raise HTTPException(
+                500,
+                "Rilevamento fused sulla mesh OC fallito. "
+                f"Nessun piano alternativo e' stato salvato. {engine_error}",
+            )
 
         # Su Railway (Nixpacks) LD_LIBRARY_PATH è /usr/lib, ma le librerie apt che
         # servono a open3d (libX11 ecc.) stanno in /usr/lib/x86_64-linux-gnu →

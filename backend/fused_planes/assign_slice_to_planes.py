@@ -219,7 +219,7 @@ def main():
     ap.add_argument("out_json")
     ap.add_argument("--slice-index", type=int, default=27)
     ap.add_argument("--max-dist", type=float, default=2.5)
-    ap.add_argument("--max-angle", type=float, default=14.0)
+    ap.add_argument("--max-angle", type=float, default=18.0)
     ap.add_argument("--no-verticalize", action="store_true")
     args = ap.parse_args()
 

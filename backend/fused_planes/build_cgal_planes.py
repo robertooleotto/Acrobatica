@@ -42,8 +42,11 @@ def convex_hull_indices(points):
     return [item[2] for item in lower[:-1] + upper[:-1]]
 
 
-def run_rg(rg_bin, mesh, workdir, maxd, maxa, minr):
-    subprocess.run([rg_bin, mesh, str(maxd), str(maxa), str(minr)],
+def run_rg(rg_bin, mesh, workdir, maxd, maxa, minr, repaired_mesh=None):
+    command = [rg_bin, mesh, str(maxd), str(maxa), str(minr)]
+    if repaired_mesh:
+        command.append(repaired_mesh)
+    subprocess.run(command,
                    cwd=workdir, check=True, capture_output=True, text=True)
     R = np.genfromtxt(os.path.join(workdir, "regions.csv"), delimiter=",", names=True)
     F = np.genfromtxt(os.path.join(workdir, "faces.csv"), delimiter=",", names=True)
@@ -126,10 +129,13 @@ def main():
     ap.add_argument("--min-area", type=float, default=0.05)  # unità OC² (~1.8 m²)
     ap.add_argument("--cop-ang", type=float, default=8.0)
     ap.add_argument("--cop-off", type=float, default=0.08)
+    ap.add_argument("--repaired-mesh",
+                    help="scrive una copia geometricamente identica e manifold")
     args = ap.parse_args()
 
     with tempfile.TemporaryDirectory(prefix="cgalplanes_") as wd:
-        R, F = run_rg(args.rg, args.mesh, wd, args.maxd, args.maxa, args.minr)
+        R, F = run_rg(args.rg, args.mesh, wd, args.maxd, args.maxa, args.minr,
+                      args.repaired_mesh)
         merged = merge_coplanar(R, args.cop_ang, args.cop_off)
 
     vertical = [p for p in merged if abs(float(p["n"] @ [0, 1, 0])) <= 0.35]

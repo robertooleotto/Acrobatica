@@ -15,6 +15,7 @@ from fused_planes.build_fused_planes import (
     coalesce_plane_segments,
     robust_facade_samples,
 )
+from fused_planes.build_slice_stack import slice_batch
 from fused_planes.run import (
     candidate_is_persistent,
     dominant_angle,
@@ -43,6 +44,28 @@ def test_candidate_requires_persistence_across_slices():
     assert candidate_is_persistent(12, 60, 8.0, 30.0)
     assert not candidate_is_persistent(5, 60, 8.0, 30.0)
     assert not candidate_is_persistent(20, 60, 1.0, 30.0)
+
+
+def test_batch_slicer_loads_all_requested_heights_in_one_process(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        heights = [float(value) for value in open(command[3]).read().splitlines()]
+        with open(command[4], "w") as output:
+            json.dump({"slices": [
+                {"y": y, "contours": [{"length": y}]} for y in heights
+            ]}, output)
+
+    monkeypatch.setattr("fused_planes.build_slice_stack.subprocess.run", fake_run)
+    result = slice_batch("slicer", "mesh.obj", [0.15, 0.45], 28.0, 0.2, 0.3)
+
+    assert len(calls) == 1
+    assert calls[0][0][2] == "--batch"
+    assert result == [
+        (0.15, [{"length": 0.15}]),
+        (0.45, [{"length": 0.45}]),
+    ]
 
 
 def test_final_types_follow_direction_families_not_candidate_labels():

@@ -109,7 +109,7 @@ def candidate_is_persistent(slice_count, total_slices, y_span, support_length,
 
 
 def validate_candidates_with_slices(stack_path, planes_path, output_path,
-                                    max_dist=2.5, max_angle=14.0):
+                                    max_dist=2.5, max_angle=18.0):
     """Keep planes that repeatedly explain the perimeter, regardless of label."""
     stack = json.load(open(stack_path))
     document = json.load(open(planes_path))
@@ -175,7 +175,7 @@ def main():
     ap.add_argument("--min-edge", type=float, default=0.75)
     ap.add_argument("--slice-index", default="auto", help="indice fetta o 'auto'")
     ap.add_argument("--max-dist", type=float, default=2.5)
-    ap.add_argument("--max-angle", type=float, default=14.0)
+    ap.add_argument("--max-angle", type=float, default=18.0)
     args = ap.parse_args()
 
     out = args.out_dir
@@ -191,18 +191,21 @@ def main():
         scale = 1.0
     os.environ["ACRO_OC_SCALE"] = repr(scale)   # visto da assign/build_fused
 
-    # 0) mesh in metri (OC x scala uniforme) + eventuale generazione piani
+    # 0) Ripara una sola volta la connettivita' degli OBJ ModelIO non-manifold.
+    # La copia conserva tutte le coordinate e viene riusata da ogni fetta.
     oc_obj = args.oc_mesh or args.mesh
-    if args.oc_mesh:
-        mesh = scale_mesh(args.oc_mesh, scale, os.path.join(out, "mesh_metric.obj"))
-    else:
-        mesh = args.mesh
-
     planes_json = args.planes
+    repaired_obj = os.path.join(out, "mesh_repaired.obj")
     if not planes_json:
         planes_json = os.path.join(out, "cgal_planes.json")
         print("[0/4] build_cgal_planes (auto)")
-        sh([py, os.path.join(HERE, "build_cgal_planes.py"), oc_obj, planes_json])
+        sh([py, os.path.join(HERE, "build_cgal_planes.py"), oc_obj, planes_json,
+            "--repaired-mesh", repaired_obj])
+    source_mesh = repaired_obj if os.path.exists(repaired_obj) else oc_obj
+    if args.oc_mesh:
+        mesh = scale_mesh(source_mesh, scale, os.path.join(out, "mesh_metric.obj"))
+    else:
+        mesh = source_mesh
     args_planes = planes_json
     angle = dominant_angle(args_planes) if str(args.angle).lower() == "auto" else float(args.angle)
     print(f"[auto] direzione principale = {angle:.2f} deg")
