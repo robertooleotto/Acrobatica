@@ -422,17 +422,25 @@ actor BackendAPIClient {
         let session_id: String
         let up: [Float]
         let count: Int
+        let mesh_kind: String?
         let planes: [DetectedPlane]
     }
 
-    /// Rileva automaticamente i piani sulla mesh della sessione (motore python a
-    /// istogrammi lato backend). `up` = gravità nota nel frame mesh (opzionale).
-    func detectPlanes(sessionId: String, up: [Float]? = nil) async throws -> DetectPlanesResult {
+    /// Rileva automaticamente i piani sulla mesh richiesta. `meshKind` evita che
+    /// il backend sostituisca implicitamente raw e clean; `up` è la gravità nota.
+    func detectPlanes(
+        sessionId: String,
+        up: [Float]? = nil,
+        meshKind: String? = nil
+    ) async throws -> DetectPlanesResult {
         let url = baseURL.appendingPathComponent("/facade-sessions/\(sessionId)/detect-planes")
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try JSONSerialization.data(withJSONObject: up != nil ? ["up": up!] : [:])
+        var payload: [String: Any] = [:]
+        if let up { payload["up"] = up }
+        if let meshKind { payload["mesh_kind"] = meshKind }
+        req.httpBody = try JSONSerialization.data(withJSONObject: payload)
         let (data, resp) = try await urlSession.data(for: req)
         try assertHTTPOK(resp, data: data)
         return try JSONDecoder().decode(DetectPlanesResult.self, from: data)
@@ -618,6 +626,24 @@ actor BackendAPIClient {
     struct MeshUploadResult: Codable {
         let session_id: String
         let files: [MeshFileInfo]
+    }
+
+    struct ResetDerivedResult: Codable {
+        let session_id: String
+        let status: String
+        let deleted_files: Int
+    }
+
+    /// Rimuove mesh clean e tutti gli output 3D derivati, conservando foto,
+    /// pose e bundle Object Capture originale.
+    func resetDerivedAssets(sessionId: String) async throws -> ResetDerivedResult {
+        let url = baseURL.appendingPathComponent(
+            "/facade-sessions/\(sessionId)/reset-derived")
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        let (data, resp) = try await urlSession.data(for: req)
+        try assertHTTPOK(resp, data: data)
+        return try JSONDecoder().decode(ResetDerivedResult.self, from: data)
     }
 
     /// Carica una mesh sul backend (es. quella RIPULITA dall'editor). `kind`:

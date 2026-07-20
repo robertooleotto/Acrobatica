@@ -407,6 +407,13 @@ class MeshInfoResult(BaseModel):
     files: list[MeshFileInfo] = []
 
 
+class ResetDerivedResult(BaseModel):
+    """Esito del ripristino della pipeline 3D alla mesh OC originale."""
+    session_id: str
+    status: str
+    deleted_files: int = 0
+
+
 class PlanesSaveResult(BaseModel):
     """Esito del salvataggio dei piani decisi nell'editor 3D (passo 7).
     Il JSON completo dei piani è su storage (out/planes.json); qui si riepiloga."""
@@ -444,6 +451,7 @@ class DetectPlanesResult(BaseModel):
     count: int
     engine: str = ""                   # "open3d" (v2) | "istogrammi" (fallback v1)
     engine_error: str = ""             # se v2 è caduto in fallback: perché (diagnosi)
+    mesh_kind: str = ""                # "raw" | "clean": sorgente realmente analizzata
     planes: list[DetectedPlane] = []
 
 

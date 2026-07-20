@@ -46,6 +46,7 @@ from ..models import (
     MeshFileInfo,
     MeshInfoResult,
     MeshUploadResult,
+    ResetDerivedResult,
     ZoneMarkupResult,
     OrthorectifyPhotoResult,
     OrthorectifySessionResult,
@@ -1122,6 +1123,79 @@ def get_mesh(session_id: str, kind: Optional[str] = None):
     return MeshInfoResult(session_id=session_id, main_obj=main, files=files)
 
 
+def _derived_storage_paths(result: dict) -> list[str]:
+    """Oggetti 3D rigenerabili da eliminare senza toccare la mesh OC raw."""
+    paths: list[str] = []
+    clean = _mesh_dict(result).get("clean") or {}
+    for item in clean.get("files", []):
+        if isinstance(item, dict) and item.get("path"):
+            paths.append(item["path"])
+    planes = result.get("planes") or {}
+    if isinstance(planes, dict) and planes.get("path"):
+        paths.append(planes["path"])
+    projection = result.get("projection") or {}
+    if isinstance(projection, dict):
+        for item in projection.get("files", []):
+            if isinstance(item, dict) and item.get("path"):
+                paths.append(item["path"])
+    zone_markup = result.get("zone_markup") or {}
+    if isinstance(zone_markup, dict) and zone_markup.get("storage_path"):
+        paths.append(zone_markup["storage_path"])
+    return paths
+
+
+def _mesh_obj_for_detection(
+    result: dict, requested_kind: str | None = None,
+) -> tuple[str | None, str]:
+    """Sceglie l'OBJ senza sostituire implicitamente una sorgente richiesta."""
+    kinds = (requested_kind,) if requested_kind else ("clean", "raw")
+    for kind in kinds:
+        entry = projection_service._mesh_entry(result, kind)
+        main = projection_service._mesh_main_path(entry)
+        if main and main.lower().endswith(".obj"):
+            return main, kind
+        for item in entry.get("files", []):
+            path = item.get("path") if isinstance(item, dict) else None
+            if path and path.lower().endswith(".obj"):
+                return path, kind
+    return None, requested_kind or ""
+
+
+@router.post("/{session_id}/reset-derived", response_model=ResetDerivedResult)
+def reset_derived(session_id: str):
+    """Riparte dalla mesh OC raw, rimuovendo ogni revisione/output 3D derivato."""
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        raise HTTPException(404, "Sessione non trovata")
+    result = sess.get("result") or {}
+    meshes = _mesh_dict(result)
+    raw = meshes.get("raw") or {}
+    if not raw.get("files"):
+        raise HTTPException(409, "La mesh OC originale non è disponibile")
+
+    paths = _derived_storage_paths(result)
+    result["mesh"] = {"raw": raw}
+    projection_service.invalidate_geometry_outputs(result, clear_planes=True)
+    result.pop("zone_markup", None)
+    # Il reset è intenzionalmente una transizione all'indietro del workflow.
+    session_store.update_session(session_id, {
+        "status": session_state.MESH_READY,
+        "result": result,
+    })
+    deleted = 0
+    try:
+        deleted = storage_service.delete_paths(paths)
+    except Exception:
+        # Il manifest è la fonte di verità: un cleanup storage fallito non deve
+        # rendere nuovamente visibili artefatti ormai scollegati dalla sessione.
+        pass
+    return ResetDerivedResult(
+        session_id=session_id,
+        status=session_state.MESH_READY,
+        deleted_files=deleted,
+    )
+
+
 # ─── Piani decisi nell'editor 3D (passo 7 → input della proiezione) ─────────
 
 def _planes_remote(session_id: str) -> str:
@@ -1342,26 +1416,20 @@ def detect_planes(session_id: str, payload: Optional[dict] = Body(None)):
         raise HTTPException(404, "Sessione non trovata")
     result = sess.get("result") or {}
 
-    # Trova un .obj tra i file mesh (prima clean, poi raw). Se il "main" non è
-    # un .obj (es. usdz), ripiega su un qualunque .obj presente nel gruppo.
-    def _find_obj() -> str | None:
-        for kind in ("clean", "raw"):
-            entry = projection_service._mesh_entry(result, kind)
-            main = projection_service._mesh_main_path(entry)
-            if main and main.lower().endswith(".obj"):
-                return main
-            for f in entry.get("files", []):
-                p = f.get("path") if isinstance(f, dict) else None
-                if p and p.lower().endswith(".obj"):
-                    return p
-        return None
-
-    obj_path = _find_obj()
-    if not obj_path:
-        raise HTTPException(409, "Nessuna mesh .obj caricata per questa sessione "
-                                 "(carica/ricalcola la mesh prima di rilevare i piani)")
-
     payload = payload or {}
+    requested_kind = payload.get("mesh_kind")
+    if requested_kind not in (None, "raw", "clean"):
+        raise HTTPException(422, "mesh_kind deve essere 'raw' oppure 'clean'")
+
+    # La sorgente è esplicita quando richiesta dal client; il default conserva
+    # la compatibilità scegliendo la revisione clean più recente, poi la raw.
+    obj_path, mesh_kind = _mesh_obj_for_detection(result, requested_kind)
+    if not obj_path:
+        detail = (f"Nessuna mesh .obj '{requested_kind}' per questa sessione"
+                  if requested_kind else
+                  "Nessuna mesh .obj caricata per questa sessione")
+        raise HTTPException(409, detail)
+
     up = payload.get("up")
     up_vec = up if (isinstance(up, list) and len(up) == 3) else [0.0, 1.0, 0.0]
     requested_scale = payload.get("scale_m_per_mesh_unit", payload.get("scale"))
@@ -1451,7 +1519,7 @@ def detect_planes(session_id: str, payload: Optional[dict] = Body(None)):
         triangoli=p.get("triangoli", [])) for p in raw_planes]
     return DetectPlanesResult(session_id=session_id, up=doc.get("up", up_vec),
                               count=len(planes), engine=engine,
-                              engine_error=engine_error,
+                              engine_error=engine_error, mesh_kind=mesh_kind,
                               planes=planes)
 
 
@@ -1485,7 +1553,9 @@ def _run_automatic_mesh_pipeline(session_id: str) -> None:
         projection_service._set_job(
             session_id, "running", 0.02, "Riconosco i piani della facciata",
         )
-        detected = detect_planes(session_id, {"up": [0.0, 1.0, 0.0]})
+        detected = detect_planes(session_id, {
+            "up": [0.0, 1.0, 0.0], "mesh_kind": "raw",
+        })
         if detected.count == 0:
             raise RuntimeError("Il riconoscimento non ha prodotto piani utilizzabili")
         projection_service._set_job(

@@ -72,6 +72,22 @@ def download_bytes(remote_path: str) -> bytes:
     return _supabase_bucket().download(remote_path)
 
 
+def delete_paths(remote_paths: list[str]) -> int:
+    """Elimina un insieme di oggetti, ignorando path vuoti e duplicati."""
+    paths = list(dict.fromkeys(path for path in remote_paths if path))
+    if not paths:
+        return 0
+    if _use_s3():
+        for start in range(0, len(paths), 1000):
+            _s3().delete_objects(
+                Bucket=config.S3_BUCKET,
+                Delete={"Objects": [{"Key": path} for path in paths[start:start + 1000]]},
+            )
+    else:
+        _supabase_bucket().remove(paths)
+    return len(paths)
+
+
 def head_size(remote_path: str) -> int | None:
     """Dimensione in byte del file su storage senza scaricarlo (HEAD su S3/R2),
     o None se non esiste/non raggiungibile. Su Supabase non c'è un HEAD economico

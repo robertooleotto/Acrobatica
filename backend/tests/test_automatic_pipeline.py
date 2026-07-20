@@ -52,7 +52,73 @@ def test_automatic_pipeline_detects_saves_then_projects(monkeypatch):
     assert payload["schema"] == "acro.planes/v1"
     assert payload["piano_base"]["up"] == [0.0, 1.0, 0.0]
     assert payload["planes"][0]["triangoli"] == [0, 1]
+    assert calls[0][1]["mesh_kind"] == "raw"
     assert jobs[0][1:4] == ("running", 0.02, "Riconosco i piani della facciata")
+
+
+def test_detection_source_is_explicit_and_never_falls_back():
+    result = {"mesh": {
+        "raw": {
+            "main_obj": "raw.obj",
+            "files": [{"name": "raw.obj", "path": "raw/raw.obj"}],
+        },
+        "clean": {
+            "main_obj": "clean.obj",
+            "files": [{"name": "clean.obj", "path": "clean/clean.obj"}],
+        },
+    }}
+
+    assert facade_sessions._mesh_obj_for_detection(result) == \
+        ("clean/clean.obj", "clean")
+    assert facade_sessions._mesh_obj_for_detection(result, "raw") == \
+        ("raw/raw.obj", "raw")
+    assert facade_sessions._mesh_obj_for_detection(
+        {"mesh": {"clean": result["mesh"]["clean"]}}, "raw",
+    ) == (None, "raw")
+
+
+def test_reset_derived_keeps_only_raw_mesh(monkeypatch):
+    result = {"mesh": {
+        "raw": {
+            "main_obj": "raw.obj",
+            "files": [{"name": "raw.obj", "path": "raw/raw.obj"}],
+        },
+        "clean": {
+            "main_obj": "clean.obj",
+            "files": [{"name": "clean.obj", "path": "clean/clean.obj"}],
+        },
+    }, "planes": {"path": "out/planes.json"}, "projection": {
+        "files": [{"name": "planes.obj", "path": "projection/planes.obj"}],
+    }, "metric_openings": {"openings": []}, "zone_markup": {
+        "storage_path": "out/zone_markup.json",
+    }}
+    session = {"id": "session-1", "status": "completed", "result": result}
+    updates = []
+    deleted = []
+    monkeypatch.setattr(
+        facade_sessions.session_store, "get_session", lambda session_id: session)
+    monkeypatch.setattr(
+        facade_sessions.session_store, "update_session",
+        lambda session_id, fields: updates.append(fields) or fields)
+    monkeypatch.setattr(
+        facade_sessions.storage_service, "delete_paths",
+        lambda paths: deleted.extend(paths) or len(paths))
+
+    response = facade_sessions.reset_derived("session-1")
+
+    assert response.status == "mesh_ready"
+    assert response.deleted_files == 4
+    assert set(deleted) == {
+        "clean/clean.obj", "out/planes.json", "projection/planes.obj",
+        "out/zone_markup.json",
+    }
+    saved = updates[0]
+    assert saved["status"] == "mesh_ready"
+    assert set(saved["result"]["mesh"]) == {"raw"}
+    assert "planes" not in saved["result"]
+    assert "projection" not in saved["result"]
+    assert "metric_openings" not in saved["result"]
+    assert "zone_markup" not in saved["result"]
 
 
 def test_automatic_pipeline_exposes_failure_in_projection_job(monkeypatch):

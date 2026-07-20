@@ -15,6 +15,7 @@ import Foundation
 struct EditorMesh3DView: View {
     @StateObject private var model: Mesh3DModel
     private let onChiudi: (() -> Void)?
+    private let onRipartiDaRaw: (() -> Void)?
     private let sessionId: String?
     private let consentiAutoPianiAllApertura: Bool
     @Environment(\.dismiss) private var dismiss
@@ -26,6 +27,8 @@ struct EditorMesh3DView: View {
     @State private var autoSalvataggioInCorso = false
     @State private var revisioneMeshSalvata = 0
     @State private var revisioneWorkspaceSalvata = 0
+    @State private var meshKindRiconoscimento: String
+    @State private var confermaRipartenza = false
     /// Strumenti del vecchio flusso di costruzione/rifinitura manuale. Restano
     /// implementati, ma non occupano il pannello del flusso automatico corrente.
     private let abilitaControlliManualiPiani = false
@@ -45,12 +48,16 @@ struct EditorMesh3DView: View {
          textureFile: URL? = nil,
          nome: String = "Mesh facciata",
          sessionId: String? = nil,
+         meshKind: String = "raw",
          consentiAutoPianiAllApertura: Bool = false,
+         onRipartiDaRaw: (() -> Void)? = nil,
          onChiudi: (() -> Void)? = nil) {
         _model = StateObject(wrappedValue: Mesh3DModel(
             meshFile: meshFile, textureFile: textureFile, nome: nome))
+        _meshKindRiconoscimento = State(initialValue: meshKind)
         self.sessionId = sessionId
         self.consentiAutoPianiAllApertura = consentiAutoPianiAllApertura
+        self.onRipartiDaRaw = onRipartiDaRaw
         self.onChiudi = onChiudi
     }
 
@@ -227,9 +234,10 @@ struct EditorMesh3DView: View {
                 if result.state == "queued" || result.state == "running" {
                     toastCloud = result.message
                 } else if consentiAutoPianiAllApertura {
-                    await model.riconosciPianiAuto(sessionId: sid)
+                    await model.riconosciPianiAuto(
+                        sessionId: sid, meshKind: meshKindRiconoscimento)
                 } else {
-                    toastCloud = "Mesh OC originale: puliscila prima di rilevare i piani"
+                    toastCloud = "Mesh OC originale: puoi riconoscere i piani o pulirla"
                 }
                 return
             }
@@ -250,7 +258,8 @@ struct EditorMesh3DView: View {
         } catch {
             toastCloud = "Risultato automatico non disponibile"
             if consentiAutoPianiAllApertura {
-                await model.riconosciPianiAuto(sessionId: sid)
+                await model.riconosciPianiAuto(
+                    sessionId: sid, meshKind: meshKindRiconoscimento)
             }
         }
     }
@@ -264,7 +273,8 @@ struct EditorMesh3DView: View {
             guard !planes.isEmpty else { return }
             model.applicaPianiRilevati(planes, registraModifica: false)
         } catch {
-            await model.riconosciPianiAuto(sessionId: sessionId)
+            await model.riconosciPianiAuto(
+                sessionId: sessionId, meshKind: meshKindRiconoscimento)
         }
     }
 
@@ -325,7 +335,8 @@ struct EditorMesh3DView: View {
                 _ = try await BackendAPIClient.shared.uploadMesh(
                     sessionId: sid, fileURL: obj, kind: "clean")
                 revisioneMeshSalvata = max(revisioneMeshSalvata, revisioneMesh)
-                await model.riconosciPianiAuto(sessionId: sid)
+                meshKindRiconoscimento = "clean"
+                await model.riconosciPianiAuto(sessionId: sid, meshKind: "clean")
             }
             if let piani {
                 _ = try await BackendAPIClient.shared.uploadPlanes(
@@ -366,9 +377,24 @@ struct EditorMesh3DView: View {
             }
         }
         .animation(.easeInOut, value: toastCloud)
-        // Ripristina un risultato esistente; il riconoscimento nuovo parte qui
-        // solo quando il loader ha trovato una revisione clean. Sulla raw parte
-        // dopo il primo autosalvataggio della pulizia.
+        .confirmationDialog(
+            "Ripartire dalla mesh OC originale?",
+            isPresented: $confermaRipartenza,
+            titleVisibility: .visible
+        ) {
+            Button("Elimina tutte le elaborazioni", role: .destructive) {
+                if let onRipartiDaRaw {
+                    onRipartiDaRaw()
+                } else {
+                    model.ricaricaDaCapo()
+                }
+            }
+            Button("Annulla", role: .cancel) {}
+        } message: {
+            Text("Verranno rimossi mesh pulita, piani, texture proiettate e aperture. Foto e mesh OC originale resteranno disponibili.")
+        }
+        // Ripristina un risultato esistente. Sulla raw il riconoscimento resta
+        // manuale, così l'operatore può prima confrontare la mesh OC completa.
         .onChange(of: model.numTriangoli) { n in
             if n > 0, let sid = sessionId, model.facce.isEmpty, !autoRiconoscimentoFatto {
                 autoRiconoscimentoFatto = true
@@ -457,6 +483,13 @@ struct EditorMesh3DView: View {
                     .disabled(model.facce.isEmpty || model.numTriangoli == 0 || cloudOccupato)
                     Button { caricaUltimaTexture() } label: {
                         Label("Carica texture calcolata", systemImage: "arrow.down.square")
+                    }
+                    .disabled(cloudOccupato)
+                    Divider()
+                    Button(role: .destructive) {
+                        confermaRipartenza = true
+                    } label: {
+                        Label("Riparti dalla mesh OC", systemImage: "arrow.counterclockwise")
                     }
                     .disabled(cloudOccupato)
                 }
@@ -558,7 +591,13 @@ struct EditorMesh3DView: View {
                     }
                     .help("Inquadra tutto")
                     railDivisore
-                    Button { model.ricaricaDaCapo() } label: {
+                    Button {
+                        if onRipartiDaRaw != nil {
+                            confermaRipartenza = true
+                        } else {
+                            model.ricaricaDaCapo()
+                        }
+                    } label: {
                         Image(systemName: "arrow.clockwise.circle")
                             .font(.system(size: 17, weight: .medium))
                             .foregroundStyle(Theme.danger)
@@ -929,12 +968,15 @@ struct EditorMesh3DView: View {
                 .disabled(model.numTriangoli == 0 || model.segmentando)
                 Button {
                     if let sid = sessionId {
-                        Task { await model.riconosciPianiAuto(sessionId: sid) }
+                        Task {
+                            await model.riconosciPianiAuto(
+                                sessionId: sid, meshKind: meshKindRiconoscimento)
+                        }
                     } else {
                         Task { await model.segmentaPianiBCS() }   // fallback on-device (mesh demo)
                     }
                 } label: {
-                    Label("Auto BCS", systemImage: "square.grid.3x3")
+                    Label("Riconosci piani", systemImage: "square.grid.3x3")
                         .font(Theme.Typo.caption(11, .semibold)).foregroundStyle(EditorTheme.testo)
                         .padding(.horizontal, 10).padding(.vertical, 6)
                         .background(EditorTheme.panelAlt, in: RoundedRectangle(cornerRadius: 8))
@@ -4982,10 +5024,9 @@ final class Mesh3DModel: ObservableObject {
         segmentando = false
     }
 
-    /// Riconoscimento piani AUTOMATICO via backend (detector python a istogrammi:
-    /// assi di gravità + fusione complanari + filtri). È il motore preferito —
-    /// gira sulla mesh della sessione (su storage) e ritorna piani puliti.
-    func riconosciPianiAuto(sessionId: String) async {
+    /// Riconoscimento piani via backend: il client indica esplicitamente se
+    /// analizzare la mesh OC raw o la revisione clean salvata nello storage.
+    func riconosciPianiAuto(sessionId: String, meshKind: String? = nil) async {
         guard !segmentando, !mesh.triangles.isEmpty else { return }
         segmentando = true
         let revisionAtStart = meshRevision
@@ -4995,14 +5036,15 @@ final class Mesh3DModel: ObservableObject {
         // nota [0,1,0] tiene i piani dritti (normali orizzontali).
         do {
             let r = try await BackendAPIClient.shared.detectPlanes(
-                sessionId: sessionId, up: [0, 1, 0])
+                sessionId: sessionId, up: [0, 1, 0], meshKind: meshKind)
             guard meshRevision == revisionAtStart else {
                 cursoreInfo = "Mesh modificata: ricalcolo piani necessario"
                 segmentando = false
                 return
             }
             applicaPianiRilevati(r.planes)
-            cursoreInfo = "Piani riconosciuti: \(facce.count)"
+            let sorgente = r.mesh_kind == "raw" ? "mesh OC originale" : "mesh pulita"
+            cursoreInfo = "Piani riconosciuti: \(facce.count) · \(sorgente)"
         } catch {
             cursoreInfo = "Riconoscimento fallito: \(error.localizedDescription)"
         }
@@ -8197,8 +8239,13 @@ struct EditorMesh3DCaricamentoView: View {
                                  textureFile: textureFile,
                                  nome: "Mesh facciata",
                                  sessionId: sessionId,
+                                 meshKind: usaMeshPulita ? "clean" : "raw",
                                  consentiAutoPianiAllApertura: usaMeshPulita,
+                                 onRipartiDaRaw: {
+                                     Task { await ripartiDallaMeshOriginale() }
+                                 },
                                  onChiudi: onChiudi)
+                    .id("\(meshFile?.path ?? "")-\(usaMeshPulita)")
             } else {
                 ZStack {
                     EditorTheme.bg.ignoresSafeArea()
@@ -8225,6 +8272,25 @@ struct EditorMesh3DCaricamentoView: View {
             }
         }
         .task(id: sessionId) { await carica() }
+    }
+
+    @MainActor
+    private func ripartiDallaMeshOriginale() async {
+        pronto = false
+        errore = nil
+        messaggio = "Elimino le elaborazioni precedenti…"
+        do {
+            _ = try await BackendAPIClient.shared.resetDerivedAssets(
+                sessionId: sessionId)
+            meshFile = nil
+            textureFile = nil
+            usaMeshPulita = false
+            messaggio = "Carico la mesh OC originale…"
+            await carica()
+        } catch {
+            errore = error.localizedDescription
+            pronto = true
+        }
     }
 
     private func carica() async {
