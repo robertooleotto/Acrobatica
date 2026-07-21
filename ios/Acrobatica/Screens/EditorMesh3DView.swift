@@ -338,12 +338,11 @@ struct EditorMesh3DView: View {
             toastCloud = "Autosave mesh fallito: esportazione non riuscita"
             return
         }
-        // Una nuova geometria invalida i piani precedenti. Il detector viene
-        // rilanciato sulla revisione clean appena caricata; i nuovi piani saranno
-        // salvati dal debounce successivo della workspaceRevision.
-        let piani = deveCaricareMesh
-            ? nil
-            : model.esportaPianiPayload(includiVuoto: true)
+        // Il crop ha gia intersecato i poligoni dei piani con lo stesso box della
+        // mesh. Questo documento e' la revisione architettonica da preservare:
+        // rilanciare il detector sulla geometria parziale cambierebbe identita',
+        // orientamento e numero dei piani in base a quanto e' stretto il taglio.
+        let piani = model.esportaPianiPayload(includiVuoto: true)
 
         autoSalvataggioInCorso = true
         defer {
@@ -360,7 +359,6 @@ struct EditorMesh3DView: View {
                     sessionId: sid, fileURL: obj, kind: "clean")
                 revisioneMeshSalvata = max(revisioneMeshSalvata, revisioneMesh)
                 meshKindRiconoscimento = "clean"
-                await model.riconosciPianiAuto(sessionId: sid, meshKind: "clean")
             }
             if let piani {
                 _ = try await BackendAPIClient.shared.uploadPlanes(
