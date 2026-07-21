@@ -164,10 +164,9 @@ struct EditableMesh: @unchecked Sendable {
     static func leggiIndici(_ e: SCNGeometryElement) -> [UInt32]? {
         let n = e.primitiveCount * 3
         guard n > 0, e.data.count >= n * e.bytesPerIndex else { return nil }
-        // Alcuni USDZ prodotti da Object Capture espongono bytesPerIndex = 4,
-        // ma SceneKit restituisce un buffer con stride di 8 byte per indice.
-        // Usare bytesPerIndex come passo legge alternativamente indice e
-        // padding, collegando vertici lontani dopo qualunque ricostruzione.
+        // Alcuni USDZ Object Capture hanno record multi-indice: posizione e UV
+        // occupano stream interlacciati. Qui serve il primo stream (posizione);
+        // la ricostruzione texturizzata preserva separatamente anche quello UV.
         let packedSize = n * e.bytesPerIndex
         let indexStride: Int
         if e.data.count == packedSize {

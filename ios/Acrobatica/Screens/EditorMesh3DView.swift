@@ -3658,6 +3658,10 @@ final class Mesh3DModel: ObservableObject {
         let triangles: [[SIMD3<UInt32>]]
         let centroids: [[SIMD3<Float>]]
     }
+    private struct TextureVertexKey: Hashable {
+        let posizione: UInt32
+        let texture: UInt32
+    }
     private struct TextureGridKey: Hashable {
         let x: Int
         let y: Int
@@ -4252,36 +4256,146 @@ final class Mesh3DModel: ObservableObject {
                   let positions = EditableMesh.leggiPosizioni(geometry)
             else { return }
 
+            func float3(_ source: SCNGeometrySource?) -> [SIMD3<Float>]? {
+                guard let source, source.usesFloatComponents,
+                      source.bytesPerComponent == 4,
+                      source.componentsPerVector >= 3 else { return nil }
+                var values: [SIMD3<Float>] = []
+                values.reserveCapacity(source.vectorCount)
+                source.data.withUnsafeBytes { raw in
+                    for index in 0..<source.vectorCount {
+                        let offset = source.dataOffset + index * source.dataStride
+                        values.append(SIMD3(
+                            raw.loadUnaligned(fromByteOffset: offset, as: Float.self),
+                            raw.loadUnaligned(fromByteOffset: offset + 4, as: Float.self),
+                            raw.loadUnaligned(fromByteOffset: offset + 8, as: Float.self)))
+                    }
+                }
+                return values
+            }
+
+            func float2(_ source: SCNGeometrySource?) -> [SIMD2<Float>]? {
+                guard let source, source.usesFloatComponents,
+                      source.bytesPerComponent == 4,
+                      source.componentsPerVector >= 2 else { return nil }
+                var values: [SIMD2<Float>] = []
+                values.reserveCapacity(source.vectorCount)
+                source.data.withUnsafeBytes { raw in
+                    for index in 0..<source.vectorCount {
+                        let offset = source.dataOffset + index * source.dataStride
+                        values.append(SIMD2(
+                            raw.loadUnaligned(fromByteOffset: offset, as: Float.self),
+                            raw.loadUnaligned(fromByteOffset: offset + 4, as: Float.self)))
+                    }
+                }
+                return values
+            }
+
+            let originalNormals = float3(geometry.sources(for: .normal).first)
+            let originalTexture = float2(geometry.sources(for: .texcoord).first)
+            var vertexMap: [TextureVertexKey: UInt32] = [:]
+            vertexMap.reserveCapacity(positions.count)
+            var unifiedPositions: [SCNVector3] = []
+            var unifiedNormals: [SCNVector3] = []
+            var unifiedTexture: [CGPoint] = []
+
+            func unifiedIndex(position: UInt32, texture: UInt32) -> UInt32? {
+                guard positions.indices.contains(Int(position)) else { return nil }
+                let textureIndex = originalTexture?.indices.contains(Int(texture)) == true
+                    ? texture : position
+                let key = TextureVertexKey(posizione: position, texture: textureIndex)
+                if let existing = vertexMap[key] { return existing }
+                let newIndex = UInt32(unifiedPositions.count)
+                vertexMap[key] = newIndex
+                let p = positions[Int(position)]
+                unifiedPositions.append(SCNVector3(p.x, p.y, p.z))
+                if let normals = originalNormals, normals.indices.contains(Int(position)) {
+                    let n = normals[Int(position)]
+                    unifiedNormals.append(SCNVector3(n.x, n.y, n.z))
+                }
+                if let textureCoordinates = originalTexture,
+                   textureCoordinates.indices.contains(Int(textureIndex)) {
+                    let uv = textureCoordinates[Int(textureIndex)]
+                    unifiedTexture.append(CGPoint(x: CGFloat(uv.x), y: CGFloat(uv.y)))
+                }
+                return newIndex
+            }
+
             var elementTriangles: [[SIMD3<UInt32>]] = []
             var elementCentroids: [[SIMD3<Float>]] = []
             for element in geometry.elements where element.primitiveType == .triangles {
-                guard let indices = EditableMesh.leggiIndici(element) else { continue }
+                let cornerCount = element.primitiveCount * 3
+                guard cornerCount > 0,
+                      element.data.count >= cornerCount * element.bytesPerIndex else {
+                    continue
+                }
+                let recordStride = element.data.count.isMultiple(of: cornerCount)
+                    ? element.data.count / cornerCount : element.bytesPerIndex
+                let indexStreams = max(1, recordStride / element.bytesPerIndex)
                 var triangles: [SIMD3<UInt32>] = []
                 var centroids: [SIMD3<Float>] = []
-                triangles.reserveCapacity(indices.count / 3)
-                centroids.reserveCapacity(indices.count / 3)
-                var i = 0
-                while i + 2 < indices.count {
-                    let triangle = SIMD3(indices[i], indices[i + 1], indices[i + 2])
-                    let a = positions[Int(triangle.x)]
-                    let b = positions[Int(triangle.y)]
-                    let c = positions[Int(triangle.z)]
-                    let local = (a + b + c) / 3
-                    let converted = node.convertPosition(
-                        SCNVector3(local.x, local.y, local.z), to: contentNode)
-                    triangles.append(triangle)
-                    centroids.append(SIMD3(converted.x, converted.y, converted.z))
-                    i += 3
+                triangles.reserveCapacity(element.primitiveCount)
+                centroids.reserveCapacity(element.primitiveCount)
+                element.data.withUnsafeBytes { raw in
+                    func index(_ corner: Int, stream: Int) -> UInt32? {
+                        let offset = corner * recordStride
+                            + min(stream, indexStreams - 1) * element.bytesPerIndex
+                        switch element.bytesPerIndex {
+                        case 1:
+                            return UInt32(raw.loadUnaligned(
+                                fromByteOffset: offset, as: UInt8.self))
+                        case 2:
+                            return UInt32(raw.loadUnaligned(
+                                fromByteOffset: offset, as: UInt16.self))
+                        case 4:
+                            return raw.loadUnaligned(
+                                fromByteOffset: offset, as: UInt32.self)
+                        default:
+                            return nil
+                        }
+                    }
+
+                    for primitive in 0..<element.primitiveCount {
+                        var positionIndices: [UInt32] = []
+                        var unified: [UInt32] = []
+                        positionIndices.reserveCapacity(3)
+                        unified.reserveCapacity(3)
+                        for localCorner in 0..<3 {
+                            let corner = primitive * 3 + localCorner
+                            guard let position = index(corner, stream: 0) else { break }
+                            let texture = indexStreams > 1
+                                ? (index(corner, stream: 1) ?? position) : position
+                            guard let newIndex = unifiedIndex(
+                                position: position, texture: texture) else { break }
+                            positionIndices.append(position)
+                            unified.append(newIndex)
+                        }
+                        guard positionIndices.count == 3, unified.count == 3 else { continue }
+                        let local = (positions[Int(positionIndices[0])]
+                            + positions[Int(positionIndices[1])]
+                            + positions[Int(positionIndices[2])]) / 3
+                        let converted = node.convertPosition(
+                            SCNVector3(local.x, local.y, local.z), to: contentNode)
+                        triangles.append(SIMD3(unified[0], unified[1], unified[2]))
+                        centroids.append(SIMD3(converted.x, converted.y, converted.z))
+                    }
                 }
                 elementTriangles.append(triangles)
                 elementCentroids.append(centroids)
             }
             guard !elementTriangles.isEmpty else { return }
+            var unifiedSources = [SCNGeometrySource(vertices: unifiedPositions)]
+            if unifiedNormals.count == unifiedPositions.count {
+                unifiedSources.append(SCNGeometrySource(normals: unifiedNormals))
+            }
+            if unifiedTexture.count == unifiedPositions.count {
+                unifiedSources.append(SCNGeometrySource(textureCoordinates: unifiedTexture))
+            }
             ocTextureParts.append(OCTexturePart(
                 node: node,
-                sources: geometry.sources,
+                sources: unifiedSources,
                 materials: geometry.materials,
-                vertexCount: positions.count,
+                vertexCount: unifiedPositions.count,
                 triangles: elementTriangles,
                 centroids: elementCentroids))
         }
