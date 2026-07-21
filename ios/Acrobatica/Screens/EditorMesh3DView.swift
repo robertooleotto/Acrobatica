@@ -25,6 +25,7 @@ struct EditorMesh3DView: View {
     @State private var autoRiconoscimentoFatto = false
     @State private var autoSalvataggioTask: Task<Void, Never>?
     @State private var autoSalvataggioInCorso = false
+    @State private var ripristinoRawInCorso = false
     @State private var revisioneMeshSalvata = 0
     @State private var revisioneWorkspaceSalvata = 0
     @State private var meshKindRiconoscimento: String
@@ -34,7 +35,7 @@ struct EditorMesh3DView: View {
     private let abilitaControlliManualiPiani = false
 
     private var cloudOccupato: Bool {
-        caricandoCloud || autoSalvataggioInCorso
+        caricandoCloud || autoSalvataggioInCorso || ripristinoRawInCorso
     }
 
     private var workspaceSalvato: Bool {
@@ -280,6 +281,7 @@ struct EditorMesh3DView: View {
 
     private func pianificaSalvataggioAutomatico() {
         guard sessionId != nil else { return }
+        guard !ripristinoRawInCorso else { return }
         guard !autoSalvataggioInCorso else { return }
         autoSalvataggioTask?.cancel()
         autoSalvataggioTask = Task {
@@ -293,9 +295,30 @@ struct EditorMesh3DView: View {
         }
     }
 
+    /// Il reset remoto deve partire soltanto dopo la conclusione dell'eventuale
+    /// autosave precedente, altrimenti quell'upload puo' ricreare mesh clean e
+    /// piani obsoleti subito dopo che il backend li ha eliminati.
+    private func avviaRipristinoMeshOriginale() {
+        guard !ripristinoRawInCorso else { return }
+        ripristinoRawInCorso = true
+        let salvataggioPrecedente = autoSalvataggioTask
+        salvataggioPrecedente?.cancel()
+        autoSalvataggioTask = nil
+        Task {
+            await salvataggioPrecedente?.value
+            if let onRipartiDaRaw {
+                onRipartiDaRaw()
+            } else {
+                model.ricaricaDaCapo()
+                ripristinoRawInCorso = false
+            }
+        }
+    }
+
     @MainActor
     private func eseguiSalvataggioAutomatico() async {
         guard let sid = sessionId else { return }
+        guard !ripristinoRawInCorso, !Task.isCancelled else { return }
         if caricandoCloud {
             pianificaSalvataggioAutomatico()
             return
@@ -325,8 +348,9 @@ struct EditorMesh3DView: View {
         autoSalvataggioInCorso = true
         defer {
             autoSalvataggioInCorso = false
-            if model.workspaceRevision > revisioneWorkspaceSalvata
-                || model.meshRevision > revisioneMeshSalvata {
+            if !ripristinoRawInCorso
+                && (model.workspaceRevision > revisioneWorkspaceSalvata
+                    || model.meshRevision > revisioneMeshSalvata) {
                 pianificaSalvataggioAutomatico()
             }
         }
@@ -383,11 +407,7 @@ struct EditorMesh3DView: View {
             titleVisibility: .visible
         ) {
             Button("Elimina tutte le elaborazioni", role: .destructive) {
-                if let onRipartiDaRaw {
-                    onRipartiDaRaw()
-                } else {
-                    model.ricaricaDaCapo()
-                }
+                avviaRipristinoMeshOriginale()
             }
             Button("Annulla", role: .cancel) {}
         } message: {
