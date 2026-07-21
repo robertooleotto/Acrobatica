@@ -363,6 +363,7 @@ actor BackendAPIClient {
         let session_id: String
         let count: Int
         let url: String
+        let generator_version: String?
     }
 
     private struct SavedPlanesDocument: Decodable {
@@ -380,8 +381,18 @@ actor BackendAPIClient {
 
     /// Recupera i piani revisionati gia salvati, senza rieseguire il detector.
     func downloadSavedPlanes(sessionId: String) async throws -> [DetectedPlane] {
-        let endpoint = baseURL.appendingPathComponent(
+        let baseEndpoint = baseURL.appendingPathComponent(
             "/facade-sessions/\(sessionId)/planes-data")
+        guard var components = URLComponents(
+            url: baseEndpoint, resolvingAgainstBaseURL: false) else {
+            throw APIError.httpError(0, "URL piani non valido")
+        }
+        components.queryItems = [
+            URLQueryItem(name: "require_current", value: "true")
+        ]
+        guard let endpoint = components.url else {
+            throw APIError.httpError(0, "URL piani non valido")
+        }
         let (locationData, locationResponse) = try await urlSession.data(from: endpoint)
         try assertHTTPOK(locationResponse, data: locationData)
         let location = try JSONDecoder().decode(PlanesDataResult.self, from: locationData)

@@ -429,6 +429,7 @@ class PlanesDataResult(BaseModel):
     session_id: str
     count: int
     url: Optional[str] = None
+    generator_version: Optional[str] = None
 
 
 class DetectedPlane(BaseModel):

@@ -91,6 +91,10 @@ from ..services.triangulation_service import CameraPose, Point3D
 
 router = APIRouter(prefix="/facade-sessions", tags=["facade-sessions"])
 
+# Incrementare quando cambia la geometria prodotta dal detector. I documenti
+# precedenti vengono rigenerati prima di essere caricati nell'editor.
+PLANES_PIPELINE_VERSION = "multi_slice_open_surface_v1"
+
 
 @router.post("", response_model=CreateSessionResponse, status_code=201)
 def create_session():
@@ -1297,6 +1301,7 @@ def save_planes(session_id: str, payload: dict = Body(...)):
     except Exception:
         pass
     from ..services.plane_geometry import regularize_planes_document
+    payload.setdefault("generator_version", PLANES_PIPELINE_VERSION)
     payload = regularize_planes_document(payload)
     payload = _preserve_texture_frames(payload, previous_payload)
     planes = payload["planes"]
@@ -1305,7 +1310,13 @@ def save_planes(session_id: str, payload: dict = Body(...)):
 
     existing = sess.get("result") or {}
     projection_service.invalidate_geometry_outputs(existing)
-    existing["planes"] = {"path": remote, "count": len(planes), "bytes": len(data)}
+    existing["planes"] = {
+        "path": remote,
+        "count": len(planes),
+        "bytes": len(data),
+        "generator_version": payload.get("generator_version"),
+        "mesh_kind": payload.get("mesh_kind"),
+    }
     session_store.update_session(session_id, {"result": existing})
 
     # Avanza lo stato del flusso; best-effort, la transizione può non essere valida
@@ -1327,7 +1338,7 @@ def save_planes(session_id: str, payload: dict = Body(...)):
 
 
 @router.get("/{session_id}/planes-data", response_model=PlanesDataResult)
-def get_planes_data(session_id: str):
+def get_planes_data(session_id: str, require_current: bool = False):
     """URL firmato al planes.json salvato (per ricaricare i piani sull'app o per un
     consumatore esterno). 404 se non ne sono ancora stati salvati."""
     sess = session_store.get_session(session_id)
@@ -1336,10 +1347,17 @@ def get_planes_data(session_id: str):
     info = (sess.get("result") or {}).get("planes") or {}
     if not info.get("path"):
         raise HTTPException(404, "Nessun piano salvato per questa sessione")
+    generator_version = info.get("generator_version")
+    if require_current and generator_version != PLANES_PIPELINE_VERSION:
+        raise HTTPException(
+            409,
+            "Piani salvati con una pipeline precedente: ricalcolo necessario",
+        )
     return PlanesDataResult(
         session_id=session_id,
         count=int(info.get("count", 0)),
         url=storage_service.signed_url(info["path"], expires_in_sec=3600),
+        generator_version=generator_version,
     )
 
 
@@ -1584,8 +1602,10 @@ def _automatic_planes_payload(detected: DetectPlanesResult) -> dict:
     return {
         "schema": "acro.planes/v1",
         "versione": 1,
+        "generator_version": PLANES_PIPELINE_VERSION,
         "stato": "proposta_automatica",
         "engine": detected.engine,
+        "mesh_kind": detected.mesh_kind,
         "scale_m_per_mesh_unit": scale,
         "piano_base": {"up": detected.up},
         "planes": planes,

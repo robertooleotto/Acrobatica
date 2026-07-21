@@ -1,3 +1,6 @@
+import pytest
+from fastapi import HTTPException
+
 from app.models import DetectedPlane, DetectPlanesResult
 from app.routers import facade_sessions
 
@@ -8,6 +11,7 @@ def _detected() -> DetectPlanesResult:
         up=[0.0, 1.0, 0.0],
         count=1,
         engine="fused",
+        mesh_kind="raw",
         planes=[DetectedPlane(
             nome="Facciata 1",
             tipo="facciata",
@@ -50,10 +54,54 @@ def test_automatic_pipeline_detects_saves_then_projects(monkeypatch):
     assert [item[0] for item in calls] == ["detect", "save", "project"]
     payload = calls[1][1]
     assert payload["schema"] == "acro.planes/v1"
+    assert payload["generator_version"] == facade_sessions.PLANES_PIPELINE_VERSION
+    assert payload["mesh_kind"] == "raw"
     assert payload["piano_base"]["up"] == [0.0, 1.0, 0.0]
     assert payload["planes"][0]["triangoli"] == [0, 1]
     assert calls[0][1]["mesh_kind"] == "raw"
     assert jobs[0][1:4] == ("running", 0.02, "Riconosco i piani della facciata")
+
+
+def test_planes_data_rejects_documents_from_previous_pipeline(monkeypatch):
+    session = {
+        "id": "session-1",
+        "result": {"planes": {
+            "path": "sessions/session-1/out/planes.json",
+            "count": 10,
+        }},
+    }
+    monkeypatch.setattr(
+        facade_sessions.session_store, "get_session", lambda session_id: session,
+    )
+
+    with pytest.raises(HTTPException) as error:
+        facade_sessions.get_planes_data("session-1", require_current=True)
+
+    assert error.value.status_code == 409
+    assert "ricalcolo" in error.value.detail
+
+
+def test_planes_data_accepts_current_pipeline(monkeypatch):
+    session = {
+        "id": "session-1",
+        "result": {"planes": {
+            "path": "sessions/session-1/out/planes.json",
+            "count": 7,
+            "generator_version": facade_sessions.PLANES_PIPELINE_VERSION,
+        }},
+    }
+    monkeypatch.setattr(
+        facade_sessions.session_store, "get_session", lambda session_id: session,
+    )
+    monkeypatch.setattr(
+        facade_sessions.storage_service, "signed_url",
+        lambda path, expires_in_sec: f"https://storage.test/{path}",
+    )
+
+    result = facade_sessions.get_planes_data("session-1", require_current=True)
+
+    assert result.count == 7
+    assert result.generator_version == facade_sessions.PLANES_PIPELINE_VERSION
 
 
 def test_detection_source_is_explicit_and_never_falls_back():
