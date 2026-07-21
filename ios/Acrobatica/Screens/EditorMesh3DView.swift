@@ -911,7 +911,7 @@ struct EditorMesh3DView: View {
 
                 if !model.attendePuntoZero {
                     Button { model.allineaPianiInAltezza() } label: {
-                        Label("Allinea in altezza", systemImage: "arrow.up.and.down")
+                        Label("Estendi e salda", systemImage: "arrow.up.and.down")
                             .font(Theme.Typo.caption(12, .semibold))
                             .foregroundStyle(EditorTheme.testo)
                             .padding(.horizontal, 12)
@@ -6682,47 +6682,13 @@ final class Mesh3DModel: ObservableObject {
         }.count >= 2
     }
 
-    /// Porta base e sommita' dei piani verticali alle quote del piano strutturale
-    /// piu' esteso. Ogni vertice si muove lungo la verticale contenuta nel proprio
-    /// piano, quindi posizione, inclinazione e larghezza restano inalterate.
+    /// Il box stabilisce base, sommita' e limiti esterni. I limiti interni sono
+    /// invece le intersezioni reciproche dei piani adiacenti.
     func allineaPianiInAltezza() {
-        let su = simd_normalize(gravitaSu)
-        let candidati: [(index: Int, min: Float, max: Float, area: Float)] = facce.indices.compactMap { index in
-            guard let normal = facce[index].pianoNormale,
-                  abs(simd_dot(simd_normalize(normal), su)) < 0.65,
-                  let polygon = facce[index].poligono, polygon.count >= 3 else { return nil }
-            let quote = polygon.map { simd_dot($0, su) }
-            guard let minQuota = quote.min(), let maxQuota = quote.max(),
-                  maxQuota - minQuota > 1e-5 else { return nil }
-            return (index, minQuota, maxQuota, areaPoligono(facce[index]) ?? 0)
-        }
-        guard candidati.count >= 2,
-              let riferimento = candidati.max(by: { $0.area < $1.area }) else { return }
-
+        guard puoAllinearePianiInAltezza else { return }
         registraUndo()
-        for candidato in candidati {
-            guard let normal0 = facce[candidato.index].pianoNormale,
-                  var polygon = facce[candidato.index].poligono else { continue }
-            let normal = simd_normalize(normal0)
-            var asseVerticale = su - normal * simd_dot(su, normal)
-            guard simd_length(asseVerticale) > 1e-5 else { continue }
-            asseVerticale = simd_normalize(asseVerticale)
-            let quotaPerUnita = simd_dot(asseVerticale, su)
-            guard abs(quotaPerUnita) > 1e-5 else { continue }
-            let altezzaCorrente = candidato.max - candidato.min
-            let altezzaRiferimento = riferimento.max - riferimento.min
-
-            for vertexIndex in polygon.indices {
-                let quota = simd_dot(polygon[vertexIndex], su)
-                let posizione = (quota - candidato.min) / altezzaCorrente
-                let quotaTarget = riferimento.min + posizione * altezzaRiferimento
-                polygon[vertexIndex] += asseVerticale * ((quotaTarget - quota) / quotaPerUnita)
-            }
-            facce[candidato.index].poligono = polygon
-            facce[candidato.index].pianoPunto = polygon.reduce(
-                SIMD3<Float>(repeating: 0), +) / Float(polygon.count)
-        }
-        saldaPianiAdiacenti()
+        portaPianiVerticaliAlBox()
+        saldaPianiAdiacenti(estendiLatiLiberiAlBox: true)
         mostraPiani = true
         ridisegnaFacce()
         ridisegnaPiani()
@@ -7228,84 +7194,231 @@ final class Mesh3DModel: ObservableObject {
         return true
     }
 
-    /// Estende le coppie di facciate fino alla loro retta d'intersezione e
-    /// assegna a entrambe gli stessi estremi, creando un edge realmente condiviso.
-    private func saldaPianiAdiacenti() {
+    private var asseVerticaleBox: (axis: Int, direction: SIMD3<Float>, low: Float, high: Float) {
+        let su = simd_normalize(gravitaSu)
+        let axis = (0..<3).max {
+            abs(simd_dot(boxRot[$0], su)) < abs(simd_dot(boxRot[$1], su))
+        } ?? 1
+        let direction = simd_normalize(boxRot[axis])
+        return simd_dot(direction, su) >= 0
+            ? (axis, direction, boxLo[axis], boxHi[axis])
+            : (axis, direction, boxHi[axis], boxLo[axis])
+    }
+
+    /// Porta ogni vertice basso/alto sulla rispettiva faccia del box, muovendolo
+    /// nella direzione verticale contenuta nel suo piano. La posa del piano non cambia.
+    private func portaPianiVerticaliAlBox() {
+        let su = simd_normalize(gravitaSu)
+        let boxUp = asseVerticaleBox
+        for index in facce.indices {
+            guard let normal0 = facce[index].pianoNormale,
+                  var polygon = facce[index].poligono, polygon.count >= 3 else { continue }
+            let normal = simd_normalize(normal0)
+            guard abs(simd_dot(normal, su)) < 0.65 else { continue }
+            var vertical = su - normal * simd_dot(su, normal)
+            guard simd_length(vertical) > 1e-5 else { continue }
+            vertical = simd_normalize(vertical)
+            let amountPerUnit = simd_dot(vertical, boxUp.direction)
+            guard abs(amountPerUnit) > 1e-5 else { continue }
+            let quotas = polygon.map { simd_dot($0, su) }
+            let middle = (quotas.min()! + quotas.max()!) * 0.5
+            for vertex in polygon.indices {
+                let current = simd_dot(polygon[vertex] - frameOrigin, boxUp.direction)
+                let target = quotas[vertex] <= middle ? boxUp.low : boxUp.high
+                polygon[vertex] += vertical * ((target - current) / amountPerUnit)
+            }
+            facce[index].poligono = polygon
+            facce[index].pianoPunto = polygon.reduce(
+                SIMD3<Float>(repeating: 0), +) / Float(polygon.count)
+        }
+    }
+
+    /// Prolunga ogni lato nel proprio piano. Due lati diventano adiacenti solo se
+    /// si scelgono reciprocamente come intersezione piu' vicina; gli altri lati
+    /// terminano sul box. La stessa retta e gli stessi estremi vengono scritti su
+    /// entrambi i poligoni, quindi lo spigolo e' realmente condiviso.
+    private func saldaPianiAdiacenti(estendiLatiLiberiAlBox: Bool = false) {
         guard facce.count >= 2 else { return }
         let su = simd_normalize(gravitaSu)
-        let maxDistance = estensioneMesh * 0.12
-        let minOverlap = estensioneMesh * 0.015
+        let boxUp = asseVerticaleBox
+        let boxHeight = abs(boxUp.high - boxUp.low)
+        let minOverlap = max(boxHeight * 0.04, 1e-5)
 
-        func edgeVicino(
-            _ polygon: [SIMD3<Float>],
-            linePoint: SIMD3<Float>,
-            lineDirection: SIMD3<Float>
-        ) -> (index: Int, distance: Float, minT: Float, maxT: Float)? {
-            var result: (Int, Float, Float, Float)?
+        func sideEdges(_ faceIndex: Int) -> [(edge: Int, coordinate: Float)]? {
+            guard let polygon = facce[faceIndex].poligono, polygon.count >= 3,
+                  let normal0 = facce[faceIndex].pianoNormale,
+                  let point = facce[faceIndex].pianoPunto else { return nil }
+            let normal = simd_normalize(normal0)
+            var right = simd_cross(boxUp.direction, normal)
+            guard simd_length(right) > 1e-5 else { return nil }
+            right = simd_normalize(right)
+            var verticalEdges: [(Int, Float, Float)] = []
             for k in polygon.indices {
                 let a = polygon[k], b = polygon[(k + 1) % polygon.count]
                 let edge = b - a
-                guard simd_length(edge) > 1e-6,
-                      abs(simd_dot(simd_normalize(edge), lineDirection)) >= 0.65 else { continue }
+                guard simd_length(edge) > 1e-6 else { continue }
+                let verticality = abs(simd_dot(simd_normalize(edge), boxUp.direction))
                 let middle = (a + b) * 0.5
-                let projected = linePoint + lineDirection * simd_dot(middle - linePoint, lineDirection)
-                let distance = simd_length(middle - projected)
-                let ta = simd_dot(a - linePoint, lineDirection)
-                let tb = simd_dot(b - linePoint, lineDirection)
-                if result == nil || distance < result!.1 {
-                    result = (k, distance, min(ta, tb), max(ta, tb))
-                }
+                verticalEdges.append((k, verticality, simd_dot(middle - point, right)))
             }
-            return result
+            let sides = verticalEdges.sorted { $0.1 > $1.1 }.prefix(2)
+                .map { (edge: $0.0, coordinate: $0.2) }
+                .sorted { $0.coordinate < $1.coordinate }
+            return sides.count == 2 ? sides : nil
         }
 
-        for _ in 0..<2 {
-            for aIndex in facce.indices {
-                for bIndex in facce.indices where bIndex > aIndex {
-                    guard let normalA0 = facce[aIndex].pianoNormale,
-                          let normalB0 = facce[bIndex].pianoNormale,
-                          let pointA = facce[aIndex].pianoPunto,
-                          let pointB = facce[bIndex].pianoPunto,
-                          var polygonA = facce[aIndex].poligono, polygonA.count >= 3,
-                          var polygonB = facce[bIndex].poligono, polygonB.count >= 3 else { continue }
-                    let normalA = simd_normalize(normalA0)
-                    let normalB = simd_normalize(normalB0)
-                    guard abs(simd_dot(normalA, su)) < 0.65,
-                          abs(simd_dot(normalB, su)) < 0.65,
-                          abs(simd_dot(normalA, normalB)) < cos(15 * Float.pi / 180) else { continue }
-                    let cross = simd_cross(normalA, normalB)
-                    guard simd_length(cross) > 1e-4 else { continue }
-                    let direction = simd_normalize(cross)
-                    guard abs(simd_dot(direction, su)) >= 0.55,
-                          let linePoint = puntoSuRetta(
-                            nA: normalA, pA: pointA, nB: normalB, pB: pointB, dir: direction),
-                          let edgeA = edgeVicino(polygonA, linePoint: linePoint, lineDirection: direction),
-                          let edgeB = edgeVicino(polygonB, linePoint: linePoint, lineDirection: direction),
-                          edgeA.distance <= maxDistance, edgeB.distance <= maxDistance else { continue }
-                    let overlapLow = max(edgeA.minT, edgeB.minT)
-                    let overlapHigh = min(edgeA.maxT, edgeB.maxT)
-                    guard overlapHigh - overlapLow >= minOverlap else { continue }
-                    let low = min(edgeA.minT, edgeB.minT)
-                    let high = max(edgeA.maxT, edgeB.maxT)
-                    let sharedLow = linePoint + direction * low
-                    let sharedHigh = linePoint + direction * high
+        func verticalRange(_ polygon: [SIMD3<Float>]) -> (Float, Float) {
+            let values = polygon.map { simd_dot($0 - frameOrigin, boxUp.direction) }
+            return (values.min() ?? 0, values.max() ?? 0)
+        }
 
-                    func assign(_ polygon: inout [SIMD3<Float>], edge: Int) {
-                        let next = (edge + 1) % polygon.count
-                        let edgeT = simd_dot(polygon[edge] - linePoint, direction)
-                        let nextT = simd_dot(polygon[next] - linePoint, direction)
-                        if edgeT <= nextT {
-                            polygon[edge] = sharedLow; polygon[next] = sharedHigh
-                        } else {
-                            polygon[edge] = sharedHigh; polygon[next] = sharedLow
-                        }
-                    }
-                    assign(&polygonA, edge: edgeA.index)
-                    assign(&polygonB, edge: edgeB.index)
-                    facce[aIndex].poligono = polygonA
-                    facce[bIndex].poligono = polygonB
+        func coordinateOnPlane(
+            linePoint: SIMD3<Float>, lineDirection: SIMD3<Float>,
+            planePoint: SIMD3<Float>, right: SIMD3<Float>
+        ) -> Float {
+            let denominator = simd_dot(lineDirection, boxUp.direction)
+            let reference = simd_dot(planePoint - linePoint, boxUp.direction)
+            let point = abs(denominator) > 1e-6
+                ? linePoint + lineDirection * (reference / denominator) : linePoint
+            return simd_dot(point - planePoint, right)
+        }
+
+        typealias Candidate = (
+            partner: Int, score: Float,
+            linePoint: SIMD3<Float>, lineDirection: SIMD3<Float>
+        )
+        var best: [Int: Candidate] = [:]
+
+        for aIndex in facce.indices {
+            for bIndex in facce.indices where bIndex > aIndex {
+                guard let normalA0 = facce[aIndex].pianoNormale,
+                      let normalB0 = facce[bIndex].pianoNormale,
+                      let pointA = facce[aIndex].pianoPunto,
+                      let pointB = facce[bIndex].pianoPunto,
+                      let polygonA = facce[aIndex].poligono,
+                      let polygonB = facce[bIndex].poligono,
+                      let sidesA = sideEdges(aIndex), let sidesB = sideEdges(bIndex) else { continue }
+                let normalA = simd_normalize(normalA0), normalB = simd_normalize(normalB0)
+                guard abs(simd_dot(normalA, su)) < 0.65,
+                      abs(simd_dot(normalB, su)) < 0.65,
+                      abs(simd_dot(normalA, normalB)) < cos(15 * Float.pi / 180) else { continue }
+                let cross = simd_cross(normalA, normalB)
+                guard simd_length(cross) > 1e-5 else { continue }
+                var lineDirection = simd_normalize(cross)
+                if simd_dot(lineDirection, boxUp.direction) < 0 { lineDirection = -lineDirection }
+                guard abs(simd_dot(lineDirection, boxUp.direction)) >= 0.55,
+                      let linePoint = puntoSuRetta(
+                        nA: normalA, pA: pointA, nB: normalB, pB: pointB, dir: lineDirection) else { continue }
+
+                let rangeA = verticalRange(polygonA), rangeB = verticalRange(polygonB)
+                guard min(rangeA.1, rangeB.1) - max(rangeA.0, rangeB.0) >= minOverlap else { continue }
+                let rightA = simd_normalize(simd_cross(boxUp.direction, normalA))
+                let rightB = simd_normalize(simd_cross(boxUp.direction, normalB))
+                let valueA = coordinateOnPlane(
+                    linePoint: linePoint, lineDirection: lineDirection,
+                    planePoint: pointA, right: rightA)
+                let valueB = coordinateOnPlane(
+                    linePoint: linePoint, lineDirection: lineDirection,
+                    planePoint: pointB, right: rightB)
+                let sideA = abs(valueA - sidesA[0].coordinate) <= abs(valueA - sidesA[1].coordinate) ? 0 : 1
+                let sideB = abs(valueB - sidesB[0].coordinate) <= abs(valueB - sidesB[1].coordinate) ? 0 : 1
+                let widthA = max(abs(sidesA[1].coordinate - sidesA[0].coordinate), 1e-5)
+                let widthB = max(abs(sidesB[1].coordinate - sidesB[0].coordinate), 1e-5)
+                let distanceA = abs(valueA - sidesA[sideA].coordinate)
+                let distanceB = abs(valueB - sidesB[sideB].coordinate)
+                let innerSlackA = max(widthA * 0.08, estensioneMesh * 0.008)
+                let innerSlackB = max(widthB * 0.08, estensioneMesh * 0.008)
+                guard !(valueA > sidesA[0].coordinate + innerSlackA
+                        && valueA < sidesA[1].coordinate - innerSlackA),
+                      !(valueB > sidesB[0].coordinate + innerSlackB
+                        && valueB < sidesB[1].coordinate - innerSlackB) else { continue }
+
+                let keyA = aIndex * 2 + sideA, keyB = bIndex * 2 + sideB
+                let score = distanceA / widthA + distanceB / widthB
+                if best[keyA] == nil || score < best[keyA]!.score {
+                    best[keyA] = (keyB, score, linePoint, lineDirection)
+                }
+                if best[keyB] == nil || score < best[keyB]!.score {
+                    best[keyB] = (keyA, score, linePoint, lineDirection)
                 }
             }
+        }
+
+        func lineAtBoxLimits(_ point: SIMD3<Float>, _ direction: SIMD3<Float>)
+            -> (low: SIMD3<Float>, high: SIMD3<Float>)? {
+            let denominator = simd_dot(direction, boxUp.direction)
+            guard abs(denominator) > 1e-6 else { return nil }
+            let current = simd_dot(point - frameOrigin, boxUp.direction)
+            let low = point + direction * ((boxUp.low - current) / denominator)
+            let high = point + direction * ((boxUp.high - current) / denominator)
+            let tolerance = max(estensioneMesh * 0.004, 1e-5)
+            for endpoint in [low, high] {
+                let local = boxRot.transpose * (endpoint - frameOrigin)
+                for axis in 0..<3 where axis != boxUp.axis {
+                    guard local[axis] >= boxLo[axis] - tolerance,
+                          local[axis] <= boxHi[axis] + tolerance else { return nil }
+                }
+            }
+            return (low, high)
+        }
+
+        func assignSharedEdge(faceIndex: Int, side: Int,
+                              low: SIMD3<Float>, high: SIMD3<Float>) {
+            guard let sides = sideEdges(faceIndex),
+                  var polygon = facce[faceIndex].poligono else { return }
+            let edge = sides[side].edge, next = (edge + 1) % polygon.count
+            let first = simd_dot(polygon[edge] - frameOrigin, boxUp.direction)
+            let second = simd_dot(polygon[next] - frameOrigin, boxUp.direction)
+            if first <= second { polygon[edge] = low; polygon[next] = high }
+            else { polygon[edge] = high; polygon[next] = low }
+            facce[faceIndex].poligono = polygon
+        }
+
+        var paired = Set<Int>()
+        for (key, candidate) in best where key < candidate.partner {
+            guard best[candidate.partner]?.partner == key,
+                  let edge = lineAtBoxLimits(candidate.linePoint, candidate.lineDirection) else { continue }
+            assignSharedEdge(faceIndex: key / 2, side: key % 2, low: edge.low, high: edge.high)
+            assignSharedEdge(faceIndex: candidate.partner / 2, side: candidate.partner % 2,
+                             low: edge.low, high: edge.high)
+            paired.insert(key); paired.insert(candidate.partner)
+        }
+
+        if estendiLatiLiberiAlBox {
+            for faceIndex in facce.indices {
+                guard let normal0 = facce[faceIndex].pianoNormale,
+                      let sides = sideEdges(faceIndex) else { continue }
+                let normal = simd_normalize(normal0)
+                var right = simd_cross(boxUp.direction, normal)
+                guard simd_length(right) > 1e-5 else { continue }
+                right = simd_normalize(right)
+                for side in 0..<2 where !paired.contains(faceIndex * 2 + side) {
+                    guard var polygon = facce[faceIndex].poligono else { continue }
+                    let edge = sides[side].edge, next = (edge + 1) % polygon.count
+                    let origin = (polygon[edge] + polygon[next]) * 0.5
+                    let ray = side == 0 ? -right : right
+                    let localOrigin = boxRot.transpose * (origin - frameOrigin)
+                    let localRay = boxRot.transpose * ray
+                    var hit = Float.greatestFiniteMagnitude
+                    for axis in 0..<3 where axis != boxUp.axis {
+                        if localRay[axis] > 1e-6 {
+                            hit = min(hit, (boxHi[axis] - localOrigin[axis]) / localRay[axis])
+                        } else if localRay[axis] < -1e-6 {
+                            hit = min(hit, (boxLo[axis] - localOrigin[axis]) / localRay[axis])
+                        }
+                    }
+                    guard hit.isFinite, hit >= 0 else { continue }
+                    polygon[edge] += ray * hit
+                    polygon[next] += ray * hit
+                    facce[faceIndex].poligono = polygon
+                }
+            }
+        }
+
+        for index in facce.indices {
+            guard let polygon = facce[index].poligono, !polygon.isEmpty else { continue }
+            facce[index].pianoPunto = polygon.reduce(
+                SIMD3<Float>(repeating: 0), +) / Float(polygon.count)
         }
     }
 
