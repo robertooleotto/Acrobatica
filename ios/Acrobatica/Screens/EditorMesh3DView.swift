@@ -1318,13 +1318,16 @@ struct EditorMesh3DView: View {
                 ChipSelezione("Allinea", "cube.transparent") { model.allineaBox() }
                 ChipSelezione("Reset", "arrow.counterclockwise") { model.resetBox() }
                 ChipSelezione("Inverti", "rectangle.righthalf.inset.filled") { model.applicaCrop(inverti: true) }
+                    .disabled(model.ritaglioInCorso)
                 Button { model.applicaCrop(inverti: false) } label: {
-                    Label("Ritaglia", systemImage: "crop")
+                    Label(model.ritaglioInCorso ? "Ritaglio..." : "Ritaglia",
+                          systemImage: model.ritaglioInCorso ? "hourglass" : "crop")
                         .font(Theme.Typo.caption(12, .bold))
                         .padding(.horizontal, 10).padding(.vertical, 6)
                         .background(EditorTheme.accento, in: RoundedRectangle(cornerRadius: 8))
                         .foregroundStyle(.white)
                 }
+                .disabled(model.ritaglioInCorso)
             }
             HStack(spacing: 8) {
                 Button {
@@ -3666,6 +3669,7 @@ final class Mesh3DModel: ObservableObject {
     private var textureTriangleIds: [Int]?
     private var textureTriangleIdsOriginali: [Int]?
     var haTexturaOC: Bool { ocTextureNode != nil }
+    @Published private(set) var ritaglioInCorso = false
     @Published var puoUndo = false
     @Published var puoRedo = false
     private var undoStack: [(EditableMesh, Set<Int>, [FacciaProxy], [Int]?)] = []
@@ -4409,7 +4413,11 @@ final class Mesh3DModel: ObservableObject {
             geometry.materials = part.materials
             part.node.geometry = geometry
         }
-        if !mappedIds.contains(-1) {
+        // Conserva anche una corrispondenza parziale. I triangoli senza gemello
+        // nella raw restano a -1 e semplicemente non ricevono texture; rifare la
+        // ricerca spaziale a ogni crop e' molto piu' lento e puo' scegliere un
+        // duplicato UV diverso sui bordi delle pagine texture.
+        if mappedIds.contains(where: { $0 >= 0 }) {
             textureTriangleIds = mappedIds
             textureTriangleIdsOriginali = mappedIds
         }
@@ -4451,18 +4459,21 @@ final class Mesh3DModel: ObservableObject {
         aggiornaClip()
     }
 
-    private func rimappaTexture(_ remap: [Int]) {
-        guard let oldIds = textureTriangleIds, oldIds.count == remap.count else {
-            textureTriangleIds = nil
-            return
-        }
+    nonisolated private static func textureRimappata(
+        _ oldIds: [Int]?, con remap: [Int]
+    ) -> [Int]? {
+        guard let oldIds, oldIds.count == remap.count else { return nil }
         let newCount = remap.max().map { $0 + 1 } ?? 0
         var newIds = [Int](repeating: -1, count: newCount)
         for oldIndex in remap.indices {
             let newIndex = remap[oldIndex]
             if newIndex >= 0 { newIds[newIndex] = oldIds[oldIndex] }
         }
-        textureTriangleIds = newIds
+        return newIds
+    }
+
+    private func rimappaTexture(_ remap: [Int]) {
+        textureTriangleIds = Self.textureRimappata(textureTriangleIds, con: remap)
     }
 
     nonisolated private static func caricaOBJEditabile(_ url: URL) -> EditableMesh? {
@@ -4681,20 +4692,58 @@ final class Mesh3DModel: ObservableObject {
         ricostruisciBox()
     }
 
-    /// Crop: elimina i poligoni fuori dal box orientato (o dentro, se `inverti`).
+    /// Crop: la selezione e la compattazione di centinaia di migliaia di
+    /// triangoli avvengono fuori dal main thread; SceneKit viene aggiornato solo
+    /// quando i nuovi buffer sono pronti.
+    @MainActor
     func applicaCrop(inverti: Bool) {
-        let sel = inverti ? mesh.triangoliDentro(frameOrigin, boxRot, boxLo, boxHi)
-                          : mesh.triangoliFuori(frameOrigin, boxRot, boxLo, boxHi)
-        guard !sel.isEmpty else { return }
-        annullaRevisionePiani()
-        registraUndo()
-        let remap = mesh.elimina(sel)
-        rimappaTexture(remap)
-        meshRevision += 1
-        rimappaFacce(remap)
-        if !inverti { ritagliaPianiAlBox() }
-        selezione = []
-        renderMesh()
+        guard !ritaglioInCorso, !mesh.triangles.isEmpty else { return }
+        let meshIniziale = mesh
+        let textureIniziale = textureTriangleIds
+        let revisioneIniziale = meshRevision
+        let origin = frameOrigin
+        let rot = boxRot
+        let lo = boxLo
+        let hi = boxHi
+
+        ritaglioInCorso = true
+        cursoreInfo = "Ritaglio mesh..."
+        Task { @MainActor [weak self] in
+            let risultato = await Task.detached(priority: .userInitiated) {
+                let eliminati = inverti
+                    ? meshIniziale.triangoliDentro(origin, rot, lo, hi)
+                    : meshIniziale.triangoliFuori(origin, rot, lo, hi)
+                guard !eliminati.isEmpty else {
+                    return Optional<(EditableMesh, [Int], [Int]?)>.none
+                }
+                var nuovaMesh = meshIniziale
+                let remap = nuovaMesh.elimina(eliminati)
+                let nuovaTexture = Self.textureRimappata(textureIniziale, con: remap)
+                return (nuovaMesh, remap, nuovaTexture)
+            }.value
+
+            guard let self else { return }
+            defer { self.ritaglioInCorso = false }
+            guard self.meshRevision == revisioneIniziale else {
+                self.cursoreInfo = "Ritaglio annullato: la mesh e' cambiata"
+                return
+            }
+            guard let (nuovaMesh, remap, nuovaTexture) = risultato else {
+                self.cursoreInfo = "Il box contiene gia' tutta la mesh"
+                return
+            }
+
+            self.annullaRevisionePiani()
+            self.registraUndo()
+            self.mesh = nuovaMesh
+            self.textureTriangleIds = nuovaTexture
+            self.meshRevision += 1
+            self.rimappaFacce(remap)
+            if !inverti { self.ritagliaPianiAlBox() }
+            self.selezione = []
+            self.renderMesh()
+            self.cursoreInfo = nil
+        }
     }
 
     /// Hit-test sulle maniglie del box (dal Coordinator). Ritorna la faccia.
@@ -7852,24 +7901,26 @@ final class Mesh3DModel: ObservableObject {
         ridisegnaPiani()   // i piani diventano pieni/trasparenti secondo la visibilità mesh
     }
 
-    /// Riallinea triangoli e piani dopo un taglio. Conserva la normale
-    /// architettonica rilevata, aggiornando offset e perimetro sulla mesh residua.
+    /// Riallinea gli eventuali indici di supporto dopo un taglio. I piani
+    /// prodotti dal detector backend hanno gia' punto, normale e poligono: non
+    /// vanno ri-rilevati scandendo tutta la mesh durante ogni crop.
     private func rimappaFacce(_ remap: [Int]) {
         guard !facce.isEmpty else { return }
+        var daEliminare: Set<Int> = []
+        var poligoniMancanti: [Int] = []
         for i in facce.indices {
             let avevaSupporto = !facce[i].triangoli.isEmpty
-            facce[i].triangoli = Set(facce[i].triangoli.compactMap {
-                remap.indices.contains($0) && remap[$0] >= 0 ? remap[$0] : nil
+            guard avevaSupporto else { continue }
+            facce[i].triangoli = Set(facce[i].triangoli.compactMap { oldIndex in
+                guard remap.indices.contains(oldIndex), remap[oldIndex] >= 0 else {
+                    return nil
+                }
+                return remap[oldIndex]
             })
-
-            // Alcuni detector producono soltanto piano e poligono. In quel caso
-            // ricava il supporto dalla geometria residua. Se invece il supporto
-            // esisteva ed e' stato tagliato interamente, il piano va eliminato.
-            if !avevaSupporto, facce[i].triangoli.isEmpty {
-                facce[i].triangoli = trovaSupportoPiano(facce[i])
+            guard !facce[i].triangoli.isEmpty else {
+                daEliminare.insert(facce[i].id)
+                continue
             }
-
-            guard !facce[i].triangoli.isEmpty else { continue }
             if let normal0 = facce[i].pianoNormale,
                let point0 = facce[i].pianoPunto {
                 let normal = simd_normalize(normal0)
@@ -7879,9 +7930,13 @@ final class Mesh3DModel: ObservableObject {
                         mesh.centroid(mesh.triangles[triangleIndex]) - point0, normal)
                 }
                 offset /= Float(facce[i].triangoli.count)
-                let point = point0 + normal * offset
+                let translation = normal * offset
+                let point = point0 + translation
                 facce[i].pianoPunto = point
                 facce[i].pianoNormale = normal
+                if let polygon = facce[i].poligono {
+                    facce[i].poligono = polygon.map { $0 + translation }
+                }
                 facce[i].erroreRms = mesh.rmsDalPiano(
                     facce[i].triangoli, punto: point, normale: normal)
             } else if let (point, normal) = mesh.fitPiano(facce[i].triangoli) {
@@ -7890,17 +7945,18 @@ final class Mesh3DModel: ObservableObject {
                 facce[i].erroreRms = mesh.rmsDalPiano(
                     facce[i].triangoli, punto: point, normale: normal)
             }
+            if facce[i].poligono == nil { poligoniMancanti.append(facce[i].id) }
         }
-        facce.removeAll { $0.triangoli.isEmpty }
+        facce.removeAll { daEliminare.contains($0.id) }
         let validIDs = Set(facce.map(\.id))
         facceSelezionate.formIntersection(validIDs)
         if facciaAttivaId == nil || !facce.contains(where: { $0.id == facciaAttivaId }) {
             facciaAttivaId = facce.last?.id
         }
-        for id in facce.map(\.id) { generaPoligono(perFaccia: id) }
+        for id in poligoniMancanti where validIDs.contains(id) {
+            generaPoligono(perFaccia: id)
+        }
         pianiGenerati = facce.filter { $0.pianoNormale != nil }.count
-        ridisegnaFacce()
-        ridisegnaPiani()
     }
 
     /// Interseca esattamente i poligoni dei piani con il box orientato. Il
