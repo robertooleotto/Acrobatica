@@ -228,16 +228,15 @@ struct EditorMesh3DView: View {
     /// All'apertura mostra subito il risultato automatico se il backend lo ha
     /// gia prodotto; in assenza di un bake conserva il riconoscimento editoriale.
     private func preparaRisultatoAutomatico(sessionId sid: String) async {
+        let pianiRipristinati = await ripristinaPianiSalvati(sessionId: sid)
         do {
             let result = try await BackendAPIClient.shared.projectionStatus(sessionId: sid)
             guard result.state == "complete", let main = result.main_obj else {
                 if result.state == "queued" || result.state == "running" {
                     toastCloud = result.message
-                } else if consentiAutoPianiAllApertura {
+                } else if !pianiRipristinati && consentiAutoPianiAllApertura {
                     await model.riconosciPianiAuto(
                         sessionId: sid, meshKind: meshKindRiconoscimento)
-                } else {
-                    toastCloud = "Mesh OC originale: puoi riconoscere i piani o pulirla"
                 }
                 return
             }
@@ -253,28 +252,29 @@ struct EditorMesh3DView: View {
                         "Il bundle automatico non contiene l'OBJ principale"])
             }
             try model.caricaPianiTexturizzati(url)
-            await ripristinaPianiSalvati(sessionId: sid)
+            _ = await ripristinaPianiSalvati(sessionId: sid)
             toastCloud = "Modello texturizzato pronto ✓"
         } catch {
             toastCloud = "Risultato automatico non disponibile"
-            if consentiAutoPianiAllApertura {
+            if !pianiRipristinati && consentiAutoPianiAllApertura {
                 await model.riconosciPianiAuto(
                     sessionId: sid, meshKind: meshKindRiconoscimento)
             }
         }
     }
 
+    @discardableResult
     @MainActor
-    private func ripristinaPianiSalvati(sessionId: String) async {
-        guard model.facce.isEmpty else { return }
+    private func ripristinaPianiSalvati(sessionId: String) async -> Bool {
+        guard model.facce.isEmpty else { return true }
         do {
             let planes = try await BackendAPIClient.shared.downloadSavedPlanes(
                 sessionId: sessionId)
-            guard !planes.isEmpty else { return }
+            guard !planes.isEmpty else { return false }
             model.applicaPianiRilevati(planes, registraModifica: false)
+            return true
         } catch {
-            await model.riconosciPianiAuto(
-                sessionId: sessionId, meshKind: meshKindRiconoscimento)
+            return false
         }
     }
 
@@ -8364,7 +8364,7 @@ struct EditorMesh3DCaricamentoView: View {
                                  nome: "Mesh facciata",
                                  sessionId: sessionId,
                                  meshKind: usaMeshPulita ? "clean" : "raw",
-                                 consentiAutoPianiAllApertura: usaMeshPulita,
+                                 consentiAutoPianiAllApertura: true,
                                  onRipartiDaRaw: {
                                      Task { await ripartiDallaMeshOriginale() }
                                  },
@@ -8435,6 +8435,9 @@ struct EditorMesh3DCaricamentoView: View {
                     sessionId: sessionId, kind: "raw")
                 usaMeshPulita = false
             }
+            messaggio = "Preparo i piani automatici…"
+            try await preparaPianiPrimaDelDownload(
+                meshKind: usaMeshPulita ? "clean" : "raw")
             guard let main = info.main_obj ?? info.files.first else {
                 errore = "La sessione non ha una mesh OBJ."
                 pronto = true
@@ -8479,6 +8482,55 @@ struct EditorMesh3DCaricamentoView: View {
         } catch {
             errore = error.localizedDescription
             pronto = true
+        }
+    }
+
+    /// Non apre l'editor con la sola mesh: aspetta il job avviato da
+    /// `/mesh-ready`; per sessioni precedenti al job automatico esegue una
+    /// rilevazione persistente di recupero.
+    private func preparaPianiPrimaDelDownload(meshKind: String) async throws {
+        func pianiDisponibili() async -> Bool {
+            guard let planes = try? await BackendAPIClient.shared.downloadSavedPlanes(
+                sessionId: sessionId) else { return false }
+            return !planes.isEmpty
+        }
+
+        if await pianiDisponibili() { return }
+
+        // Il worker imposta subito queued/running. Tre tentativi brevi coprono
+        // la finestra tra upload del bundle e chiamata a `/mesh-ready`.
+        for attempt in 0..<300 {
+            if Task.isCancelled { throw CancellationError() }
+            if await pianiDisponibili() { return }
+
+            let status = try? await BackendAPIClient.shared.projectionStatus(
+                sessionId: sessionId)
+            if let status, ["queued", "running"].contains(status.state) {
+                await MainActor.run {
+                    messaggio = status.message.isEmpty
+                        ? "Riconosco i piani…" : status.message
+                }
+                try await Task.sleep(nanoseconds: 2_000_000_000)
+                continue
+            }
+            if attempt < 3 {
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+                continue
+            }
+            break
+        }
+
+        await MainActor.run { messaggio = "Riconosco e salvo i piani…" }
+        let detected = try await BackendAPIClient.shared.detectPlanes(
+            sessionId: sessionId,
+            up: [0, 1, 0],
+            meshKind: meshKind,
+            persist: true)
+        guard detected.count > 0, await pianiDisponibili() else {
+            throw NSError(
+                domain: "AcrobaticaPlanes", code: 1,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Il riconoscimento non ha prodotto piani utilizzabili"])
         }
     }
 }

@@ -138,7 +138,7 @@ def test_automatic_pipeline_exposes_failure_in_projection_job(monkeypatch):
     assert "detector offline" in jobs[-1][-1]
 
 
-def test_mesh_ready_waits_for_clean_geometry(monkeypatch):
+def test_mesh_ready_queues_automatic_planes_before_editor_download(monkeypatch):
     session = {
         "id": "session-1",
         "status": "computing_oc",
@@ -147,6 +147,12 @@ def test_mesh_ready_waits_for_clean_geometry(monkeypatch):
         "result": None,
     }
     jobs = []
+    tasks = []
+
+    class BackgroundTasksStub:
+        def add_task(self, function, *args):
+            tasks.append((function, args))
+
     monkeypatch.setattr(
         facade_sessions.session_store, "get_session", lambda session_id: session,
     )
@@ -162,13 +168,14 @@ def test_mesh_ready_waits_for_clean_geometry(monkeypatch):
         lambda *args: jobs.append(args),
     )
 
-    result = facade_sessions.mesh_ready("session-1")
+    result = facade_sessions.mesh_ready("session-1", BackgroundTasksStub())
 
     assert result.status == "mesh_ready"
     assert jobs == [(
-        "session-1", "idle", 0.0,
-        "Mesh OC originale pronta: attendo la pulizia",
+        "session-1", "queued", 0.0,
+        "Mesh pronta: accodo il riconoscimento dei piani",
     )]
+    assert tasks == [(facade_sessions._run_automatic_mesh_pipeline, ("session-1",))]
 
 
 def test_plane_edits_preserve_the_first_texture_frame():

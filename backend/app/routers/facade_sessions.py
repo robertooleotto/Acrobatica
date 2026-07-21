@@ -228,10 +228,13 @@ def start_automatic_pipeline(session_id: str):
 
 
 @router.post("/{session_id}/mesh-ready", response_model=SessionState)
-def mesh_ready(session_id: str):
-    """Passo 4 — il worker ha caricato mesh+pose: la sessione è pronta per il
-    download e la pulizia on-device (computing_oc → mesh_ready). I piani non
-    vengono calcolati sulla raw: tetto, contesto e rumore falsano il detector."""
+def mesh_ready(session_id: str, background_tasks: BackgroundTasks):
+    """Passo 4 — il worker ha caricato mesh e pose.
+
+    Il riconoscimento parte immediatamente sulla mesh OC raw. L'app aspetta il
+    relativo ``planes.json`` prima di scaricare l'OBJ, quindi l'editor si apre
+    con i piani gia' disponibili.
+    """
     sess = session_store.get_session(session_id)
     if sess is None:
         raise HTTPException(404, "Sessione non trovata")
@@ -240,9 +243,10 @@ def mesh_ready(session_id: str):
     except ValueError as e:
         raise HTTPException(409, str(e))
     projection_service._set_job(
-        session_id, "idle", 0.0,
-        "Mesh OC originale pronta: attendo la pulizia",
+        session_id, "queued", 0.0,
+        "Mesh pronta: accodo il riconoscimento dei piani",
     )
+    background_tasks.add_task(_run_automatic_mesh_pipeline, session_id)
     return _session_state(row, session_store.list_photos(session_id))
 
 
@@ -1554,10 +1558,14 @@ def detect_planes(session_id: str, payload: Optional[dict] = Body(None)):
         corners=p["corners"], area_m2=round(float(p["area_m2"]), 2),
         w=round(float(p["w"]), 3), h=round(float(p["h"]), 3),
         triangoli=p.get("triangoli", [])) for p in raw_planes]
-    return DetectPlanesResult(session_id=session_id, up=doc.get("up", up_vec),
-                              count=len(planes), engine=engine,
-                              engine_error=engine_error, mesh_kind=mesh_kind,
-                              planes=planes)
+    detected = DetectPlanesResult(
+        session_id=session_id, up=doc.get("up", up_vec),
+        count=len(planes), engine=engine, engine_error=engine_error,
+        mesh_kind=mesh_kind, planes=planes,
+    )
+    if payload.get("persist"):
+        save_planes(session_id, _automatic_planes_payload(detected))
+    return detected
 
 
 def _automatic_planes_payload(detected: DetectPlanesResult) -> dict:

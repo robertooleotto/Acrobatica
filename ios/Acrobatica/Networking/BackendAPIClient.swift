@@ -431,7 +431,8 @@ actor BackendAPIClient {
     func detectPlanes(
         sessionId: String,
         up: [Float]? = nil,
-        meshKind: String? = nil
+        meshKind: String? = nil,
+        persist: Bool = false
     ) async throws -> DetectPlanesResult {
         let url = baseURL.appendingPathComponent("/facade-sessions/\(sessionId)/detect-planes")
         var req = URLRequest(url: url)
@@ -440,6 +441,7 @@ actor BackendAPIClient {
         var payload: [String: Any] = [:]
         if let up { payload["up"] = up }
         if let meshKind { payload["mesh_kind"] = meshKind }
+        if persist { payload["persist"] = true }
         req.httpBody = try JSONSerialization.data(withJSONObject: payload)
         // La mesh OC grezza puo superare un milione di triangoli: CGAL la
         // ripara, seziona e fonde nello stesso job prima di rispondere.
