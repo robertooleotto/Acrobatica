@@ -1360,6 +1360,22 @@ struct EditorMesh3DView: View {
                 }
                 Spacer()
             }
+            HStack {
+                Button {
+                    confermaRipartenza = true
+                } label: {
+                    Label("Torna alla mesh originale", systemImage: "arrow.uturn.backward.circle")
+                        .font(Theme.Typo.caption(11, .semibold))
+                        .foregroundStyle(Theme.danger)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(EditorTheme.panelAlt, in: RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+                .disabled(model.ritaglioInCorso || cloudOccupato)
+                .help("Elimina tagli ed elaborazioni e ripristina la mesh OC originale")
+                Spacer()
+            }
         }
         .padding(.horizontal, 12)
     }
