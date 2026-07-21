@@ -46,6 +46,71 @@ def rdp_open(points, epsilon):
     return left[:-1] + right
 
 
+def corner_angle_degrees(a, b, c):
+    ax, az = xz(a)
+    bx, bz = xz(b)
+    cx, cz = xz(c)
+    ux, uz = ax - bx, az - bz
+    vx, vz = cx - bx, cz - bz
+    lu = math.hypot(ux, uz)
+    lv = math.hypot(vx, vz)
+    if lu <= 1e-9 or lv <= 1e-9:
+        return None
+    cosine = max(-1.0, min(1.0, (ux * vx + uz * vz) / (lu * lv)))
+    return math.degrees(math.acos(cosine))
+
+
+def nearest_right_angle_vertex(a, b, c):
+    """Project b onto the Thales circle with diameter a-c."""
+    ax, az = xz(a)
+    bx, bz = xz(b)
+    cx, cz = xz(c)
+    mx, mz = (ax + cx) * 0.5, (az + cz) * 0.5
+    radius = math.hypot(cx - ax, cz - az) * 0.5
+    dx, dz = bx - mx, bz - mz
+    distance = math.hypot(dx, dz)
+    if radius <= 1e-9 or distance <= 1e-9:
+        return None
+    return [mx + radius * dx / distance, float(b[1]), mz + radius * dz / distance]
+
+
+def snap_near_right_angles(points, closed, tolerance_deg=10.0,
+                           max_shift=0.35, iterations=60):
+    if tolerance_deg <= 0 or len(points) < 3:
+        return points[:]
+
+    pts = [point[:] for point in points]
+    explicit_closed = closed and math.dist(xz(pts[0]), xz(pts[-1])) <= 1e-6
+    if explicit_closed:
+        pts = pts[:-1]
+    originals = [point[:] for point in pts]
+    count = len(pts)
+    indices = range(count) if closed else range(1, count - 1)
+
+    for _ in range(iterations):
+        max_delta = 0.0
+        for i in indices:
+            angle = corner_angle_degrees(
+                pts[(i - 1) % count], pts[i], pts[(i + 1) % count])
+            if angle is None or abs(angle - 90.0) > tolerance_deg:
+                continue
+            target = nearest_right_angle_vertex(
+                pts[(i - 1) % count], pts[i], pts[(i + 1) % count])
+            if target is None:
+                continue
+            if max_shift > 0 and math.dist(xz(originals[i]), xz(target)) > max_shift:
+                continue
+            delta = math.dist(xz(pts[i]), xz(target))
+            pts[i] = target
+            max_delta = max(max_delta, delta)
+        if max_delta <= 1e-6:
+            break
+
+    if explicit_closed:
+        pts.append(pts[0][:])
+    return pts
+
+
 def path_length(points):
     return sum(math.dist(xz(points[i - 1]), xz(points[i])) for i in range(1, len(points)))
 
@@ -289,7 +354,9 @@ def regularize_to_orthogonal_grid(points, closed, angle_deg, line_tolerance):
     return out
 
 
-def simplify_contour(points, closed, epsilon, min_points_closed, angle_deg, line_tolerance, min_edge):
+def simplify_contour(points, closed, epsilon, min_points_closed, angle_deg,
+                     line_tolerance, min_edge, right_angle_tolerance=10.0,
+                     right_angle_max_shift=0.35):
     pts = points[:]
     if len(pts) <= 2:
         return pts
@@ -320,12 +387,14 @@ def simplify_contour(points, closed, epsilon, min_points_closed, angle_deg, line
         if len(simplified) < min_points_closed + 1:
             # Too few points means the simplifier collapsed an opening/balcony.
             return pts
-        return simplified
+        return snap_near_right_angles(
+            simplified, True, right_angle_tolerance, right_angle_max_shift)
 
     simplified = rdp_open(pts, epsilon)
     if len(simplified) < 2:
         return pts
-    return simplified
+    return snap_near_right_angles(
+        simplified, False, right_angle_tolerance, right_angle_max_shift)
 
 
 def main():
@@ -335,6 +404,8 @@ def main():
     ap.add_argument("--epsilon", type=float, default=0.18)
     ap.add_argument("--line-tolerance", type=float, default=0.0)
     ap.add_argument("--min-edge", type=float, default=0.0)
+    ap.add_argument("--right-angle-tolerance", type=float, default=10.0)
+    ap.add_argument("--right-angle-max-shift", type=float, default=0.35)
     ap.add_argument("--angle-deg", type=float, default=None)
     ap.add_argument("--source-key", default="regularized_original")
     ap.add_argument("--min-points-closed", type=int, default=6)
@@ -361,6 +432,8 @@ def main():
                 angle_deg,
                 args.line_tolerance,
                 args.min_edge,
+                args.right_angle_tolerance,
+                args.right_angle_max_shift,
             )
         if s.get("contours"):
             main_pts = len(s["contours"][0].get("regularized", []))

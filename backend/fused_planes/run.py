@@ -3,7 +3,9 @@
 Dalla mesh (metrica, o OC + transform temporaneo) genera piani in metri reali,
 senza dipendere dall'orientamento scelto da Object Capture. Catena:
 
-  build_slice_stack -> simplify_stack -> assign_slice_to_planes -> build_fused_planes
+  build_slice_stack -> simplify_stack -> multi-slice open-surface reconstruction
+
+The legacy single-slice fusion remains available only for comparison.
 
 Uso:
   # mesh gia' in metri
@@ -220,13 +222,15 @@ def main():
     # parametri catena (default = i valori validati a mano)
     ap.add_argument("--step", type=float, default=0.3)
     ap.add_argument("--angle", default="auto", help="direzione principale in gradi, o 'auto'")
-    ap.add_argument("--line-tolerance", type=float, default=0.75)
-    ap.add_argument("--min-edge", type=float, default=0.75)
+    ap.add_argument("--line-tolerance", type=float, default=0.0)
+    ap.add_argument("--min-edge", type=float, default=0.0)
     ap.add_argument("--slice-index", default="auto", help="indice fetta o 'auto'")
     ap.add_argument("--max-dist", type=float, default=2.5)
     ap.add_argument("--max-angle", type=float, default=18.0)
     ap.add_argument("--perimeter-max-dist", type=float, default=0.65)
     ap.add_argument("--perimeter-max-angle", type=float, default=5.0)
+    ap.add_argument("--reconstruction", choices=("multi-slice", "single-slice"),
+                    default="multi-slice")
     args = ap.parse_args()
 
     out = args.out_dir
@@ -257,11 +261,18 @@ def main():
 
     candidate_source = "cgal" if args.planes else args.candidate_source
     args_planes = args.planes
-    if candidate_source == "cgal" and not args_planes:
+    if args.reconstruction == "multi-slice" and not args_planes:
+        args_planes = os.path.join(out, "cgal_support_planes.json")
+        print("[0/5] build_cgal_planes (supporto 3D)")
+        # Region growing and slices must see the exact same metric geometry.
+        sh([py, os.path.join(HERE, "build_cgal_planes.py"), mesh, args_planes,
+            "--metric", "--support-only"])
+        candidate_source = "cgal+perimeter"
+    elif candidate_source == "cgal" and not args_planes:
         args_planes = os.path.join(out, "cgal_planes.json")
         print("[0/5] build_cgal_planes")
         sh([py, os.path.join(HERE, "build_cgal_planes.py"), oc_obj, args_planes])
-    if candidate_source == "cgal":
+    if candidate_source == "cgal" and args.reconstruction == "single-slice":
         angle = (dominant_angle(args_planes)
                  if str(args.angle).lower() == "auto" else float(args.angle))
         slice_angle = str(angle)
@@ -279,9 +290,33 @@ def main():
     print(f"[perimeter] direzione locale = {angle:.2f} deg")
 
     print("[2/5] simplify_stack")
-    sh([py, os.path.join(HERE, "simplify_stack.py"), stack_before, stack,
-        "--source-key", "raw", "--angle-deg", str(angle),
-        "--line-tolerance", str(args.line_tolerance), "--min-edge", str(args.min_edge)])
+    simplify_command = [
+        py, os.path.join(HERE, "simplify_stack.py"), stack_before, stack,
+        "--source-key", "raw",
+    ]
+    if args.line_tolerance > 0:
+        simplify_command.extend([
+            "--angle-deg", str(angle),
+            "--line-tolerance", str(args.line_tolerance),
+            "--min-edge", str(args.min_edge),
+        ])
+    sh(simplify_command)
+
+    if args.reconstruction == "multi-slice":
+        print("[3/5] reconstruct_open_surface (regioni 3D + tutte le fette)")
+        sh([py, os.path.join(HERE, "reconstruct_open_surface.py"),
+            "--stack", stack, "--candidates", args_planes, "--out-dir", out])
+        fused = json.load(open(os.path.join(out, "fused_planes.json")))
+        fused.setdefault("source", {})["candidate_source"] = candidate_source
+        fused["source"]["analysis_frame"] = "arkit" if analysis_similarity else "scaled_oc"
+        detected = to_detected_planes(
+            fused, oc_scale=scale, analysis_similarity=analysis_similarity)
+        with open(os.path.join(out, "detected_planes.json"), "w") as f:
+            json.dump(detected, f)
+        total = sum(p["area_m2"] for p in detected["planes"])
+        print(f"\nOK: {len(detected['planes'])} piani multi-slice, area totale {total:.0f} m²")
+        print(f"    -> {out}/fused_planes.json + detected_planes.json")
+        return
 
     if candidate_source == "perimeter":
         args_planes = os.path.join(out, "perimeter_planes.json")
@@ -300,7 +335,7 @@ def main():
         assignment_dist = args.max_dist
         assignment_angle = args.max_angle
 
-    # (a) scelta fetta: auto o indice esplicito
+    # Legacy comparison: output topology comes from one selected slice.
     if str(args.slice_index) == "auto":
         slice_index = (pick_best_supported_slice(
             stack, args_planes, assignment_dist, assignment_angle)

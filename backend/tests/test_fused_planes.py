@@ -5,8 +5,10 @@ import numpy as np
 import pytest
 
 from fused_planes.build_cgal_planes import (
+    attach_support_bounds,
     classify_plane,
     convex_hull_indices,
+    estimate_mesh_resolution,
     filter_candidates_by_area,
 )
 from fused_planes.build_fused_planes import (
@@ -17,13 +19,18 @@ from fused_planes.build_fused_planes import (
 )
 from fused_planes.build_slice_stack import slice_batch
 from fused_planes.build_slice_stack import estimate_global_angle
-from fused_planes.build_perimeter_planes import build_candidates
+from fused_planes.build_perimeter_planes import build_candidates, slice_observations
+from fused_planes.simplify_stack import corner_angle_degrees, simplify_contour
 from fused_planes.analysis_frame import estimate_oc_to_arkit
 from fused_planes.run import (
     candidate_is_persistent,
     dominant_angle,
     pick_best_slice,
     to_detected_planes,
+)
+from fused_planes.reconstruct_open_surface import (
+    discover_gap_fits,
+    reconstruct,
 )
 
 
@@ -43,10 +50,97 @@ def test_candidate_area_filter_does_not_depend_on_semantic_type():
     assert filter_candidates_by_area([reveal, facade], 0.05) == [reveal, facade]
 
 
+def test_region_growing_distance_scales_with_mesh_geometry(tmp_path):
+    def write_triangle(path, scale):
+        path.write_text(
+            f"v 0 0 0\nv {scale} 0 0\nv 0 {scale} 0\nf 1 2 3\n")
+
+    small = tmp_path / "small.obj"
+    large = tmp_path / "large.obj"
+    write_triangle(small, 1.0)
+    write_triangle(large, 7.0)
+    assert estimate_mesh_resolution(large) == pytest.approx(
+        estimate_mesh_resolution(small) * 7.0)
+
+
+def test_mesh_region_support_bounds_are_computed_without_convex_hulls():
+    planes = [{
+        "n": np.asarray([0.0, 0.0, 1.0]),
+        "mem": {2},
+    }]
+    faces = np.asarray([
+        (2, -3.0, 1.0, 4.0),
+        (2, 5.0, 9.0, 4.0),
+        (7, 100.0, 100.0, 100.0),
+    ], dtype=[("region", int), ("cx", float), ("cy", float), ("cz", float)])
+    attach_support_bounds(planes, faces)
+    assert planes[0]["support_bounds"] == pytest.approx({
+        "y_min": 1.0,
+        "y_max": 9.0,
+        "t_min": -3.0,
+        "t_max": 5.0,
+    })
+
+
 def test_candidate_requires_persistence_across_slices():
     assert candidate_is_persistent(12, 60, 8.0, 30.0)
     assert not candidate_is_persistent(5, 60, 8.0, 30.0)
     assert not candidate_is_persistent(20, 60, 1.0, 30.0)
+
+
+def test_persistent_contour_gap_creates_connector_plane():
+    by_slice = []
+    connector_observations = []
+    for slice_id in range(4):
+        y = slice_id * 0.3
+        connector = {
+            "slice": slice_id, "contour": 0, "order": 1, "track": 30,
+            "y": y, "a": [0.0, y, 1.0], "b": [4.0, y, 1.0],
+            "length": 4.0,
+        }
+        connector_observations.append(connector)
+        by_slice.append([
+            {
+                "slice": slice_id, "contour": 0, "order": 0, "track": 10,
+                "y": y, "a": [0.0, y, 0.0], "b": [0.0, y, 1.0],
+                "length": 1.0,
+            },
+            connector,
+            {
+                "slice": slice_id, "contour": 0, "order": 2, "track": 20,
+                "y": y, "a": [4.0, y, 1.0], "b": [4.0, y, 0.0],
+                "length": 1.0,
+            },
+        ])
+    base_fits = [
+        {
+            "id": 0, "center": np.array([0.0, 0.45, 0.5]),
+            "normal": np.array([1.0, 0.0, 0.0]), "source_tracks": {10},
+            "mesh_support_bounds": {"y_min": 0.0, "y_max": 0.9},
+        },
+        {
+            "id": 1, "center": np.array([4.0, 0.45, 0.5]),
+            "normal": np.array([1.0, 0.0, 0.0]), "source_tracks": {20},
+            "mesh_support_bounds": {"y_min": 0.0, "y_max": 0.9},
+        },
+    ]
+    unassigned = [{
+        "observations": connector_observations,
+        "center": np.array([2.0, 0.45, 1.0]),
+        "normal": np.array([0.0, 0.0, 1.0]),
+        "source_tracks": {30},
+    }]
+    thresholds = {"angle_rad": math.radians(10), "step": 0.3,
+                  "line_distance": 0.1}
+
+    supplemental = discover_gap_fits(
+        by_slice, base_fits, unassigned, thresholds)
+
+    assert len(supplemental) == 1
+    assert supplemental[0]["gap_neighbors"] == (0, 1)
+    assert supplemental[0]["mesh_support_bounds"] == {
+        "y_min": 0.0, "y_max": 0.9,
+    }
 
 
 def test_batch_slicer_loads_all_requested_heights_in_one_process(tmp_path, monkeypatch):
@@ -84,6 +178,54 @@ def test_global_perimeter_angle_is_derived_in_the_rotated_mesh_frame():
     assert estimate_global_angle(results) == pytest.approx(37.0, abs=0.01)
 
 
+def test_slice_simplification_preserves_coherent_oblique_edges():
+    points = [
+        [0.0, 2.0, 0.0],
+        [1.0, 2.0, 0.40],
+        [2.0, 2.0, 0.82],
+        [3.0, 2.0, 1.20],
+        [4.0, 2.0, 1.62],
+    ]
+
+    simplified = simplify_contour(
+        points, False, epsilon=0.08, min_points_closed=6,
+        angle_deg=None, line_tolerance=0.0, min_edge=0.0)
+
+    assert len(simplified) == 2
+    assert simplified[0] == pytest.approx(points[0])
+    assert simplified[-1] == pytest.approx(points[-1])
+
+
+def test_slice_simplification_snaps_angles_within_ten_degrees_to_right_angle():
+    direction = math.radians(180.0 - 99.0)
+    points = [
+        [0.0, 2.0, 0.0],
+        [2.0, 2.0, 0.0],
+        [2.0 + 1.5 * math.cos(direction), 2.0, 1.5 * math.sin(direction)],
+    ]
+
+    simplified = simplify_contour(
+        points, False, epsilon=0.01, min_points_closed=6,
+        angle_deg=None, line_tolerance=0.0, min_edge=0.0)
+
+    assert corner_angle_degrees(*simplified) == pytest.approx(90.0, abs=1e-5)
+
+
+def test_slice_simplification_keeps_angles_outside_ten_degree_tolerance():
+    direction = math.radians(180.0 - 101.0)
+    points = [
+        [0.0, 2.0, 0.0],
+        [2.0, 2.0, 0.0],
+        [2.0 + 1.5 * math.cos(direction), 2.0, 1.5 * math.sin(direction)],
+    ]
+
+    simplified = simplify_contour(
+        points, False, epsilon=0.01, min_points_closed=6,
+        angle_deg=None, line_tolerance=0.0, min_edge=0.0)
+
+    assert corner_angle_degrees(*simplified) == pytest.approx(101.0)
+
+
 def test_perimeter_candidates_require_vertical_persistence():
     slices = []
     for index in range(12):
@@ -98,6 +240,70 @@ def test_perimeter_candidates_require_vertical_persistence():
     result = build_candidates({"slices": slices}, 0.0)
     assert len(result["planes"]) == 1
     assert result["planes"][0]["slice_count"] == 12
+
+
+def test_oblique_slice_edges_are_not_projected_onto_building_axes():
+    diagonal = [[0.0, 1.0, 0.0], [4.0, 1.0, 2.0]]
+    slice_data = {
+        "index": 0,
+        "y": 1.0,
+        "contours": [{"regularized": diagonal}],
+    }
+
+    assert slice_observations(slice_data, angle_deg=0.0) == []
+
+
+def _synthetic_slice_stack(angle_deg=0.0, scale=1.0):
+    angle = math.radians(angle_deg)
+    rotation = np.array([
+        [math.cos(angle), -math.sin(angle)],
+        [math.sin(angle), math.cos(angle)],
+    ])
+    # Three connected faces, including a deliberately non-Manhattan 73 degree corner.
+    base = np.asarray([[0.0, 0.0], [8.0, 0.0], [9.46, 4.38], [13.0, 4.38]]) * scale
+    slices = []
+    for index in range(12):
+        y = index * 0.3 * scale
+        xz_points = (rotation @ base.T).T
+        points = [[float(point[0]), y, float(point[1])] for point in xz_points]
+        slices.append({
+            "index": index,
+            "y": y,
+            "contours": [{"raw": points, "regularized": points}],
+        })
+    return {"step_m": 0.3 * scale, "slices": slices}
+
+
+@pytest.mark.parametrize("angle_deg", [0.0, 31.0, 79.0])
+def test_multi_slice_reconstruction_is_rotation_invariant_and_keeps_oblique_faces(angle_deg):
+    result = reconstruct(_synthetic_slice_stack(angle_deg=angle_deg))
+    assert len(result["planes"]) == 3
+    assert sorted(plane["w"] for plane in result["planes"]) == pytest.approx(
+        sorted([8.0, math.hypot(1.46, 4.38), 3.54]), abs=0.05)
+    assert all(plane["fit_mode"] == "multi_slice_free_orientation"
+               for plane in result["planes"])
+
+
+def test_multi_slice_reconstruction_scales_with_metric_input():
+    normal = reconstruct(_synthetic_slice_stack(scale=1.0))["planes"]
+    enlarged = reconstruct(_synthetic_slice_stack(scale=4.0))["planes"]
+    assert sorted(plane["w"] for plane in enlarged) == pytest.approx(
+        [value * 4.0 for value in sorted(plane["w"] for plane in normal)], rel=0.02)
+    assert sorted(plane["h"] for plane in enlarged) == pytest.approx(
+        [value * 4.0 for value in sorted(plane["h"] for plane in normal)], rel=0.02)
+
+
+def test_multi_slice_reconstruction_uses_shared_corners_for_connected_faces():
+    planes = reconstruct(_synthetic_slice_stack(angle_deg=23.0))["planes"]
+    shared_pairs = 0
+    for index, first in enumerate(planes):
+        for second in planes[index + 1:]:
+            distance = min(
+                math.dist(a, b)
+                for a in first["corners"] for b in second["corners"]
+            )
+            shared_pairs += distance < 1e-6
+    assert shared_pairs == 2
 
 
 def test_oc_to_arkit_similarity_is_estimated_per_session():

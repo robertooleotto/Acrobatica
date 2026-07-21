@@ -32,7 +32,7 @@ def interval_gap(a0, a1, b0, b1):
 
 
 def slice_observations(slice_data, angle_deg, offset_tolerance=0.20,
-                       min_segment=0.50):
+                       min_segment=0.50, max_axis_angle=12.0):
     """Group collinear pieces from one ring into infinite-line observations."""
     contours = slice_data.get("contours") or []
     if not contours:
@@ -47,8 +47,14 @@ def slice_observations(slice_data, angle_deg, offset_tolerance=0.20,
         dx = float(b[0]) - float(a[0])
         dz = float(b[2]) - float(a[2])
         unit = (dx / length, dz / length)
-        axis = 0 if abs(unit[0] * basis[0][0] + unit[1] * basis[0][1]) >= abs(
-            unit[0] * basis[1][0] + unit[1] * basis[1][1]) else 1
+        alignment = [
+            abs(unit[0] * direction[0] + unit[1] * direction[1])
+            for direction in basis
+        ]
+        axis = 0 if alignment[0] >= alignment[1] else 1
+        angle_error = math.degrees(math.acos(max(-1.0, min(1.0, alignment[axis]))))
+        if angle_error > max_axis_angle:
+            continue
         direction = basis[axis]
         normal = (-direction[1], direction[0])
         midpoint = ((float(a[0]) + float(b[0])) * 0.5,

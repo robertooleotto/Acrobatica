@@ -138,6 +138,12 @@ def load_planes(path, verticalize):
         angle = math.degrees(math.atan2(dz, dx)) % 180.0
         corners = [[v[0] * coordinate_scale, v[1] * coordinate_scale,
                     v[2] * coordinate_scale] for v in p.get("corners", [])]
+        support_bounds = p.get("support_bounds")
+        if support_bounds:
+            support_bounds = {
+                key: float(value) * coordinate_scale
+                for key, value in support_bounds.items()
+            }
         out.append({
             "id": p["id"],
             "name": p["nome"],
@@ -149,6 +155,8 @@ def load_planes(path, verticalize):
             "color": PALETTE[color_i % len(PALETTE)],
             "rms": p.get("rms_m"),
             "score": p.get("score"),
+            "area_m2": p.get("area_m2"),
+            "support_bounds": support_bounds,
         })
         color_i += 1
     return out

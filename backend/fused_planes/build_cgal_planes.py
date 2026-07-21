@@ -20,6 +20,29 @@ import numpy as np
 RG_DEFAULT = os.environ.get("ACRO_REGIONGROW_BIN", "/usr/local/bin/acro-regiongrow")
 
 
+def estimate_mesh_resolution(path, max_faces=50000):
+    """Median triangle-edge length, in the mesh's own units."""
+    vertices = []
+    lengths = []
+    with open(path) as source:
+        for line in source:
+            if line.startswith("v "):
+                vertices.append([float(value) for value in line.split()[1:4]])
+            elif line.startswith("f ") and len(lengths) < max_faces * 3:
+                indices = [int(token.split("/")[0]) - 1 for token in line.split()[1:4]]
+                if len(indices) < 3 or max(indices) >= len(vertices):
+                    continue
+                points = [np.asarray(vertices[index], dtype=float) for index in indices]
+                lengths.extend((
+                    float(np.linalg.norm(points[1] - points[0])),
+                    float(np.linalg.norm(points[2] - points[1])),
+                    float(np.linalg.norm(points[0] - points[2])),
+                ))
+    if not lengths:
+        raise ValueError("mesh senza triangoli utili per stimare la risoluzione")
+    return float(np.median(np.asarray(lengths, dtype=float)))
+
+
 def convex_hull_indices(points):
     """Return the 2D monotone-chain hull indices without requiring SciPy."""
     ordered = sorted((float(p[0]), float(p[1]), i) for i, p in enumerate(points))
@@ -53,11 +76,22 @@ def run_rg(rg_bin, mesh, workdir, maxd, maxa, minr, repaired_mesh=None):
     return R, F
 
 
-def merge_coplanar(R, cop_ang, cop_off):
+def merge_coplanar(R, cop_ang, cop_off, min_member_area=0.0,
+                   max_vertical_component=None):
     area = np.atleast_1d(R["area"])
     N = np.stack([R["nx"], R["ny"], R["nz"]], 1)
     C = np.stack([R["cx"], R["cy"], R["cz"]], 1)
     N = N / np.linalg.norm(N, axis=1, keepdims=True)
+    # Plane orientation is unsigned. Canonical signs avoid cancellation when
+    # disconnected mesh patches have opposite winding.
+    dominant = np.argmax(np.abs(N), axis=1)
+    signs = np.where(N[np.arange(len(N)), dominant] < 0.0, -1.0, 1.0)
+    N = N * signs[:, None]
+    mask = area >= min_member_area
+    if max_vertical_component is not None:
+        mask &= np.abs(N[:, 1]) <= max_vertical_component
+    source_indices = np.flatnonzero(mask)
+    area, N, C = area[mask], N[mask], C[mask]
     n = len(area)
     parent = list(range(n))
     def find(x):
@@ -65,10 +99,18 @@ def merge_coplanar(R, cop_ang, cop_off):
             parent[x] = parent[parent[x]]; x = parent[x]
         return x
     cosA = math.cos(math.radians(cop_ang))
+    # Vectorized comparisons keep memory linear and make thousands of CGAL
+    # regions practical. The symmetric distance prevents a noisy tilted patch
+    # from absorbing a distinct parallel surface.
     for i in range(n):
-        for j in range(i + 1, n):
-            if abs(N[i] @ N[j]) > cosA and abs((C[i] - C[j]) @ N[i]) < cop_off:
-                parent[find(i)] = find(j)
+        if i + 1 >= n:
+            break
+        delta = C[i + 1:] - C[i]
+        angular = np.abs(N[i + 1:] @ N[i]) > cosA
+        first_distance = np.abs(delta @ N[i]) < cop_off
+        second_distance = np.abs(np.einsum("ij,ij->i", delta, N[i + 1:])) < cop_off
+        for j in np.flatnonzero(angular & first_distance & second_distance) + i + 1:
+            parent[find(int(j))] = find(i)
     groups = defaultdict(list)
     for i in range(n):
         groups[find(i)].append(i)
@@ -77,7 +119,12 @@ def merge_coplanar(R, cop_ang, cop_off):
         w = area[mem]; a = float(w.sum())
         nn = (N[mem] * w[:, None]).sum(0); nn = nn / np.linalg.norm(nn)
         cc = (C[mem] * w[:, None]).sum(0) / w.sum()
-        out.append({"area": a, "n": nn, "c": cc, "mem": set(int(m) for m in mem)})
+        out.append({
+            "area": a,
+            "n": nn,
+            "c": cc,
+            "mem": set(int(source_indices[m]) for m in mem),
+        })
     out.sort(key=lambda p: -p["area"])
     return out
 
@@ -102,6 +149,53 @@ def build_corners(plane, F):
     return corners, w, hh
 
 
+def attach_support_bounds(planes, F):
+    """Attach per-plane y/tangent bounds in one linear pass over mesh faces."""
+    if not planes or len(np.atleast_1d(F)) == 0:
+        return planes
+    regions = np.atleast_1d(F["region"]).astype(int)
+    centers = np.stack([F["cx"], F["cy"], F["cz"]], 1)
+    max_region = max(
+        int(regions.max(initial=-1)),
+        max((max(plane["mem"], default=-1) for plane in planes), default=-1),
+    )
+    region_to_plane = np.full(max_region + 1, -1, dtype=int)
+    for plane_index, plane in enumerate(planes):
+        members = np.fromiter(plane["mem"], dtype=int)
+        if len(members):
+            region_to_plane[members] = plane_index
+    valid_region = (regions >= 0) & (regions < len(region_to_plane))
+    plane_indices = np.full(len(regions), -1, dtype=int)
+    plane_indices[valid_region] = region_to_plane[regions[valid_region]]
+    valid = plane_indices >= 0
+    if not np.any(valid):
+        return planes
+    plane_indices = plane_indices[valid]
+    centers = centers[valid]
+    normals = np.asarray([plane["n"] for plane in planes], dtype=float)
+    directions = np.stack([normals[:, 2], -normals[:, 0]], axis=1)
+    directions /= np.maximum(np.linalg.norm(directions, axis=1, keepdims=True), 1e-12)
+    tangents = np.einsum("ij,ij->i", centers[:, [0, 2]], directions[plane_indices])
+    count = len(planes)
+    y_min = np.full(count, np.inf)
+    y_max = np.full(count, -np.inf)
+    t_min = np.full(count, np.inf)
+    t_max = np.full(count, -np.inf)
+    np.minimum.at(y_min, plane_indices, centers[:, 1])
+    np.maximum.at(y_max, plane_indices, centers[:, 1])
+    np.minimum.at(t_min, plane_indices, tangents)
+    np.maximum.at(t_max, plane_indices, tangents)
+    for index, plane in enumerate(planes):
+        if np.isfinite(y_min[index]):
+            plane["support_bounds"] = {
+                "y_min": float(y_min[index]),
+                "y_max": float(y_max[index]),
+                "t_min": float(t_min[index]),
+                "t_max": float(t_max[index]),
+            }
+    return planes
+
+
 def classify_plane(plane, main_normal):
     """Classify a candidate before applying type-specific support filters."""
     tilt = abs(float(plane["n"] @ [0, 1, 0]))
@@ -123,7 +217,8 @@ def main():
     ap.add_argument("mesh")
     ap.add_argument("out")
     ap.add_argument("--rg", default=RG_DEFAULT)
-    ap.add_argument("--maxd", type=float, default=0.06)
+    ap.add_argument("--maxd", type=float,
+                    help="distanza Region Growing; default derivato dalla mesh")
     ap.add_argument("--maxa", type=float, default=25.0)
     ap.add_argument("--minr", type=int, default=25)
     ap.add_argument("--min-area", type=float, default=0.05)  # unità OC² (~1.8 m²)
@@ -131,12 +226,26 @@ def main():
     ap.add_argument("--cop-off", type=float, default=0.08)
     ap.add_argument("--repaired-mesh",
                     help="scrive una copia geometricamente identica e manifold")
+    ap.add_argument("--metric", action="store_true",
+                    help="la mesh di ingresso e' gia' espressa in metri")
+    ap.add_argument("--support-only", action="store_true",
+                    help="salta i gusci convessi; posizione e normale bastano alla fusione")
     args = ap.parse_args()
 
+    max_distance = args.maxd
+    if max_distance is None:
+        max_distance = estimate_mesh_resolution(args.mesh) * 1.5
+        print(f"Region Growing maxd auto: {max_distance:.5f}")
+
     with tempfile.TemporaryDirectory(prefix="cgalplanes_") as wd:
-        R, F = run_rg(args.rg, args.mesh, wd, args.maxd, args.maxa, args.minr,
+        R, F = run_rg(args.rg, args.mesh, wd, max_distance, args.maxa, args.minr,
                       args.repaired_mesh)
-        merged = merge_coplanar(R, args.cop_ang, args.cop_off)
+        merged = merge_coplanar(
+            R, args.cop_ang, args.cop_off,
+            min_member_area=args.min_area,
+            max_vertical_component=0.50,
+        )
+        attach_support_bounds(merged, F)
 
     vertical = [p for p in merged if abs(float(p["n"] @ [0, 1, 0])) <= 0.35]
     main_vertical = max(vertical, key=lambda p: p["area"], default=None)
@@ -148,18 +257,25 @@ def main():
 
     planes = []
     for i, (p, tipo) in enumerate(candidates):
-        corners, w, h = build_corners(p, F)
-        if corners is None:
-            continue
+        if args.support_only:
+            corners, w, h = [], 0.0, 0.0
+        else:
+            corners, w, h = build_corners(p, F)
+            if corners is None:
+                continue
         nome = {"facciata": "Facciata", "spalla": "Spalletta", "falda": "Falda"}[tipo]
         planes.append({
             "id": i, "nome": f"{nome} {i + 1}", "tipo": tipo,
             "punto": p["c"].tolist(), "normale": p["n"].tolist(),
             "corners": corners, "area_m2": round(p["area"], 4),
             "w": round(w, 3), "h": round(h, 3),
+            "support_bounds": p.get("support_bounds"),
         })
     with open(args.out, "w") as f:
-        json.dump({"schema": "cgal_planes", "planes": planes}, f)
+        document = {"schema": "cgal_planes", "planes": planes}
+        if args.metric:
+            document["scale"] = "metric"
+        json.dump(document, f)
     print(f"CGAL planes: {len(planes)} -> {args.out}")
     for p in planes[:6]:
         nrm = p["normale"]

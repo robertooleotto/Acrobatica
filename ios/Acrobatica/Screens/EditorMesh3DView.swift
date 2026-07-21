@@ -895,6 +895,71 @@ struct EditorMesh3DView: View {
 
     private var barraPiani: some View {
         VStack(spacing: 8) {
+            HStack(spacing: 8) {
+                Button { model.attivaPuntoZero() } label: {
+                    Label(model.attendePuntoZero ? "Punti attivi" : "Punti aderenza",
+                          systemImage: "scope")
+                        .font(Theme.Typo.caption(12, .semibold))
+                        .foregroundStyle(model.attendePuntoZero ? .white : EditorTheme.testo)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(model.attendePuntoZero ? EditorTheme.accento : EditorTheme.panelAlt,
+                                    in: RoundedRectangle(cornerRadius: 8))
+                }
+                .disabled(model.facce.isEmpty)
+                .opacity(model.facce.isEmpty ? 0.45 : 1)
+
+                if !model.attendePuntoZero {
+                    Button { model.allineaPianiInAltezza() } label: {
+                        Label("Allinea in altezza", systemImage: "arrow.up.and.down")
+                            .font(Theme.Typo.caption(12, .semibold))
+                            .foregroundStyle(EditorTheme.testo)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(EditorTheme.panelAlt,
+                                        in: RoundedRectangle(cornerRadius: 8))
+                    }
+                    .disabled(!model.puoAllinearePianiInAltezza)
+                    .opacity(model.puoAllinearePianiInAltezza ? 1 : 0.45)
+                }
+
+                Spacer(minLength: 0)
+
+                if model.attendePuntoZero {
+                    Text("\(model.numPuntiRevisione)")
+                        .font(Theme.Typo.mono(11))
+                        .foregroundStyle(EditorTheme.accento)
+                        .frame(minWidth: 24, minHeight: 28)
+                        .background(EditorTheme.panelAlt,
+                                    in: RoundedRectangle(cornerRadius: 7))
+                    Button { model.applicaRevisionePiani() } label: {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 20, weight: .semibold))
+                            .frame(width: 32, height: 32)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(model.numPuntiRevisione > 0
+                                     ? EditorTheme.accento : EditorTheme.testoMuto)
+                    .disabled(model.numPuntiRevisione == 0)
+                    .help("Applica punti")
+
+                    Button { model.annullaRevisionePiani() } label: {
+                        Image(systemName: "xmark.circle")
+                            .font(.system(size: 20, weight: .semibold))
+                            .frame(width: 32, height: 32)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(EditorTheme.testoMuto)
+                    .help("Annulla punti")
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+    }
+
+    /// Vecchi controlli mantenuti nel modello ma rimossi dal flusso operativo.
+    private var barraPianiAvanzata: some View {
+        VStack(spacing: 8) {
             // 1 · MODO — scorrevole in orizzontale: troppi bottoni per la larghezza iPhone.
             ScrollView(.horizontal, showsIndicators: false) {
               HStack(spacing: 6) {
@@ -6608,6 +6673,61 @@ final class Mesh3DModel: ObservableObject {
         facceSelezionate.isEmpty ? (facciaAttivaId.map { [$0] } ?? []) : Array(facceSelezionate)
     }
 
+    var puoAllinearePianiInAltezza: Bool {
+        let su = simd_normalize(gravitaSu)
+        return facce.filter {
+            guard let normal = $0.pianoNormale,
+                  let polygon = $0.poligono, polygon.count >= 3 else { return false }
+            return abs(simd_dot(simd_normalize(normal), su)) < 0.65
+        }.count >= 2
+    }
+
+    /// Porta base e sommita' dei piani verticali alle quote del piano strutturale
+    /// piu' esteso. Ogni vertice si muove lungo la verticale contenuta nel proprio
+    /// piano, quindi posizione, inclinazione e larghezza restano inalterate.
+    func allineaPianiInAltezza() {
+        let su = simd_normalize(gravitaSu)
+        let candidati: [(index: Int, min: Float, max: Float, area: Float)] = facce.indices.compactMap { index in
+            guard let normal = facce[index].pianoNormale,
+                  abs(simd_dot(simd_normalize(normal), su)) < 0.65,
+                  let polygon = facce[index].poligono, polygon.count >= 3 else { return nil }
+            let quote = polygon.map { simd_dot($0, su) }
+            guard let minQuota = quote.min(), let maxQuota = quote.max(),
+                  maxQuota - minQuota > 1e-5 else { return nil }
+            return (index, minQuota, maxQuota, areaPoligono(facce[index]) ?? 0)
+        }
+        guard candidati.count >= 2,
+              let riferimento = candidati.max(by: { $0.area < $1.area }) else { return }
+
+        registraUndo()
+        for candidato in candidati {
+            guard let normal0 = facce[candidato.index].pianoNormale,
+                  var polygon = facce[candidato.index].poligono else { continue }
+            let normal = simd_normalize(normal0)
+            var asseVerticale = su - normal * simd_dot(su, normal)
+            guard simd_length(asseVerticale) > 1e-5 else { continue }
+            asseVerticale = simd_normalize(asseVerticale)
+            let quotaPerUnita = simd_dot(asseVerticale, su)
+            guard abs(quotaPerUnita) > 1e-5 else { continue }
+            let altezzaCorrente = candidato.max - candidato.min
+            let altezzaRiferimento = riferimento.max - riferimento.min
+
+            for vertexIndex in polygon.indices {
+                let quota = simd_dot(polygon[vertexIndex], su)
+                let posizione = (quota - candidato.min) / altezzaCorrente
+                let quotaTarget = riferimento.min + posizione * altezzaRiferimento
+                polygon[vertexIndex] += asseVerticale * ((quotaTarget - quota) / quotaPerUnita)
+            }
+            facce[candidato.index].poligono = polygon
+            facce[candidato.index].pianoPunto = polygon.reduce(
+                SIMD3<Float>(repeating: 0), +) / Float(polygon.count)
+        }
+        saldaPianiAdiacenti()
+        mostraPiani = true
+        ridisegnaFacce()
+        ridisegnaPiani()
+    }
+
     /// Regola l'altezza di TUTTI i piani selezionati (cima/base).
     func regolaAltezzaSelezionate(cima: Bool, verso: Float) {
         for id in bersagli { regolaAltezzaFaccia(id, cima: cima, verso: verso) }
@@ -6932,6 +7052,10 @@ final class Mesh3DModel: ObservableObject {
         if attendePuntoZero {
             annullaRevisionePiani()
         } else {
+            errore = nil
+            mostraSviluppoPiani = false
+            mostraMesh = true
+            mostraPiani = true
             puntiRevisionePiani.removeAll()
             numPuntiRevisione = 0
             ridisegnaPuntiRevisione()
