@@ -30,6 +30,7 @@ struct EditorMesh3DView: View {
     @State private var revisioneWorkspaceSalvata = 0
     @State private var meshKindRiconoscimento: String
     @State private var confermaRipartenza = false
+    @State private var confermaEliminaPiano = false
     /// Strumenti del vecchio flusso di costruzione/rifinitura manuale. Restano
     /// implementati, ma non occupano il pannello del flusso automatico corrente.
     private let abilitaControlliManualiPiani = false
@@ -410,6 +411,18 @@ struct EditorMesh3DView: View {
             Button("Annulla", role: .cancel) {}
         } message: {
             Text("Verranno rimossi mesh pulita, piani, texture proiettate e aperture. Foto e mesh OC originale resteranno disponibili.")
+        }
+        .confirmationDialog(
+            "Eliminare \(model.facciaAttiva?.nome ?? "il piano selezionato")?",
+            isPresented: $confermaEliminaPiano,
+            titleVisibility: .visible
+        ) {
+            Button("Elimina piano", role: .destructive) {
+                if let id = model.facciaAttivaId { model.eliminaFaccia(id) }
+            }
+            Button("Annulla", role: .cancel) {}
+        } message: {
+            Text("Verrà rimosso soltanto il piano. La geometria della mesh non sarà modificata.")
         }
         // Ripristina un risultato esistente. Sulla raw il riconoscimento resta
         // manuale, così l'operatore può prima confrontare la mesh OC completa.
@@ -913,6 +926,81 @@ struct EditorMesh3DView: View {
 
     private var barraPiani: some View {
         VStack(spacing: 8) {
+            HStack(spacing: 8) {
+                Button {
+                    model.annullaRevisionePiani()
+                    model.modoSelezione = .seleziona
+                    model.mostraPiani = true
+                } label: {
+                    Label("Seleziona", systemImage: "hand.point.up.left")
+                        .font(Theme.Typo.caption(12, .semibold))
+                        .foregroundStyle(model.modoSelezione == .seleziona
+                                         && !model.attendePuntoZero ? .white : EditorTheme.testo)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(model.modoSelezione == .seleziona
+                                    && !model.attendePuntoZero
+                                    ? EditorTheme.accento : EditorTheme.panelAlt,
+                                    in: RoundedRectangle(cornerRadius: 8))
+                }
+                .disabled(model.facce.isEmpty)
+                .opacity(model.facce.isEmpty ? 0.45 : 1)
+
+                Menu {
+                    ForEach(model.facce) { piano in
+                        Button { model.selezionaFacciaAttiva(piano.id) } label: {
+                            Label(piano.nome,
+                                  systemImage: piano.id == model.facciaAttivaId
+                                  ? "checkmark.circle.fill" : "circle")
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 7) {
+                        if let piano = model.facciaAttiva {
+                            Circle()
+                                .fill(Color(uiColor: piano.colore))
+                                .frame(width: 10, height: 10)
+                            Text(piano.nome)
+                                .lineLimit(1)
+                        } else {
+                            Image(systemName: "square.dashed")
+                            Text("Nessun piano")
+                        }
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 9, weight: .semibold))
+                    }
+                    .font(Theme.Typo.caption(11, .semibold))
+                    .foregroundStyle(EditorTheme.testo)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(EditorTheme.panelAlt,
+                                in: RoundedRectangle(cornerRadius: 8))
+                }
+                .disabled(model.facce.isEmpty)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Text("\(model.facce.count)")
+                    .font(Theme.Typo.mono(10))
+                    .foregroundStyle(EditorTheme.testoMuto)
+                    .frame(minWidth: 24)
+                    .accessibilityLabel("\(model.facce.count) piani")
+
+                Button {
+                    confermaEliminaPiano = true
+                } label: {
+                    Label("Elimina", systemImage: "trash")
+                        .font(Theme.Typo.caption(11, .semibold))
+                        .foregroundStyle(Theme.danger)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(Theme.danger.opacity(0.12),
+                                    in: RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+                .disabled(model.facciaAttivaId == nil || cloudOccupato)
+                .opacity(model.facciaAttivaId == nil ? 0.45 : 1)
+            }
+
             HStack(spacing: 8) {
                 Button { model.attivaPuntoZero() } label: {
                     Label(model.attendePuntoZero ? "Punti attivi" : "Punti aderenza",
@@ -6840,11 +6928,13 @@ final class Mesh3DModel: ObservableObject {
     /// Rende attivo un piano e ridisegna. In multi-selezione il tocco AGGIUNGE/
     /// TOGLIE dal set; altrimenti seleziona solo quello.
     func selezionaFacciaAttiva(_ id: Int) {
+        guard let index = facce.firstIndex(where: { $0.id == id }) else { return }
         if multiSelezione {
             if facceSelezionate.contains(id) { facceSelezionate.remove(id) } else { facceSelezionate.insert(id) }
         } else {
             facceSelezionate = [id]
         }
+        facce[index].nascosto = false
         facciaAttivaId = id
         calcolaAssiNavigazione()
         mostraPiani = true   // le maniglie vivono sul layer dei piani: assicurane la visibilità
@@ -7730,6 +7820,7 @@ final class Mesh3DModel: ObservableObject {
         // togli ogni riferimento residuo alla faccia eliminata
         facceSelezionate.remove(id)
         selFacceAllinea.remove(id)
+        pianiGenerati = facce.count
         // ridisegna SIA il proxy SIA i quad dei piani: eliminando un piano deve
         // sparire tutto (prima restava il quad perché ridisegnavamo solo le facce).
         ridisegnaFacce()
@@ -7904,6 +7995,7 @@ final class Mesh3DModel: ObservableObject {
             let soloPiani = !mostraMesh && !mostraTexturaOC
             let m = SCNMaterial()
             let faSel = strumento == .allinea && facciaAllineaSelezionata(f.id)
+            let pianoSelezionato = strumento == .facce && facceAttiveSet.contains(f.id)
             m.isDoubleSided = true
             m.lightingModel = .constant
             if haPianiTexturizzati {
@@ -7915,14 +8007,16 @@ final class Mesh3DModel: ObservableObject {
                 m.writesToDepthBuffer = false
             } else {
                 m.diffuse.contents = faSel ? UIColor.systemOrange.withAlphaComponent(0.6)
-                    : f.colore.withAlphaComponent(soloPiani ? 1.0 : 0.62)
+                    : f.colore.withAlphaComponent(
+                        soloPiani ? 1.0 : (pianoSelezionato ? 0.78 : 0.62))
                 m.writesToDepthBuffer = soloPiani
             }
             g.materials = [m]
             let fill = SCNNode(geometry: g)
             fill.name = "piano:\(f.id)"   // selezionabile col tap (anche piani solo-poligono)
             pianiNode.addChildNode(fill)
-            if let c = MeshFactory.lineaGeometria(corners, colore: f.colore, chiusa: true) {
+            let coloreContorno = pianoSelezionato ? UIColor(EditorTheme.accento) : f.colore
+            if let c = MeshFactory.lineaGeometria(corners, colore: coloreContorno, chiusa: true) {
                 pianiNode.addChildNode(SCNNode(geometry: c))
             }
             // Maniglie (solo sul poligono editabile della faccia attiva):
