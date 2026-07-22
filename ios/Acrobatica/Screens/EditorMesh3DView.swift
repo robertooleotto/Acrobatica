@@ -270,10 +270,14 @@ struct EditorMesh3DView: View {
     private func ripristinaPianiSalvati(sessionId: String) async -> Bool {
         guard model.facce.isEmpty else { return true }
         do {
-            let planes = try await BackendAPIClient.shared.downloadSavedPlanes(
+            let saved = try await BackendAPIClient.shared.downloadSavedPlanesState(
                 sessionId: sessionId)
-            guard !planes.isEmpty else { return false }
-            model.applicaPianiRilevati(planes, registraModifica: false)
+            guard !saved.planes.isEmpty else { return false }
+            model.applicaPianiRilevati(
+                saved.planes,
+                frameEdificio: saved.buildingFrame,
+                upStimato: saved.up,
+                registraModifica: false)
             return true
         } catch {
             return false
@@ -796,7 +800,7 @@ struct EditorMesh3DView: View {
                 .foregroundStyle(EditorTheme.testoMuto)
                 .lineLimit(1).truncationMode(.tail)
             Spacer(minLength: 6)
-            ChipSelezione("Reset", "arrow.counterclockwise") { model.resetAssiManuali() }.fixedSize()
+            ChipSelezione("Modifica", "pencil") { model.resetAssiManuali() }.fixedSize()
             ChipSelezione("Auto", "wand.and.stars") { model.ricalcolaAssiAutomatici() }.fixedSize()
             ChipSelezione("Flip", "arrow.left.arrow.right") { model.flipAssiFronte() }.fixedSize()
             Button { model.snapFronte() } label: {
@@ -2711,6 +2715,10 @@ private struct PianoJSON: Codable { let punto: [Float]; let normale: [Float] }
 private struct PianoBaseJSON: Codable {
     let origine: [Float]; let normale: [Float]; let right: [Float]; let up: [Float]
 }
+private struct FrameEdificioJSON: Codable {
+    let origine: [Float]; let right: [Float]; let up: [Float]; let normale: [Float]
+    let source_plane_id: Int?; let source: String; let locked: Bool
+}
 private struct FacciaOverrideJSON: Codable {
     let id: Int; let nome: String; let tipo: String; let colore: String
     let priorita: Int; let n_triangoli: Int; let triangoli: [Int]; let piano: PianoJSON?
@@ -2739,7 +2747,8 @@ private struct PianoUploadJSON: Codable {
 }
 private struct PianiUploadDoc: Codable {
     let schema: String; let versione: Int; let stato: String
-    let piano_base: PianoBaseJSON?; let planes: [PianoUploadJSON]
+    let piano_base: PianoBaseJSON?; let frame_edificio: FrameEdificioJSON?
+    let planes: [PianoUploadJSON]
 }
 
 // MARK: – Modello: scena, camera, caricamento mesh
@@ -3169,7 +3178,16 @@ final class Mesh3DModel: ObservableObject {
     private(set) var puntiAssiManuali: [SIMD3<Float>] = []
     private var anteprimaAssiManuali: (a: SIMD3<Float>, b: SIMD3<Float>)?
     private var assiManualiFissati = false
+    @Published private(set) var assiAutomaticiFissati = false
+    private var origineAssiEdificio = SIMD3<Float>(repeating: 0)
+    private var pianoSorgenteAssiId: Int?
+    private var assiEdificioFissati: Bool {
+        assiManualiFissati || assiAutomaticiFissati
+    }
     var testoPassoAssiManuali: String {
+        if puntiAssiManuali.isEmpty && assiAutomaticiFissati {
+            return "assi bloccati sul piano principale"
+        }
         switch numPuntiAssiManuali {
         case 0: return "tocca in basso della verticale"
         case 1: return "tocca in alto della verticale"
@@ -3321,10 +3339,10 @@ final class Mesh3DModel: ObservableObject {
     private(set) var assiNav: (r: SIMD3<Float>, u: SIMD3<Float>, n: SIMD3<Float>) =
         (SIMD3(1, 0, 0), SIMD3(0, 1, 0), SIMD3(0, 0, 1))
 
-    /// Stima gli assi edificio: up = gravità; normale facciata = direzione di MINOR
-    /// spessore orizzontale (PCA 2D dei vertici); destra = larghezza facciata.
+    /// Stima gli assi edificio dal piano verticale di area maggiore. La PCA della
+    /// mesh resta soltanto il fallback iniziale, prima che esistano i piani.
     func calcolaAssiNavigazione() {
-        if assiManualiFissati { return }
+        if assiEdificioFissati { return }
         guard !mesh.vertices.isEmpty else { return }
         let suStimato = simd_normalize(gravitaSu)
 
@@ -3425,13 +3443,6 @@ final class Mesh3DModel: ObservableObject {
             return true
         }
 
-        if let attiva = facciaAttivaId,
-           let f = facce.first(where: { $0.id == attiva }),
-           let n = f.pianoNormale,
-           abs(simd_dot(simd_normalize(n), suStimato)) < 0.65,
-           applica(normale: n, triangoli: f.triangoli) {
-            return
-        }
         let verticalePiuGrande = facce.compactMap { f -> (Float, SIMD3<Float>, Set<Int>)? in
             guard let n = f.pianoNormale else { return nil }
             let nn = simd_normalize(n)
@@ -3466,20 +3477,74 @@ final class Mesh3DModel: ObservableObject {
         assiNav = (r: assi?.r ?? major, u: assi?.u ?? suStimato, n: nFronte)
     }
 
-    func ricalcolaAssiAutomatici() {
+    private func pianoVerticalePiuGrande() -> FacciaProxy? {
+        let su = simd_normalize(gravitaSu)
+        return facce.compactMap { f -> (FacciaProxy, Float)? in
+            guard let normale = f.pianoNormale, simd_length(normale) > 1e-5,
+                  abs(simd_dot(simd_normalize(normale), su)) < 0.65 else { return nil }
+            return (f, areaPoligono(f) ?? mesh.areaTriangoli(f.triangoli))
+        }.max { $0.1 < $1.1 }?.0
+    }
+
+    private func fissaAssiAutomatici(
+        registraModifica: Bool,
+        orientaCamera: Bool
+    ) {
         assiManualiFissati = false
+        assiAutomaticiFissati = false
+        calcolaAssiNavigazione()
+        if let piano = pianoVerticalePiuGrande() {
+            pianoSorgenteAssiId = piano.id
+            origineAssiEdificio = piano.pianoPunto
+                ?? piano.poligono.map { punti in
+                    punti.reduce(SIMD3<Float>(repeating: 0), +) / Float(punti.count)
+                } ?? .zero
+            assiAutomaticiFissati = true
+        }
+        allineaBoxAgliAssiNavigazione()
+        if orientaCamera { snapVista(assiNav.n) }
+        if registraModifica { workspaceRevision += 1 }
+    }
+
+    private func applicaFrameEdificio(_ frame: BackendAPIClient.BuildingFrame) -> Bool {
+        guard frame.origine.count == 3, frame.right.count == 3,
+              frame.up.count == 3, frame.normale.count == 3 else { return false }
+        var right = SIMD3<Float>(frame.right[0], frame.right[1], frame.right[2])
+        var up = SIMD3<Float>(frame.up[0], frame.up[1], frame.up[2])
+        var normal = SIMD3<Float>(frame.normale[0], frame.normale[1], frame.normale[2])
+        guard simd_length(right) > 1e-5, simd_length(up) > 1e-5,
+              simd_length(normal) > 1e-5 else { return false }
+        up = simd_normalize(up)
+        right -= simd_dot(right, up) * up
+        guard simd_length(right) > 1e-5 else { return false }
+        right = simd_normalize(right)
+        normal = simd_normalize(simd_cross(right, up))
+        let requestedNormal = simd_normalize(
+            SIMD3<Float>(frame.normale[0], frame.normale[1], frame.normale[2]))
+        if simd_dot(normal, requestedNormal) < 0 { right = -right; normal = -normal }
+        assiNav = (right, up, normal)
+        gravitaSu = up
+        origineAssiEdificio = SIMD3<Float>(
+            frame.origine[0], frame.origine[1], frame.origine[2])
+        pianoSorgenteAssiId = frame.source_plane_id
+        assiManualiFissati = frame.source == "manuale"
+        assiAutomaticiFissati = !assiManualiFissati
+        allineaBoxAgliAssiNavigazione()
+        snapVista(normal)
+        return true
+    }
+
+    func ricalcolaAssiAutomatici() {
         puntiAssiManuali = []
         anteprimaAssiManuali = nil
         numPuntiAssiManuali = 0
         assiManualiNode.childNodes.forEach { $0.removeFromParentNode() }
         assiManualiNode.geometry = nil
-        calcolaAssiNavigazione()
-        allineaBoxAgliAssiNavigazione()
-        cursoreInfo = "Assi automatici ripristinati"
+        fissaAssiAutomatici(registraModifica: true, orientaCamera: true)
+        cursoreInfo = "Assi bloccati sul piano principale"
     }
 
     func resetAssiManuali() {
-        assiManualiFissati = false
         puntiAssiManuali = []
         anteprimaAssiManuali = nil
         numPuntiAssiManuali = 0
@@ -3496,9 +3561,11 @@ final class Mesh3DModel: ObservableObject {
         } else {
             assiManualiFissati = true
         }
+        assiAutomaticiFissati = false
         allineaBoxAgliAssiNavigazione()
         cursoreInfo = "Fronte assi invertito"
         snapVista(assiNav.n)
+        workspaceRevision += 1
     }
 
     func aggiungiPuntoAssiManuali(_ punto: SCNVector3) {
@@ -3621,10 +3688,15 @@ final class Mesh3DModel: ObservableObject {
         assiNav = (r: right, u: up, n: normal)
         gravitaSu = up
         assiManualiFissati = true
+        assiAutomaticiFissati = false
+        origineAssiEdificio = (puntiAssiManuali[0] + puntiAssiManuali[1]
+            + puntiAssiManuali[2] + puntiAssiManuali[3]) / 4
+        pianoSorgenteAssiId = nil
         anteprimaAssiManuali = nil
         allineaBoxAgliAssiNavigazione()
         cursoreInfo = "Assi manuali attivi"
         if snap { snapVista(normal) }
+        workspaceRevision += 1
     }
 
     private func allineaBoxAgliAssiNavigazione() {
@@ -3895,6 +3967,10 @@ final class Mesh3DModel: ObservableObject {
         facce = []; facciaAttivaId = nil; pianiGenerati = 0; mostraPiani = false
         annullaRevisionePiani()
         haPianoBase = false; renderPianoBase(); annullaFaccia(); nascondiCursore()
+        assiManualiFissati = false
+        assiAutomaticiFissati = false
+        pianoSorgenteAssiId = nil
+        origineAssiEdificio = .zero
         resetAssiManuali()
         undoStack = []; redoStack = []
         puoUndo = false; puoRedo = false
@@ -5392,7 +5468,7 @@ final class Mesh3DModel: ObservableObject {
                 segmentando = false
                 return
             }
-            applicaPianiRilevati(r.planes)
+            applicaPianiRilevati(r.planes, upStimato: r.up)
             let sorgente = r.mesh_kind == "raw" ? "mesh OC originale" : "mesh pulita"
             cursoreInfo = "Piani riconosciuti: \(facce.count) · \(sorgente)"
         } catch {
@@ -5404,6 +5480,8 @@ final class Mesh3DModel: ObservableObject {
     /// Sostituisce le facce coi piani rilevati dal backend (quad + tipo).
     func applicaPianiRilevati(
         _ planes: [BackendAPIClient.DetectedPlane],
+        frameEdificio: BackendAPIClient.BuildingFrame? = nil,
+        upStimato: [Float]? = nil,
         registraModifica: Bool = true
     ) {
         if registraModifica { registraUndo() }
@@ -5434,6 +5512,18 @@ final class Mesh3DModel: ObservableObject {
         pianiGenerati = facce.count
         mostraProxy = false; mostraPiani = true
         ridisegnaFacce(); ridisegnaPiani()
+        if let frameEdificio, applicaFrameEdificio(frameEdificio) {
+            cursoreInfo = "Assi edificio ripristinati"
+        } else {
+            if let upStimato, upStimato.count == 3 {
+                let up = SIMD3<Float>(upStimato[0], upStimato[1], upStimato[2])
+                if simd_length(up) > 1e-5 { gravitaSu = simd_normalize(up) }
+            }
+            // Il primo calcolo usa il piano più grande e viene poi persistito.
+            fissaAssiAutomatici(
+                registraModifica: !registraModifica,
+                orientaCamera: true)
+        }
     }
 
     /// #14 — Unisce facce COMPLANARI e CONNESSE (stesso muro spezzato dalle
@@ -8386,8 +8476,17 @@ final class Mesh3DModel: ObservableObject {
                 n_triangoli: f.triangoli.count, triangoli: f.triangoli.sorted())
         }
         guard includiVuoto || !planes.isEmpty else { return nil }
+        let frame = assiEdificioFissati ? FrameEdificioJSON(
+            origine: origineAssiEdificio.lista,
+            right: assiNav.r.lista,
+            up: assiNav.u.lista,
+            normale: assiNav.n.lista,
+            source_plane_id: pianoSorgenteAssiId,
+            source: assiManualiFissati ? "manuale" : "piano_principale",
+            locked: true) : nil
         let doc = PianiUploadDoc(schema: "acro.planes/v1", versione: 1,
-                                 stato: statoProxy.raw, piano_base: pb, planes: planes)
+                                 stato: statoProxy.raw, piano_base: pb,
+                                 frame_edificio: frame, planes: planes)
         let enc = JSONEncoder()
         enc.outputFormatting = [.sortedKeys]
         return try? enc.encode(doc)

@@ -367,6 +367,10 @@ actor BackendAPIClient {
     }
 
     private struct SavedPlanesDocument: Decodable {
+        struct PianoBase: Decodable {
+            let up: [Float]?
+        }
+
         struct Plane: Decodable {
             let nome: String
             let tipo: String
@@ -377,10 +381,35 @@ actor BackendAPIClient {
         }
 
         let planes: [Plane]
+        let frame_edificio: BuildingFrame?
+        let piano_base: PianoBase?
+    }
+
+    struct BuildingFrame: Codable {
+        let origine: [Float]
+        let right: [Float]
+        let up: [Float]
+        let normale: [Float]
+        let source_plane_id: Int?
+        let source: String
+        let locked: Bool
+    }
+
+    struct SavedPlanesState {
+        let planes: [DetectedPlane]
+        let buildingFrame: BuildingFrame?
+        let up: [Float]?
     }
 
     /// Recupera i piani revisionati gia salvati, senza rieseguire il detector.
     func downloadSavedPlanes(sessionId: String) async throws -> [DetectedPlane] {
+        try await downloadSavedPlanesState(sessionId: sessionId).planes
+    }
+
+    /// Recupera piani e riferimento edificio persistente. Il frame viene applicato
+    /// anche alla camera dell'editor, evitando che la selezione di un altro piano
+    /// cambi implicitamente l'orientamento della facciata.
+    func downloadSavedPlanesState(sessionId: String) async throws -> SavedPlanesState {
         let baseEndpoint = baseURL.appendingPathComponent(
             "/facade-sessions/\(sessionId)/planes-data")
         guard var components = URLComponents(
@@ -402,7 +431,7 @@ actor BackendAPIClient {
         let (documentData, documentResponse) = try await urlSession.data(from: remote)
         try assertHTTPOK(documentResponse, data: documentData)
         let document = try JSONDecoder().decode(SavedPlanesDocument.self, from: documentData)
-        return document.planes.map { plane in
+        let planes = document.planes.map { plane in
             DetectedPlane(
                 nome: plane.nome,
                 tipo: plane.tipo,
@@ -414,6 +443,10 @@ actor BackendAPIClient {
                 h: 0,
                 triangoli: plane.triangoli)
         }
+        return SavedPlanesState(
+            planes: planes,
+            buildingFrame: document.frame_edificio,
+            up: document.piano_base?.up)
     }
 
     /// Un piano rilevato automaticamente dal backend (Open3D: qualsiasi
