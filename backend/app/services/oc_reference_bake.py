@@ -624,7 +624,20 @@ def _compose_plane(
     photo_reports: list[dict[str, object]] = []
 
     if can_register:
-        selection_target = min(max_photos, registration_ceiling)
+        # Il tetto adattivo deve restare stabile per tutto il piano. Usare il
+        # target crescente come nuova base faceva convergere ogni faccia a 80
+        # foto, anche per spallette larghe pochi metri.
+        adaptive_ceiling = min(
+            registration_ceiling,
+            max(
+                max_photos * 2,
+                adaptive_registration_budget(
+                    pf, base_photos=max_photos,
+                    max_photos=registration_ceiling,
+                ),
+            ),
+        )
+        selection_target = min(max_photos, adaptive_ceiling)
         selection_rounds: list[dict[str, object]] = []
         selection_report: dict[str, object] = {}
         global_report: dict[str, object] = {}
@@ -646,7 +659,8 @@ def _compose_plane(
             if not new_candidates:
                 selection_report = {
                     **round_report,
-                    "hard_ceiling": registration_ceiling,
+                    "hard_ceiling": adaptive_ceiling,
+                    "configured_ceiling": registration_ceiling,
                     "rounds": selection_rounds,
                     "stop_reason": "nessuna nuova foto candidata",
                 }
@@ -716,19 +730,24 @@ def _compose_plane(
             })
             selection_report = {
                 **round_report,
-                "hard_ceiling": registration_ceiling,
+                "hard_ceiling": adaptive_ceiling,
+                "configured_ceiling": registration_ceiling,
                 "rounds": selection_rounds,
             }
+            if len(attempted_keys) >= max_photos and not accepted_keys:
+                selection_report["stop_reason"] = \
+                    "nessuna registrazione valida nel gruppo iniziale"
+                break
             if (len(dominant_keys) >= 2 and dominant_ratio >= 0.70
                     and single_coverage >= 0.80 and double_coverage >= 0.70):
                 selection_report["stop_reason"] = \
                     "copertura e componente dominante sufficienti"
                 break
-            if len(attempted_keys) >= min(registration_ceiling, len(ranked)):
+            if len(attempted_keys) >= min(adaptive_ceiling, len(ranked)):
                 selection_report["stop_reason"] = "raggiunto il tetto tecnico"
                 break
             next_target = min(
-                registration_ceiling,
+                adaptive_ceiling,
                 max(selection_target + 8, int(math.ceil(selection_target * 1.5))),
             )
             if next_target <= selection_target:
