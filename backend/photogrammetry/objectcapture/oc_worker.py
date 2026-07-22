@@ -15,7 +15,7 @@
 #
 # Dipendenze: requests  (pip install requests). hpg = binario compilato da
 # HelloPhotogrammetry.swift (swiftc -O HelloPhotogrammetry.swift -o hpg).
-import argparse, hashlib, json, os, subprocess, sys, tempfile, time, uuid
+import argparse, hashlib, json, os, subprocess, sys, tempfile, time, uuid, zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -104,6 +104,36 @@ def write_bundle_manifest(
     return document
 
 
+def materialize_usdz_textures(
+    usdz_path: str | Path,
+    mtl_path: str | Path,
+    output_dir: str | Path,
+) -> list[Path]:
+    """Estrae le texture USDZ e rende i riferimenti MTL portabili sul backend."""
+    output = Path(output_dir)
+    extracted: list[Path] = []
+    with zipfile.ZipFile(usdz_path) as archive:
+        for member in archive.namelist():
+            if Path(member).suffix.lower() not in {".png", ".jpg", ".jpeg"}:
+                continue
+            destination = output / Path(member).name
+            destination.write_bytes(archive.read(member))
+            extracted.append(destination)
+
+    mtl = Path(mtl_path)
+    normalized = []
+    for line in mtl.read_text(encoding="utf-8", errors="ignore").splitlines():
+        stripped = line.strip().lower()
+        if stripped.startswith("map_") and len(line.split(maxsplit=1)) == 2:
+            command, reference = line.split(maxsplit=1)
+            if "[" in reference and reference.endswith("]"):
+                reference = reference.rsplit("[", 1)[1][:-1]
+            line = f"{command} {Path(reference).name}"
+        normalized.append(line)
+    mtl.write_text("\n".join(normalized) + "\n", encoding="utf-8")
+    return extracted
+
+
 class Client:
     def __init__(self, base: str, dry: bool = False):
         self.base = base.rstrip("/")
@@ -173,6 +203,10 @@ def process_job(cli: Client, job: dict, hpg: str, converter: str,
             n = merge_intrinsics(str(poses), intr)
             print(f"  intrinseci uniti a {n}/{len(photos)} pose")
             subprocess.run([converter, str(usdz), str(obj)], check=True)
+            textures = materialize_usdz_textures(
+                usdz, obj.with_suffix(".mtl"), Path(tmp),
+            )
+            print(f"  texture USDZ estratte: {len(textures)}")
         generated = [("model.usdz", str(usdz)), ("oc_poses.json", str(poses))]
         mesh_suffixes = {".obj", ".mtl", ".png", ".jpg", ".jpeg"}
         generated += [

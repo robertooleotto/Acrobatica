@@ -1,6 +1,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import zipfile
 
 
 MODULE_PATH = (
@@ -33,3 +34,18 @@ def test_bundle_manifest_binds_model_and_poses(tmp_path):
     assert saved["model_file"] == "model.obj"
     assert saved["poses_file"] == "oc_poses.json"
     assert saved["files"]["model.obj"]["sha256"] == oc_worker.sha256_file(model)
+
+
+def test_materialize_usdz_textures_rewrites_archive_references(tmp_path):
+    usdz = tmp_path / "model.usdz"
+    with zipfile.ZipFile(usdz, "w") as archive:
+        archive.writestr("0/albedo.png", b"png-data")
+        archive.writestr("mesh.usdc", b"usd-data")
+    mtl = tmp_path / "model.mtl"
+    mtl.write_text("newmtl Texture\nmap_Kd model.usdz[0/albedo.png]\n")
+
+    textures = oc_worker.materialize_usdz_textures(usdz, mtl, tmp_path)
+
+    assert textures == [tmp_path / "albedo.png"]
+    assert textures[0].read_bytes() == b"png-data"
+    assert mtl.read_text().endswith("map_Kd albedo.png\n")
