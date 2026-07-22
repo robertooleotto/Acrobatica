@@ -84,6 +84,36 @@ def texture_plane(plane: dict) -> tuple[dict, bool]:
     return projection_plane, True
 
 
+def _dominant_planar_reference(
+    reference_mask: np.ndarray,
+    depth: np.ndarray,
+    *,
+    tolerance_m: float = 0.35,
+    bin_m: float = 0.05,
+) -> tuple[np.ndarray, float | None]:
+    """Isola la superficie architettonica dominante senza imporre profondita zero.
+
+    Un piano revisionato puo essere parallelo al muro ma scostato di alcuni
+    decimetri. Usare sempre zero disabilita la registrazione visiva proprio in
+    quel caso e lascia che le sole pose producano uno slittamento apparente.
+    """
+    valid = reference_mask & np.isfinite(depth)
+    values = depth[valid]
+    if len(values) == 0:
+        return np.zeros_like(reference_mask, dtype=bool), None
+    low = math.floor(float(values.min()) / bin_m) * bin_m
+    high = math.ceil(float(values.max()) / bin_m) * bin_m
+    if high <= low:
+        center = float(np.median(values))
+    else:
+        edges = np.arange(low, high + bin_m * 1.01, bin_m, dtype=np.float64)
+        counts, edges = np.histogram(values, bins=edges)
+        mode = int(np.argmax(counts))
+        center = float((edges[mode] + edges[mode + 1]) * 0.5)
+    planar = valid & (np.abs(depth - center) <= tolerance_m)
+    return planar, center
+
+
 def _stable_mosaic_anchor(
     accepted_keys: list[str],
     ranked: list[dict],
@@ -565,7 +595,13 @@ def _compose_plane(
         textured_mesh, pf, normal, depth_m, scale_m_per_mesh_unit,
     )
     reference = reference_rgba[..., :3]
-    planar_reference = reference_mask & np.isfinite(depth) & (np.abs(depth) <= 0.35)
+    planar_reference, dominant_depth_m = _dominant_planar_reference(
+        reference_mask, depth,
+    )
+    polygon = ob._polygon_mask(pf.tex_w, pf.tex_h, pf.polygon_uv)
+    reference_coverage = (
+        float(reference_mask[polygon].mean()) if polygon.any() else 0.0
+    )
 
     can_register = int(planar_reference.sum()) >= 8_000
     if can_register:
@@ -757,12 +793,19 @@ def _compose_plane(
     for mask in compositing_masks:
         covered |= mask
 
-    # Se il riferimento OC non ha feature sufficienti, conserva comunque il
-    # risultato metrico delle pose invece di produrre una texture vuota.
+    # Dopo la registrazione, le pose possono ancora chiudere piccoli vuoti di
+    # copertura, ma soltanto se la mesh OC conferma che il piano e reale.
     filler_limit = max(max_photos, coverage_photos)
-    for rank, candidate in _pose_filler_candidates(
-        ranked, attempted_keys, set(accepted_keys), filler_limit,
-    ):
+    # Una posa da sola non puo validare un piano staccato dalla mesh: in quel
+    # caso finirebbe per proiettare cielo o edifici retrostanti. Richiediamo
+    # almeno una piccola conferma dalla texture OC prima di riempire i vuoti.
+    filler_candidates = (
+        _pose_filler_candidates(
+            ranked, attempted_keys, set(accepted_keys), filler_limit,
+        )
+        if reference_coverage >= 0.02 else ()
+    )
+    for rank, candidate in filler_candidates:
         key = str(candidate["key"])
         cam = camera_by_key[key]
         predicted_mask = registration.photo_coverage_mask(cam, pf)
@@ -803,7 +846,6 @@ def _compose_plane(
 
     rgba = coverage_rgba(mosaic(accepted_images, compositing_masks, reference),
                          compositing_masks)
-    polygon = ob._polygon_mask(pf.tex_w, pf.tex_h, pf.polygon_uv)
     coverage = float(covered[polygon].mean()) if polygon.any() else 0.0
     report = {
         "horizontal_flipped_for_front_view": horizontal_flipped,
@@ -811,6 +853,10 @@ def _compose_plane(
         if polygon.any() else 0.0,
         "planar_reference_coverage": round(float(planar_reference[polygon].mean()), 4)
         if polygon.any() else 0.0,
+        "dominant_reference_depth_m": (
+            round(dominant_depth_m, 4) if dominant_depth_m is not None else None
+        ),
+        "pose_fillers_enabled": reference_coverage >= 0.02,
         "accepted_photos": len(accepted_images),
         "registered_photos": len(corrections),
         "registration_pixel_scale": round(pixel_scale, 4),
@@ -854,8 +900,10 @@ def bake_planes(
         Path(raw_obj_path), Path(raw_mtl_path),
     )
     pb = planes_doc.get("piano_base") or {}
+    building_frame = planes_doc.get("frame_edificio") or {}
     up_world = ob._unit(np.asarray(
         planes_doc.get("shared_extrusion_direction")
+        or building_frame.get("up")
         or pb.get("up", [0.0, 1.0, 0.0]), float))
     planes = planes_doc.get("planes", [])
     texel_m = ob.resolve_texel_m(

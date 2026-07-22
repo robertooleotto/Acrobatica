@@ -42,6 +42,30 @@ def test_texture_plane_uses_preserved_frame_without_changing_geometry_fields():
     assert plane["normale"] == [0.1, 0.0, 0.99]
 
 
+def test_dominant_planar_reference_follows_parallel_wall_offset_from_plane():
+    depth = np.full((100, 100), 0.58, np.float32)
+    depth[:, :20] = 1.15
+    reference_mask = np.ones((100, 100), bool)
+
+    planar, center = oc_reference_bake._dominant_planar_reference(
+        reference_mask, depth,
+    )
+
+    assert center is not None
+    assert abs(center - 0.575) < 1e-6
+    assert planar[:, 20:].all()
+    assert not planar[:, :20].any()
+
+
+def test_dominant_planar_reference_handles_missing_oc_support():
+    planar, center = oc_reference_bake._dominant_planar_reference(
+        np.zeros((8, 6), bool), np.full((8, 6), np.nan, np.float32),
+    )
+
+    assert center is None
+    assert not planar.any()
+
+
 def test_mosaic_anchor_prefers_coverage_when_scores_are_nearly_tied():
     ranked = [
         {"key": "156", "score": 0.903595, "coverage": 0.3787, "facing": 0.6016},

@@ -146,15 +146,30 @@ def render_oc_reference(
     depth_m: float,
     scale_m_per_mesh_unit: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    scene = getattr(mesh, "_raycast_scene", None)
-    if scene is None:
-        legacy = o3d.geometry.TriangleMesh(
-            o3d.utility.Vector3dVector(mesh.vertices.astype(np.float64)),
-            o3d.utility.Vector3iVector(mesh.faces),
-        )
-        scene = o3d.t.geometry.RaycastingScene()
-        scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(legacy))
-        mesh._raycast_scene = scene
+    # A side plane can sit between two much larger facade surfaces. Raycasting
+    # the complete building from its normal then hits those surfaces first and
+    # incorrectly makes the actual reveal look unsupported. Keep only the raw
+    # triangles in the metric slab represented by this plane before raycasting.
+    point = np.asarray(pf.origin, np.float64)
+    normal64 = ob._unit(np.asarray(normal, np.float64))
+    centroids = getattr(mesh, "_face_centroids", None)
+    if centroids is None:
+        centroids = mesh.vertices[mesh.faces].mean(axis=1, dtype=np.float32)
+        mesh._face_centroids = centroids
+    signed_centroid_depth = (centroids - point) @ normal64
+    depth_world = depth_m / max(scale_m_per_mesh_unit, 1e-9)
+    support_faces = np.flatnonzero(
+        np.abs(signed_centroid_depth) <= depth_world * 1.05,
+    )
+    if len(support_faces) == 0:
+        support_faces = np.arange(len(mesh.faces), dtype=np.int64)
+
+    legacy = o3d.geometry.TriangleMesh(
+        o3d.utility.Vector3dVector(mesh.vertices.astype(np.float64)),
+        o3d.utility.Vector3iVector(mesh.faces[support_faces]),
+    )
+    scene = o3d.t.geometry.RaycastingScene()
+    scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(legacy))
 
     world, polygon = _pixel_world(pf)
     diag = float(np.linalg.norm(mesh.vertices.max(0) - mesh.vertices.min(0)))
@@ -189,12 +204,14 @@ def render_oc_reference(
     )
     output = np.zeros((pf.tex_h * pf.tex_w, 4), np.uint8)
     output[:, 3] = np.where(polygon.reshape(-1), 255, 0).astype(np.uint8)
+    safe_primitive_ids = np.maximum(primitive_ids, 0)
+    source_face_ids = support_faces[safe_primitive_ids]
     for material, texture in mesh.textures.items():
-        selected = valid & (mesh.face_materials[np.maximum(primitive_ids, 0)] == material)
+        selected = valid & (mesh.face_materials[source_face_ids] == material)
         rows = np.where(selected)[0]
         if len(rows) == 0:
             continue
-        tri_uv = mesh.face_uvs[primitive_ids[rows]]
+        tri_uv = mesh.face_uvs[source_face_ids[rows]]
         bary = primitive_uvs[rows]
         uv = (
             tri_uv[:, 0] * (1.0 - bary[:, :1] - bary[:, 1:2])
