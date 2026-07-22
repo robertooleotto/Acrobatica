@@ -15,7 +15,8 @@
 #
 # Dipendenze: requests  (pip install requests). hpg = binario compilato da
 # HelloPhotogrammetry.swift (swiftc -O HelloPhotogrammetry.swift -o hpg).
-import argparse, json, os, subprocess, sys, tempfile, time
+import argparse, hashlib, json, os, subprocess, sys, tempfile, time, uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 try:
@@ -53,6 +54,54 @@ def merge_intrinsics(poses_path: str, intrinsics_by_index: dict[int, list]) -> i
             done += 1
     json.dump(poses, open(poses_path, "w"), indent=2, sort_keys=True)
     return done
+
+
+def sha256_file(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_bundle_manifest(
+    output_path: str | Path,
+    files: list[tuple[str, str]],
+    *,
+    photo_count: int,
+    detail: str,
+) -> dict:
+    """Lega mesh e pose alla singola esecuzione Object Capture corrente."""
+    records = {
+        name: {
+            "size": Path(path).stat().st_size,
+            "sha256": sha256_file(path),
+        }
+        for name, path in files
+    }
+    model_file = next(
+        (name for name, _ in files if Path(name).suffix.lower() == ".obj"),
+        None,
+    )
+    if model_file is None:
+        model_file = next(
+            name for name, _ in files if Path(name).suffix.lower() == ".usdz"
+        )
+    document = {
+        "schema": "acro.oc-bundle/v1",
+        "bundle_id": str(uuid.uuid4()),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "photo_count": int(photo_count),
+        "detail": detail,
+        "model_file": model_file,
+        "poses_file": "oc_poses.json",
+        "files": records,
+    }
+    Path(output_path).write_text(
+        json.dumps(document, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return document
 
 
 class Client:
@@ -130,6 +179,16 @@ def process_job(cli: Client, job: dict, hpg: str, converter: str,
             (path.name, str(path)) for path in sorted(Path(tmp).iterdir())
             if path.is_file() and path.suffix.lower() in mesh_suffixes
         ]
+        if not dry:
+            bundle_manifest = Path(tmp) / "oc_bundle_manifest.json"
+            bundle = write_bundle_manifest(
+                bundle_manifest,
+                generated,
+                photo_count=len(photos),
+                detail=detail,
+            )
+            generated.append((bundle_manifest.name, str(bundle_manifest)))
+            print(f"  bundle OC {bundle['bundle_id']} verificato")
         cli.upload_mesh(sid, generated)
         cli.mesh_ready(sid)
     print(f"✔ job {sid} → mesh_ready")

@@ -1,6 +1,53 @@
 from datetime import datetime, timedelta, timezone
+import json
 
 from app.services import projection_service
+
+
+def _raw_bundle(checksum_model="model-hash", checksum_poses="poses-hash"):
+    document = {
+        "schema": "acro.oc-bundle/v1",
+        "bundle_id": "bundle-1",
+        "model_file": "model.obj",
+        "poses_file": "oc_poses.json",
+        "files": {
+            "model.obj": {"sha256": "model-hash"},
+            "oc_poses.json": {"sha256": "poses-hash"},
+        },
+    }
+    result = {"mesh": {"raw": {"files": [
+        {"name": "model.obj", "path": "raw/model.obj", "checksum": checksum_model},
+        {"name": "oc_poses.json", "path": "raw/oc_poses.json", "checksum": checksum_poses},
+        {"name": "oc_bundle_manifest.json", "path": "raw/manifest.json", "checksum": "manifest-hash"},
+    ]}}}
+    return result, json.dumps(document).encode()
+
+
+def test_oc_bundle_accepts_model_and_poses_from_same_job(monkeypatch):
+    result, manifest = _raw_bundle()
+    monkeypatch.setattr(
+        projection_service.storage_service, "download_bytes",
+        lambda path: manifest,
+    )
+
+    document = projection_service.validate_oc_bundle(result)
+
+    assert document["bundle_id"] == "bundle-1"
+
+
+def test_oc_bundle_rejects_poses_replaced_from_another_job(monkeypatch):
+    result, manifest = _raw_bundle(checksum_poses="different-pose-hash")
+    monkeypatch.setattr(
+        projection_service.storage_service, "download_bytes",
+        lambda path: manifest,
+    )
+
+    try:
+        projection_service.validate_oc_bundle(result)
+    except projection_service.InputsMissing as exc:
+        assert "oc_poses.json non appartiene" in str(exc)
+    else:
+        raise AssertionError("Il bundle incoerente doveva essere rifiutato")
 
 
 def test_download_raw_reference_rebuilds_flattened_texture_paths(monkeypatch, tmp_path):

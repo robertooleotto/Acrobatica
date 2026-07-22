@@ -120,6 +120,50 @@ def _mesh_obj_path(entry: dict) -> Optional[str]:
     return None
 
 
+def _file_record(entry: dict, name: str) -> Optional[dict]:
+    target = Path(name).name
+    for item in entry.get("files", []):
+        if isinstance(item, dict) and Path(item.get("name", "")).name == target:
+            return item
+    return None
+
+
+def validate_oc_bundle(result: dict) -> dict:
+    """Verifica che modello e pose siano l'output atomico dello stesso job OC."""
+    raw = _mesh_entry(result, "raw")
+    manifest_record = _file_record(raw, "oc_bundle_manifest.json")
+    if manifest_record is None:
+        raise InputsMissing(
+            "Mesh OC legacy senza manifesto mesh+pose: ricalcolare Object Capture "
+            "prima della proiezione"
+        )
+    try:
+        document = json.loads(
+            storage_service.download_bytes(manifest_record["path"]),
+        )
+    except Exception as exc:
+        raise InputsMissing(f"Manifesto del pacchetto OC non leggibile: {exc}") from exc
+    if document.get("schema") != "acro.oc-bundle/v1" or not document.get("bundle_id"):
+        raise InputsMissing("Manifesto del pacchetto OC non valido")
+
+    manifest_files = document.get("files") or {}
+    required = [document.get("model_file"), document.get("poses_file")]
+    if not all(isinstance(name, str) and name for name in required):
+        raise InputsMissing("Manifesto OC privo dei riferimenti a modello o pose")
+    for name in required:
+        stored = _file_record(raw, name)
+        expected = manifest_files.get(name) if isinstance(manifest_files, dict) else None
+        expected_hash = expected.get("sha256") if isinstance(expected, dict) else None
+        if stored is None or not expected_hash:
+            raise InputsMissing(f"Pacchetto OC incompleto: {name} assente")
+        if stored.get("checksum") != expected_hash:
+            raise InputsMissing(
+                f"Pacchetto OC incoerente: {name} non appartiene al bundle "
+                f"{document['bundle_id']}"
+            )
+    return document
+
+
 def _projection_mesh(result: dict) -> tuple[Optional[str], str]:
     """Preferisce la revisione clean, altrimenti usa la prima mesh raw OC."""
     clean_path = _mesh_obj_path(_mesh_entry(result, "clean"))
@@ -228,6 +272,12 @@ def gather_inputs(session_id: str) -> Optional[dict]:
     else:
         add("poses", False, "oc_poses.json assente (deve arrivare con la mesh raw da Object Capture)")
 
+    try:
+        bundle = validate_oc_bundle(result)
+        add("oc_bundle", True, f"mesh+pose bundle {bundle['bundle_id']}")
+    except InputsMissing as exc:
+        add("oc_bundle", False, str(exc))
+
     # 4) PIANI — out/planes.json salvato dall'editor.
     planes_path = (result.get("planes") or {}).get("path")
     if planes_path:
@@ -251,6 +301,7 @@ def gather_inputs(session_id: str) -> Optional[dict]:
 
 def _download_inputs(session_id: str, sess: dict, root: Path) -> dict:
     result = sess.get("result") or {}
+    validate_oc_bundle(result)
     mesh_path, mesh_kind = _projection_mesh(result)
     poses_path = _file_in(_mesh_entry(result, "raw"), "oc_poses.json")
     planes_path = (result.get("planes") or {}).get("path")
