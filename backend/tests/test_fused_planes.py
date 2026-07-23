@@ -31,6 +31,7 @@ from fused_planes.run import (
 from fused_planes.reconstruct_open_surface import (
     discover_gap_fits,
     reconstruct,
+    regularize_envelope_heights,
 )
 
 
@@ -141,6 +142,42 @@ def test_persistent_contour_gap_creates_connector_plane():
     assert supplemental[0]["mesh_support_bounds"] == {
         "y_min": 0.0, "y_max": 0.9,
     }
+
+
+def test_envelope_height_policy_aligns_persistent_surfaces():
+    extents = [
+        {"y_min": 0.0, "y_max": 10.0},
+        {"y_min": 0.6, "y_max": 9.4},
+        {"y_min": 3.0, "y_max": 7.0},
+        {"y_min": 4.0, "y_max": 6.0},
+    ]
+
+    policy = regularize_envelope_heights(
+        extents, {(0, 1), (0, 2)}, fit_weights=[100.0, 40.0, 10.0, 5.0])
+
+    assert extents[0]["y_min"] == pytest.approx(0.0)
+    assert extents[0]["y_max"] == pytest.approx(10.0)
+    assert extents[1]["y_min"] == pytest.approx(0.0)
+    assert extents[1]["y_max"] == pytest.approx(10.0)
+    assert policy[0]["height_aligned"]
+    assert policy[1]["height_aligned"]
+
+
+def test_envelope_height_policy_keeps_connected_returns_only():
+    extents = [
+        {"y_min": 0.0, "y_max": 10.0},
+        {"y_min": 3.0, "y_max": 7.0},
+        {"y_min": 4.0, "y_max": 6.0},
+    ]
+
+    policy = regularize_envelope_heights(
+        extents, {(0, 1)}, fit_weights=[100.0, 10.0, 5.0])
+
+    assert policy[1]["retain"]
+    assert not policy[1]["height_aligned"]
+    assert not policy[2]["retain"]
+    assert policy[0]["envelope_component"] == policy[1]["envelope_component"]
+    assert policy[2]["envelope_component"] != policy[0]["envelope_component"]
 
 
 def test_batch_slicer_loads_all_requested_heights_in_one_process(tmp_path, monkeypatch):

@@ -726,6 +726,84 @@ def _weighted_quantile(values, quantile):
     return float(np.quantile(values, quantile))
 
 
+def regularize_envelope_heights(extents, topology_pairs, fit_weights=None):
+    """Apply scale-independent height rules to the planar envelope.
+
+    Persistent surfaces share the observed upper and lower rings. Short
+    surfaces keep their own vertical support when they close a topological
+    corner, while isolated fragments are rejected only when they cover less
+    than 35% of the envelope height.
+    """
+    if not extents:
+        return {}
+
+    fit_weights = fit_weights or [1.0] * len(extents)
+    heights = np.asarray([
+        max(float(extent["y_max"]) - float(extent["y_min"]), EPS)
+        for extent in extents
+    ])
+
+    # Use a well-supported persistent plane as the initial scale reference.
+    # Restricting the choice to the upper half of observed heights prevents a
+    # large balcony/detail patch from defining the facade's vertical span.
+    persistent_floor = float(np.quantile(heights, 0.50))
+    anchor_candidates = [
+        plane_id for plane_id, height in enumerate(heights)
+        if height + EPS >= persistent_floor
+    ]
+    anchor_id = max(
+        anchor_candidates,
+        key=lambda plane_id: (float(fit_weights[plane_id]), heights[plane_id]),
+    )
+    anchor_height = heights[anchor_id]
+    persistent_ids = [
+        plane_id for plane_id, height in enumerate(heights)
+        if height / anchor_height >= 0.72
+    ]
+
+    envelope_y_min = min(extents[plane_id]["y_min"] for plane_id in persistent_ids)
+    envelope_y_max = max(extents[plane_id]["y_max"] for plane_id in persistent_ids)
+    envelope_height = max(float(envelope_y_max - envelope_y_min), EPS)
+
+    neighbors = defaultdict(set)
+    for first_id, second_id in topology_pairs:
+        if first_id >= len(extents) or second_id >= len(extents):
+            continue
+        neighbors[first_id].add(second_id)
+        neighbors[second_id].add(first_id)
+
+    component_by_id = {}
+    for seed in range(len(extents)):
+        if seed in component_by_id:
+            continue
+        component_id = len(set(component_by_id.values()))
+        pending = [seed]
+        component_by_id[seed] = component_id
+        while pending:
+            current = pending.pop()
+            for neighbor in neighbors[current]:
+                if neighbor in component_by_id:
+                    continue
+                component_by_id[neighbor] = component_id
+                pending.append(neighbor)
+
+    policy = {}
+    for plane_id, (extent, height) in enumerate(zip(extents, heights)):
+        height_ratio = float(height / envelope_height)
+        height_aligned = height_ratio >= 0.72
+        retain = height_ratio >= 0.35 or bool(neighbors[plane_id])
+        if height_aligned:
+            extent["y_min"] = float(envelope_y_min)
+            extent["y_max"] = float(envelope_y_max)
+        policy[plane_id] = {
+            "retain": retain,
+            "height_aligned": height_aligned,
+            "height_ratio": height_ratio,
+            "envelope_component": component_by_id[plane_id],
+        }
+    return policy
+
+
 def _horizontal_plane(fit, extrusion, reference_y):
     normal = fit["normal"]
     horizontal = _unit([normal[0], normal[2]])
@@ -898,13 +976,30 @@ def build_open_planes(fits, adjacencies, thresholds):
             shared = max(first["y_max"], second["y_max"])
             first["y_max"] = second["y_max"] = shared
 
+    height_policy = regularize_envelope_heights(
+        extents,
+        topology_pairs,
+        fit_weights=[
+            float(plane.get("support_area") or plane.get("slice_support_area") or 1.0)
+            for plane in planes
+        ],
+    )
+    retained_ids = {
+        plane_id for plane_id, policy in height_policy.items()
+        if policy["retain"]
+    }
+
     shared_neighbors = defaultdict(set)
     for first_id, second_id in topology_pairs:
+        if first_id not in retained_ids or second_id not in retained_ids:
+            continue
         shared_neighbors[first_id].add(second_id)
         shared_neighbors[second_id].add(first_id)
 
     output = []
     for plane_id, (plane, extent) in enumerate(zip(planes, extents)):
+        if plane_id not in retained_ids:
+            continue
         for side, candidate in extent["snaps"].items():
             extent[f"t_{side}"] = candidate[2]
         if extent["t_max"] <= extent["t_min"] + EPS:
@@ -951,6 +1046,9 @@ def build_open_planes(fits, adjacencies, thresholds):
             "mesh_support_area": plane.get("mesh_support_area"),
             "slice_support_area": plane.get("slice_support_area"),
             "shared_neighbors": sorted(shared_neighbors[plane_id]),
+            "height_aligned": height_policy[plane_id]["height_aligned"],
+            "height_ratio": height_policy[plane_id]["height_ratio"],
+            "envelope_component": height_policy[plane_id]["envelope_component"],
             "w": width,
             "h": height,
             "n_triangoli": 2,
