@@ -7,7 +7,7 @@
 #
 # Uso:
 #   BACKEND=https://api.esempio.it \
-#   python oc_worker.py --hpg ./hpg --detail full [--once] [--poll 15]
+#   python oc_worker.py --hpg ./hpg --detail raw [--once] [--poll 15]
 #
 #   --once      elabora un solo job e termina (per test/cron)
 #   --poll N    secondi tra un polling e l'altro quando la coda è vuota (default 15)
@@ -23,6 +23,23 @@ try:
     import requests
 except ImportError:
     sys.exit("Serve 'requests': pip install requests")
+
+
+# Keep this in sync with HelloPhotogrammetry.swift and the fixed hpg invocation
+# in process_job(). It is embedded in every bundle so a mesh can be reproduced
+# without inferring its configuration from its filename.
+DEFAULT_OC_DETAIL = "raw"
+
+OBJECT_CAPTURE_PRESET = {
+    "id": "raw-nobbox-mesh-poses-v1",
+    "sample_ordering": "sequential",
+    "feature_sensitivity": "high",
+    "ignore_bounding_box": True,
+    "object_masking_enabled": False,
+    "requests": ["model_file", "poses"],
+    "model_and_poses_same_session": True,
+    "photo_naming": "{order_index:04d}.jpg",
+}
 
 
 def intrinsics_fx_fy_cx_cy(k: list) -> list | None:
@@ -93,6 +110,7 @@ def write_bundle_manifest(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "photo_count": int(photo_count),
         "detail": detail,
+        "object_capture": {**OBJECT_CAPTURE_PRESET, "detail": detail},
         "model_file": model_file,
         "poses_file": "oc_poses.json",
         "files": records,
@@ -234,7 +252,12 @@ def main():
     ap.add_argument("--hpg", default="./hpg", help="binario Object Capture")
     ap.add_argument("--converter", default="./usdz2obj",
                     help="binario USDZ -> OBJ/MTL/texture")
-    ap.add_argument("--detail", default="full", help="preview|reduced|medium|full|raw")
+    ap.add_argument(
+        "--detail",
+        default=DEFAULT_OC_DETAIL,
+        choices=("preview", "reduced", "medium", "full", "raw"),
+        help="dettaglio Object Capture (default: raw)",
+    )
     ap.add_argument("--poll", type=int, default=15, help="secondi tra i polling a coda vuota")
     ap.add_argument("--once", action="store_true", help="elabora un job e termina")
     ap.add_argument("--dry-run", action="store_true")

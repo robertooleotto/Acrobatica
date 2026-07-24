@@ -2,15 +2,14 @@
 //
 // Object Capture CLI per Acrobatica — genera mesh densa + POSE camera dalle foto
 // della facciata, in UNA sola PhotogrammetrySession (mesh e pose nello stesso
-// frame → proiezione 0px, niente Umeyama). Gira su Mac Apple Silicon (o su questo
-// Intel con Radeon: ~10 min per ~90 foto a `.full`).
+// frame → proiezione 0px, niente Umeyama). Gira su Mac Apple Silicon.
 //
 // Compilazione:
 //     swiftc -O HelloPhotogrammetry.swift -o hpg
 //
 // Uso:
 //     ./hpg <cartella_foto> <output.usdz> [detail] [sampleOrdering] [featureSensitivity]
-//   detail            = preview | reduced | medium | full | raw   (default: full)
+//   detail            = preview | reduced | medium | full | raw   (default: raw)
 //   sampleOrdering    = unordered | sequential                    (default: sequential)
 //   featureSensitivity= normal | high                             (default: high)
 //
@@ -160,7 +159,7 @@ guard args.count >= 3 else {
 let runner = Runner(
     inputFolder: URL(fileURLWithPath: args[1], isDirectory: true),
     outputFile: URL(fileURLWithPath: args[2]),
-    detail: parseDetail(args.count > 3 ? args[3] : "full"),
+    detail: parseDetail(args.count > 3 ? args[3] : "raw"),
     sampleOrdering: parseOrdering(args.count > 4 ? args[4] : "sequential"),
     featureSensitivity: parseSensitivity(args.count > 5 ? args[5] : "high")
 )

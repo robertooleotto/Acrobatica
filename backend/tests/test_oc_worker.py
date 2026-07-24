@@ -14,6 +14,14 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(oc_worker)
 
 
+def test_cloud_worker_defaults_to_raw_nobbox_preset():
+    assert oc_worker.DEFAULT_OC_DETAIL == "raw"
+    assert oc_worker.OBJECT_CAPTURE_PRESET["ignore_bounding_box"] is True
+    assert oc_worker.OBJECT_CAPTURE_PRESET["sample_ordering"] == "sequential"
+    assert oc_worker.OBJECT_CAPTURE_PRESET["feature_sensitivity"] == "high"
+    assert oc_worker.OBJECT_CAPTURE_PRESET["model_and_poses_same_session"] is True
+
+
 def test_bundle_manifest_binds_model_and_poses(tmp_path):
     model = tmp_path / "model.obj"
     poses = tmp_path / "oc_poses.json"
@@ -34,6 +42,10 @@ def test_bundle_manifest_binds_model_and_poses(tmp_path):
     assert saved["model_file"] == "model.obj"
     assert saved["poses_file"] == "oc_poses.json"
     assert saved["files"]["model.obj"]["sha256"] == oc_worker.sha256_file(model)
+    assert saved["object_capture"] == {
+        **oc_worker.OBJECT_CAPTURE_PRESET,
+        "detail": "raw",
+    }
 
 
 def test_materialize_usdz_textures_rewrites_archive_references(tmp_path):

@@ -93,7 +93,7 @@ router = APIRouter(prefix="/facade-sessions", tags=["facade-sessions"])
 
 # Incrementare quando cambia la geometria prodotta dal detector. I documenti
 # precedenti vengono rigenerati prima di essere caricati nell'editor.
-PLANES_PIPELINE_VERSION = "multi_slice_open_surface_v1"
+PLANES_PIPELINE_VERSION = "multi_slice_open_surface_v2"
 
 
 @router.post("", response_model=CreateSessionResponse, status_code=201)
