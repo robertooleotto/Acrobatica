@@ -22,9 +22,9 @@ def test_registration_budget_grows_with_real_plane_size():
 def test_texture_plane_uses_preserved_frame_without_changing_geometry_fields():
     plane = {
         "id": 4,
-        "normale": [0.1, 0.0, 0.99],
-        "punto": [0.0, 0.0, 0.2],
-        "corners": [[0, 0, 0.2], [2, 0, 0.2], [2, 1, 0.2]],
+        "normale": [0.0, 0.0, 1.0],
+        "punto": [0.5, 0.5, 0.0],
+        "corners": [[0, 0, 0], [2, 0, 0], [2, 1, 0]],
         "triangoli": [10, 11],
         "texture_frame": {
             "normale": [0.0, 0.0, 1.0],
@@ -39,7 +39,25 @@ def test_texture_plane_uses_preserved_frame_without_changing_geometry_fields():
     assert projection["normale"] == [0.0, 0.0, 1.0]
     assert projection["corners"] == [[0, 0, 0], [1, 0, 0], [1, 1, 0]]
     assert projection["triangoli"] == [10, 11]
-    assert plane["normale"] == [0.1, 0.0, 0.99]
+    assert plane["corners"] == [[0, 0, 0], [2, 0, 0], [2, 1, 0]]
+
+
+def test_texture_plane_rejects_a_historical_frame_with_changed_inclination():
+    plane = {
+        "normale": [0.0, 0.02, 0.9998],
+        "punto": [0.0, 0.0, 0.0],
+        "corners": [[0, 0, 0], [10, 0, 0], [10, 20, -0.4]],
+        "texture_frame": {
+            "normale": [0.0, 0.0, 1.0],
+            "punto": [0.0, 0.0, 0.0],
+            "corners": [[0, 0, 0], [10, 0, 0], [10, 20, 0]],
+        },
+    }
+
+    projection, preserved = oc_reference_bake.texture_plane(plane)
+
+    assert preserved is False
+    assert projection is plane
 
 
 def test_dominant_planar_reference_follows_parallel_wall_offset_from_plane():

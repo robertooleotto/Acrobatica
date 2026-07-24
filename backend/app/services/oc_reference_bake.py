@@ -73,11 +73,39 @@ def _identity_correction() -> dict[str, object]:
     }
 
 
+def _texture_frame_matches_geometry(plane: dict, frame: dict) -> bool:
+    """Accetta un frame storico solo se descrive ancora lo stesso piano 3D."""
+    current_normal = np.asarray(plane.get("normale"), np.float64)
+    frame_normal = np.asarray(frame.get("normale"), np.float64)
+    if current_normal.shape != (3,) or frame_normal.shape != (3,):
+        return False
+    current_normal = ob._unit(current_normal)
+    frame_normal = ob._unit(frame_normal)
+    if np.linalg.norm(current_normal) < 1e-9 or np.linalg.norm(frame_normal) < 1e-9:
+        return False
+    normal_cosine = abs(float(np.dot(current_normal, frame_normal)))
+    if normal_cosine < math.cos(math.radians(0.5)):
+        return False
+
+    current_point = np.asarray(plane.get("punto"), np.float64)
+    frame_point = np.asarray(frame.get("punto"), np.float64)
+    corners = np.asarray(plane.get("corners"), np.float64)
+    if current_point.shape != (3,) or frame_point.shape != (3,):
+        return False
+    if corners.ndim != 2 or corners.shape[1:] != (3,) or len(corners) < 3:
+        return False
+    plane_offset = abs(float(np.dot(current_point - frame_point, current_normal)))
+    span = max(float(np.linalg.norm(np.ptp(corners, axis=0))), 1e-6)
+    return plane_offset <= max(span * 0.01, 1e-4)
+
+
 def texture_plane(plane: dict) -> tuple[dict, bool]:
-    """Return the immutable projection frame, keeping reviewed geometry separate."""
+    """Usa il frame storico soltanto finche coincide con la geometria revisionata."""
     frame = plane.get("texture_frame")
     required = ("normale", "punto", "corners")
     if not isinstance(frame, dict) or not all(key in frame for key in required):
+        return plane, False
+    if not _texture_frame_matches_geometry(plane, frame):
         return plane, False
     projection_plane = dict(plane)
     projection_plane.update({key: frame[key] for key in required})
