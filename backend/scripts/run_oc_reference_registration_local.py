@@ -146,62 +146,80 @@ def render_oc_reference(
     depth_m: float,
     scale_m_per_mesh_unit: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    # A side plane can sit between two much larger facade surfaces. Raycasting
-    # the complete building from its normal then hits those surfaces first and
-    # incorrectly makes the actual reveal look unsupported. Keep only the raw
-    # triangles in the metric slab represented by this plane before raycasting.
-    point = np.asarray(pf.origin, np.float64)
-    normal64 = ob._unit(np.asarray(normal, np.float64))
-    centroids = getattr(mesh, "_face_centroids", None)
-    if centroids is None:
-        centroids = mesh.vertices[mesh.faces].mean(axis=1, dtype=np.float32)
-        mesh._face_centroids = centroids
-    signed_centroid_depth = (centroids - point) @ normal64
-    depth_world = depth_m / max(scale_m_per_mesh_unit, 1e-9)
-    support_faces = np.flatnonzero(
-        np.abs(signed_centroid_depth) <= depth_world * 1.05,
-    )
-    if len(support_faces) == 0:
-        support_faces = np.arange(len(mesh.faces), dtype=np.int64)
-
-    legacy = o3d.geometry.TriangleMesh(
-        o3d.utility.Vector3dVector(mesh.vertices.astype(np.float64)),
-        o3d.utility.Vector3iVector(mesh.faces[support_faces]),
-    )
-    scene = o3d.t.geometry.RaycastingScene()
-    scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(legacy))
-
     world, polygon = _pixel_world(pf)
     diag = float(np.linalg.norm(mesh.vertices.max(0) - mesh.vertices.min(0)))
     ray_start = max(diag * 1.2, depth_m / scale_m_per_mesh_unit * 2.0)
     points = world.reshape(-1, 3)
     origins = points + normal.astype(np.float32) * ray_start
     directions = np.repeat((-normal).astype(np.float32)[None, :], len(points), axis=0)
+    all_faces = np.arange(len(mesh.faces), dtype=np.int64)
 
-    primitive_ids = np.full(len(points), -1, np.int64)
-    primitive_uvs = np.zeros((len(points), 2), np.float32)
-    signed_depth = np.full(len(points), np.nan, np.float32)
-    chunk = 500_000
-    invalid_id = np.iinfo(np.uint32).max
-    for start in range(0, len(points), chunk):
-        end = min(start + chunk, len(points))
-        rays = o3d.core.Tensor(
-            np.hstack([origins[start:end], directions[start:end]]),
-            dtype=o3d.core.Dtype.Float32,
+    def cast(face_ids: np.ndarray, scene=None):
+        if scene is None:
+            legacy = o3d.geometry.TriangleMesh(
+                o3d.utility.Vector3dVector(mesh.vertices.astype(np.float64)),
+                o3d.utility.Vector3iVector(mesh.faces[face_ids]),
+            )
+            scene = o3d.t.geometry.RaycastingScene()
+            scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(legacy))
+        primitive_ids = np.full(len(points), -1, np.int64)
+        primitive_uvs = np.zeros((len(points), 2), np.float32)
+        signed_depth = np.full(len(points), np.nan, np.float32)
+        invalid_id = np.iinfo(np.uint32).max
+        for start in range(0, len(points), 500_000):
+            end = min(start + 500_000, len(points))
+            rays = o3d.core.Tensor(
+                np.hstack([origins[start:end], directions[start:end]]),
+                dtype=o3d.core.Dtype.Float32,
+            )
+            hit = scene.cast_rays(rays)
+            ids = hit["primitive_ids"].numpy().astype(np.int64)
+            t_hit = hit["t_hit"].numpy()
+            hit_valid = (ids != invalid_id) & np.isfinite(t_hit)
+            primitive_ids[start:end][hit_valid] = ids[hit_valid]
+            primitive_uvs[start:end][hit_valid] = \
+                hit["primitive_uvs"].numpy()[hit_valid]
+            signed_depth[start:end][hit_valid] = \
+                (ray_start - t_hit[hit_valid]) * scale_m_per_mesh_unit
+        valid = (
+            polygon.reshape(-1)
+            & (primitive_ids >= 0)
+            & (np.abs(signed_depth) <= depth_m)
         )
-        hit = scene.cast_rays(rays)
-        ids = hit["primitive_ids"].numpy().astype(np.int64)
-        t_hit = hit["t_hit"].numpy()
-        valid = (ids != invalid_id) & np.isfinite(t_hit)
-        primitive_ids[start:end][valid] = ids[valid]
-        primitive_uvs[start:end][valid] = hit["primitive_uvs"].numpy()[valid]
-        signed_depth[start:end][valid] = (ray_start - t_hit[valid]) * scale_m_per_mesh_unit
+        return primitive_ids, primitive_uvs, signed_depth, valid, scene
 
-    valid = (
-        polygon.reshape(-1)
-        & (primitive_ids >= 0)
-        & (np.abs(signed_depth) <= depth_m)
+    full_scene = getattr(mesh, "_raycast_scene", None)
+    primitive_ids, primitive_uvs, signed_depth, valid, full_scene = cast(
+        all_faces, full_scene,
     )
+    mesh._raycast_scene = full_scene
+    support_faces = all_faces
+
+    # A side plane can sit between two larger surfaces. Only when the complete
+    # scene finds almost no local support do we retry with a metric slab; doing
+    # this unconditionally exposes back faces and fragments the main facade.
+    polygon_flat = polygon.reshape(-1)
+    full_coverage = (
+        float(valid[polygon_flat].mean()) if polygon_flat.any() else 0.0
+    )
+    if full_coverage < 0.02:
+        normal64 = ob._unit(np.asarray(normal, np.float64))
+        centroids = getattr(mesh, "_face_centroids", None)
+        if centroids is None:
+            centroids = mesh.vertices[mesh.faces].mean(axis=1, dtype=np.float32)
+            mesh._face_centroids = centroids
+        depth_world = depth_m / max(scale_m_per_mesh_unit, 1e-9)
+        local_faces = np.flatnonzero(
+            np.abs((centroids - pf.origin) @ normal64) <= depth_world * 1.05,
+        )
+        if len(local_faces):
+            local = cast(local_faces)
+            local_coverage = (
+                float(local[3][polygon_flat].mean()) if polygon_flat.any() else 0.0
+            )
+            if local_coverage > full_coverage:
+                primitive_ids, primitive_uvs, signed_depth, valid = local[:4]
+                support_faces = local_faces
     output = np.zeros((pf.tex_h * pf.tex_w, 4), np.uint8)
     output[:, 3] = np.where(polygon.reshape(-1), 255, 0).astype(np.uint8)
     safe_primitive_ids = np.maximum(primitive_ids, 0)
@@ -513,8 +531,30 @@ def global_align_photos(
             "pairs_considered": 0, "pairs_accepted": 0,
         }, identity
 
-    features = [_atlas_features(image, mask) for image, mask in zip(images, masks)]
-    height, width = images[0].shape[:2]
+    full_height, full_width = images[0].shape[:2]
+    analysis_scale = min(1.0, 1400.0 / max(full_width, full_height))
+    if analysis_scale < 1.0:
+        width = max(1, int(round(full_width * analysis_scale)))
+        height = max(1, int(round(full_height * analysis_scale)))
+        analysis_images = [
+            cv2.resize(image, (width, height), interpolation=cv2.INTER_AREA)
+            for image in images
+        ]
+        analysis_masks = [
+            cv2.resize(
+                mask.astype(np.uint8), (width, height),
+                interpolation=cv2.INTER_NEAREST,
+            ) > 0
+            for mask in masks
+        ]
+    else:
+        height, width = full_height, full_width
+        analysis_images = images
+        analysis_masks = masks
+    features = [
+        _atlas_features(image, mask)
+        for image, mask in zip(analysis_images, analysis_masks)
+    ]
     pixel_scale = max(1.0, max(width, height) / 1100.0)
     matcher_gate = max(
         12.0 * pixel_scale,
@@ -530,9 +570,12 @@ def global_align_photos(
             # three strongest anchors and to its three rank neighbours.
             if first >= 3 and second - first > 3:
                 continue
-            overlap = masks[first] & masks[second]
+            overlap = analysis_masks[first] & analysis_masks[second]
             overlap_pixels = int(overlap.sum())
-            smaller_area = max(1, min(int(masks[first].sum()), int(masks[second].sum())))
+            smaller_area = max(1, min(
+                int(analysis_masks[first].sum()),
+                int(analysis_masks[second].sum()),
+            ))
             overlap_ratio = overlap_pixels / smaller_area
             if overlap_pixels < 5_000 or overlap_ratio < 0.04:
                 continue
@@ -576,7 +619,6 @@ def global_align_photos(
             inlier_a, inlier_b = points_a[inliers], points_b[inliers]
             predicted = _apply_matrix(inlier_a, relative)
             ransac_residual = float(np.median(np.linalg.norm(predicted - inlier_b, axis=1)))
-            height, width = images[0].shape[:2]
             bounds = np.float32([
                 [0.0, 0.0], [width - 1.0, 0.0],
                 [width - 1.0, height - 1.0], [0.0, height - 1.0],
@@ -706,20 +748,24 @@ def global_align_photos(
     corrected_masks: list[np.ndarray] = []
     corrections: list[dict[str, object]] = []
     for image, mask, params, matrix in zip(images, masks, solved, matrices):
+        full_matrix = matrix.copy()
+        full_matrix[:, 2] /= analysis_scale
+        full_params = params.copy()
+        full_params[:2] /= analysis_scale
         corrected_images.append(cv2.warpAffine(
-            image, matrix, (width, height), flags=cv2.INTER_LINEAR,
+            image, full_matrix, (full_width, full_height), flags=cv2.INTER_LINEAR,
             borderMode=cv2.BORDER_CONSTANT,
         ))
         corrected_masks.append(cv2.warpAffine(
-            mask.astype(np.uint8), matrix, (width, height),
+            mask.astype(np.uint8), full_matrix, (full_width, full_height),
             flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT,
         ) > 0)
         corrections.append({
-            "offset_x": round(float(params[0]), 4),
-            "offset_y": round(float(params[1]), 4),
-            "rotation_deg": round(math.degrees(float(params[2])), 5),
-            "scale": round(math.exp(float(params[3])), 7),
-            "matrix": matrix.tolist(),
+            "offset_x": round(float(full_params[0]), 4),
+            "offset_y": round(float(full_params[1]), 4),
+            "rotation_deg": round(math.degrees(float(full_params[2])), 5),
+            "scale": round(math.exp(float(full_params[3])), 7),
+            "matrix": full_matrix.tolist(),
         })
 
     summary = {
@@ -731,6 +777,8 @@ def global_align_photos(
         "median_pair_error_before_px": round(median_before, 4),
         "median_pair_error_after_px": round(median_after if applied else median_before, 4),
         "optimizer_evaluations": int(result.nfev),
+        "analysis_scale": round(analysis_scale, 6),
+        "analysis_size": [width, height],
         "components": [[keys[index] for index in component] for component in components],
         "pairs": pair_diagnostics,
     }
