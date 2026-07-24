@@ -22,8 +22,6 @@ import cv2
 import numpy as np
 from fastapi import APIRouter, BackgroundTasks, Body, File, Form, HTTPException, UploadFile
 
-from fused_planes.analysis_frame import estimate_oc_to_arkit
-
 from ..models import (
     ARMetadata,
     ColumnCompositeModel,
@@ -93,7 +91,7 @@ router = APIRouter(prefix="/facade-sessions", tags=["facade-sessions"])
 
 # Incrementare quando cambia la geometria prodotta dal detector. I documenti
 # precedenti vengono rigenerati prima di essere caricati nell'editor.
-PLANES_PIPELINE_VERSION = "multi_slice_open_surface_v2"
+PLANES_PIPELINE_VERSION = "multiscale_envelope_v1"
 
 
 @router.post("", response_model=CreateSessionResponse, status_code=201)
@@ -1470,54 +1468,30 @@ def detect_planes(session_id: str, payload: Optional[dict] = Body(None)):
         out_base = Path(td) / "piani"
         up_args = ["--up", *[str(x) for x in up_vec]]
 
-        # Object Capture può scegliere un frame arbitrario. Le pose OC e ARKit
-        # della stessa foto definiscono una similarità affidabile; viene usata
-        # soltanto su una copia temporanea e i piani tornano poi nel frame OC.
-        analysis_transform_path = Path(td) / "oc_to_analysis.json"
-        if fused_enabled:
-            try:
-                raw_entry = projection_service._mesh_entry(result, "raw")
-                poses_remote = projection_service._file_in(raw_entry, "oc_poses.json")
-                if not poses_remote:
-                    raise ValueError("oc_poses.json assente")
-                oc_poses = json.loads(storage_service.download_bytes(poses_remote))
-                analysis_transform = estimate_oc_to_arkit(
-                    oc_poses, session_store.list_photos(session_id))
-                analysis_transform_path.write_text(json.dumps(analysis_transform))
-                rotation = np.asarray(analysis_transform["R"], dtype=float)
-                oc_up = rotation.T @ np.asarray([0.0, 1.0, 0.0])
-                up_vec = oc_up.tolist()
-                up_args = ["--up", *[str(x) for x in up_vec]]
-            except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
-                raise HTTPException(
-                    409,
-                    "Impossibile allineare temporaneamente mesh e gravita ARKit: "
-                    f"{exc}",
-                ) from exc
-
-        # Motore preferito: v2 Open3D (qualsiasi orientamento: verticali, oblique,
-        # trapezi). Fallback: v1 istogrammi (solo verticali) se Open3D non c'è.
+        # Il fallback resta disponibile soltanto per mesh clean o quando il
+        # motore multiscala viene disattivato esplicitamente.
         doc = None
         engine_error = ""
         engine = ""
 
-        # Engine 'fused': frame ARKit temporaneo + perimetri regolarizzati e saldati.
-        # ACRO_ENABLE_FUSED=0 permette un rollback immediato a Open3D.
+        # Stesso motore CGAL multiscala e stesso post-processing topologico usati
+        # dal viewer offline. Le coordinate restano nel frame OBJ originale.
         if fused_enabled:
             try:
-                fused_cmd = [sys.executable, "-m", "scripts.detect_planes_fused",
-                             str(mesh_local), "--out", str(out_base)]
-                fused_cmd += ["--scale", str(oc_scale),
-                              "--transform", str(analysis_transform_path), *up_args]
-                subprocess.run(fused_cmd, cwd=str(_BACKEND_ROOT), check=True,
+                multiscale_cmd = [
+                    sys.executable, "-m", "scripts.detect_planes_multiscale_online",
+                    str(mesh_local), "--out", str(out_base) + ".json",
+                    "--scale", str(oc_scale),
+                ]
+                subprocess.run(multiscale_cmd, cwd=str(_BACKEND_ROOT), check=True,
                                capture_output=True, text=True, timeout=600)
                 with open(str(out_base) + ".json") as fh:
                     doc = json.load(fh)
                 raw_planes = doc.get("planes", [])
-                engine = "fused"
+                engine = "multiscale"
             except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
                 doc = None
-                engine_error = ("fused: " + ((getattr(e, "stderr", "") or "") + str(e)))[-400:]
+                engine_error = ("multiscale: " + ((getattr(e, "stderr", "") or "") + str(e)))[-400:]
 
         # La mesh OC grezza richiede la riparazione topologica e la fusione con
         # le sezioni. Il fallback Open3D produce poligoni indipendenti non
@@ -1525,7 +1499,7 @@ def detect_planes(session_id: str, payload: Optional[dict] = Body(None)):
         if doc is None and requested_kind == "raw" and fused_enabled:
             raise HTTPException(
                 500,
-                "Rilevamento fused sulla mesh OC fallito. "
+                "Rilevamento multiscala sulla mesh OC fallito. "
                 f"Nessun piano alternativo e' stato salvato. {engine_error}",
             )
 

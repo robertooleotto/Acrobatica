@@ -11,7 +11,9 @@ COPY fused_planes/native ./native
 RUN cmake -S native/regiongrow -B build/regiongrow -DCMAKE_BUILD_TYPE=Release \
     && cmake --build build/regiongrow --parallel 2 \
     && cmake -S native/slice_contours -B build/slice_contours -DCMAKE_BUILD_TYPE=Release \
-    && cmake --build build/slice_contours --parallel 2
+    && cmake --build build/slice_contours --parallel 2 \
+    && cmake -S native/multiscale_planes -B build/multiscale_planes -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build build/multiscale_planes --parallel 2
 
 FROM python:3.12-slim
 
@@ -32,6 +34,7 @@ RUN pip install --no-cache-dir --upgrade pip \
 COPY . .
 COPY --from=cgal-builder /src/build/regiongrow/rg /usr/local/bin/acro-regiongrow
 COPY --from=cgal-builder /src/build/slice_contours/slice_contours /usr/local/bin/acro-slice-contours
+COPY --from=cgal-builder /src/build/multiscale_planes/cgal_multiscale_planes /usr/local/bin/acro-multiscale-planes
 
 ENV PYTHONUNBUFFERED=1 \
     HF_HOME=/tmp/huggingface \
