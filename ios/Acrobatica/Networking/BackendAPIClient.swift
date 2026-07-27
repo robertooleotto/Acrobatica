@@ -110,7 +110,116 @@ actor BackendAPIClient {
         let photos_count: Int
     }
 
+    struct PhotoMetadataPayload: Codable {
+        let order_index: Int
+        let timestamp: Double
+        let camera_transform: [Float]
+        let camera_intrinsics: [Float]
+        let euler_angles: [Float]
+        let tracking_state: String
+        let image_width: Int
+        let image_height: Int
+        let wall_normal_world: [Float]?
+    }
+
+    struct DirectUploadTarget: Codable {
+        let name: String
+        let path: String
+        let url: String
+        let headers: [String: String]
+    }
+
+    struct DirectUploadTargets: Codable {
+        let expires_in_sec: Int
+        let files: [DirectUploadTarget]
+    }
+
+    struct DirectUploadFileRequest: Codable {
+        let name: String
+        let size_bytes: Int
+        let checksum: String?
+    }
+
+    struct DirectUploadRecord: Codable {
+        let name: String
+        let size_bytes: Int
+        let checksum: String?
+        let path: String
+    }
+
+    private func metadataPayload(_ photo: CapturedFacadePhoto) -> PhotoMetadataPayload {
+        PhotoMetadataPayload(
+            order_index: photo.orderIndex,
+            timestamp: photo.timestampMs,
+            camera_transform: photo.cameraTransform,
+            camera_intrinsics: photo.cameraIntrinsics,
+            euler_angles: photo.eulerAnglesDeg,
+            tracking_state: photo.trackingState,
+            image_width: photo.imageWidth,
+            image_height: photo.imageHeight,
+            wall_normal_world: photo.wallNormalWorld)
+    }
+
+    func preparePhotoDirectUpload(
+        sessionId: String, photo: CapturedFacadePhoto
+    ) async throws -> DirectUploadTarget {
+        let size = try fileSize(photo.localImageURL)
+        let body: [String: Any] = [
+            "metadata": try jsonObject(metadataPayload(photo)),
+            "size_bytes": size,
+        ]
+        let result: DirectUploadTargets = try await postJSON(
+            path: "/facade-sessions/\(sessionId)/photos/upload-ticket",
+            body: body)
+        guard let target = result.files.first else {
+            throw APIError.httpError(500, "Ticket upload foto vuoto")
+        }
+        return target
+    }
+
+    func completePhotoDirectUpload(
+        sessionId: String,
+        photo: CapturedFacadePhoto,
+        target: DirectUploadTarget
+    ) async throws -> UploadResponse {
+        let body: [String: Any] = [
+            "metadata": try jsonObject(metadataPayload(photo)),
+            "file": [
+                "name": target.name,
+                "path": target.path,
+                "size_bytes": try fileSize(photo.localImageURL),
+                "checksum": NSNull(),
+            ],
+        ]
+        return try await postJSON(
+            path: "/facade-sessions/\(sessionId)/photos/complete",
+            body: body)
+    }
+
     func uploadPhoto(sessionId: String, photo: CapturedFacadePhoto) async throws -> UploadResponse {
+        do {
+            let target = try await preparePhotoDirectUpload(
+                sessionId: sessionId, photo: photo)
+            guard let uploadURL = URL(string: target.url) else {
+                throw APIError.httpError(0, "URL R2 non valido")
+            }
+            var put = URLRequest(url: uploadURL)
+            put.httpMethod = "PUT"
+            target.headers.forEach { put.setValue($1, forHTTPHeaderField: $0) }
+            let (putData, putResponse) = try await urlSession.upload(
+                for: put, fromFile: photo.localImageURL)
+            try assertHTTPOK(putResponse, data: putData)
+            return try await completePhotoDirectUpload(
+                sessionId: sessionId, photo: photo, target: target)
+        } catch APIError.httpError(let code, _) where [404, 405, 503].contains(code) {
+            // Compatibilita' temporanea con backend senza ticket R2.
+        }
+        return try await uploadPhotoMultipart(sessionId: sessionId, photo: photo)
+    }
+
+    private func uploadPhotoMultipart(
+        sessionId: String, photo: CapturedFacadePhoto
+    ) async throws -> UploadResponse {
         let url = baseURL.appendingPathComponent("/facade-sessions/\(sessionId)/photos")
         let boundary = "Boundary-\(UUID().uuidString)"
         var req = URLRequest(url: url)
@@ -699,6 +808,50 @@ actor BackendAPIClient {
     /// "clean" (default, dall'iPad) o "raw". Va su `sessions/<id>/out/mesh/<kind>/`
     /// senza sovrascrivere la grezza. Multipart PUT /mesh.
     func uploadMesh(sessionId: String, fileURL: URL, kind: String = "clean") async throws -> MeshUploadResult {
+        do {
+            let size = try fileSize(fileURL)
+            let checksum = try sha256(of: fileURL)
+            let descriptor = DirectUploadFileRequest(
+                name: fileURL.lastPathComponent,
+                size_bytes: size,
+                checksum: checksum)
+            let tickets: DirectUploadTargets = try await postJSON(
+                path: "/facade-sessions/\(sessionId)/mesh/upload-tickets",
+                body: [
+                    "kind": kind,
+                    "files": [try jsonObject(descriptor)],
+                ])
+            guard let target = tickets.files.first,
+                  let uploadURL = URL(string: target.url) else {
+                throw APIError.httpError(500, "Ticket upload mesh vuoto")
+            }
+            var put = URLRequest(url: uploadURL)
+            put.httpMethod = "PUT"
+            target.headers.forEach { put.setValue($1, forHTTPHeaderField: $0) }
+            let (putData, putResponse) = try await urlSession.upload(
+                for: put, fromFile: fileURL)
+            try assertHTTPOK(putResponse, data: putData)
+            let record = DirectUploadRecord(
+                name: target.name,
+                size_bytes: size,
+                checksum: checksum,
+                path: target.path)
+            return try await postJSON(
+                path: "/facade-sessions/\(sessionId)/mesh/complete",
+                body: [
+                    "kind": kind,
+                    "files": [try jsonObject(record)],
+                ])
+        } catch APIError.httpError(let code, _) where [404, 405, 503].contains(code) {
+            // Compatibilita' temporanea con backend senza ticket R2.
+        }
+        return try await uploadMeshMultipart(
+            sessionId: sessionId, fileURL: fileURL, kind: kind)
+    }
+
+    private func uploadMeshMultipart(
+        sessionId: String, fileURL: URL, kind: String
+    ) async throws -> MeshUploadResult {
         let url = baseURL.appendingPathComponent("/facade-sessions/\(sessionId)/mesh")
         let boundary = "Boundary-\(UUID().uuidString)"
         var req = URLRequest(url: url)
@@ -974,6 +1127,31 @@ actor BackendAPIClient {
         }
     }
 
+    private func postJSON<T: Decodable>(
+        path: String, body: [String: Any]
+    ) async throws -> T {
+        var request = URLRequest(url: baseURL.appendingPathComponent(path))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, response) = try await urlSession.data(for: request)
+        try assertHTTPOK(response, data: data)
+        return try JSONDecoder().decode(T.self, from: data)
+    }
+
+    private func jsonObject<T: Encodable>(_ value: T) throws -> Any {
+        let data = try JSONEncoder().encode(value)
+        return try JSONSerialization.jsonObject(with: data)
+    }
+
+    private func fileSize(_ url: URL) throws -> Int {
+        let values = try url.resourceValues(forKeys: [.fileSizeKey])
+        guard let size = values.fileSize, size > 0 else {
+            throw APIError.httpError(0, "File locale vuoto: \(url.lastPathComponent)")
+        }
+        return size
+    }
+
     private func assertHTTPOK(_ resp: URLResponse, data: Data) throws {
         guard let http = resp as? HTTPURLResponse else { return }
         if !(200..<300 ~= http.statusCode) {
@@ -1024,6 +1202,7 @@ final class BackgroundUploader: NSObject, ObservableObject {
         set { UserDefaults.standard.set(Array(newValue), forKey: "closed_capture_sessions") }
     }
     private var sessioniInAccodamento: Set<String> = []
+    private var ticketInCorso: Set<String> = []
 
     private lazy var session: URLSession = {
         let c = URLSessionConfiguration.background(withIdentifier: "com.acrobatica.upload.bg")
@@ -1040,6 +1219,7 @@ final class BackgroundUploader: NSObject, ObservableObject {
         let sessionId: String
         let photo: CapturedFacadePhoto
         var retry: Int
+        var directTarget: BackendAPIClient.DirectUploadTarget? = nil
     }
 
     private var storeURL: URL {
@@ -1132,6 +1312,45 @@ final class BackgroundUploader: NSObject, ObservableObject {
     // MARK: - Task creation
 
     private func startTask(for p: Pending) {
+        guard !ticketInCorso.contains(p.id) else { return }
+        ticketInCorso.insert(p.id)
+        Task {
+            defer { ticketInCorso.remove(p.id) }
+            do {
+                let target = try await BackendAPIClient.shared.preparePhotoDirectUpload(
+                    sessionId: p.sessionId, photo: p.photo)
+                var current = p
+                current.directTarget = target
+                updateStore(current)
+                startDirectTask(for: current, target: target)
+            } catch BackendAPIClient.APIError.httpError(let code, _)
+                where [404, 405, 503].contains(code) {
+                var legacy = p
+                legacy.directTarget = nil
+                updateStore(legacy)
+                startLegacyTask(for: legacy)
+            } catch {
+                handleFailure(id: p.id)
+            }
+        }
+    }
+
+    private func startDirectTask(
+        for p: Pending, target: BackendAPIClient.DirectUploadTarget
+    ) {
+        guard let uploadURL = URL(string: target.url) else {
+            handleFailure(id: p.id); return
+        }
+        var request = URLRequest(url: uploadURL)
+        request.httpMethod = "PUT"
+        target.headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        let task = session.uploadTask(with: request, fromFile: p.photo.localImageURL)
+        task.taskDescription = p.id
+        statusByOrder[p.photo.orderIndex] = .uploading
+        task.resume()
+    }
+
+    private func startLegacyTask(for p: Pending) {
         guard let bodyURL = writeMultipartBody(for: p) else {
             markFailed(p, permanent: true); return
         }
@@ -1143,6 +1362,13 @@ final class BackgroundUploader: NSObject, ObservableObject {
         task.taskDescription = p.id
         statusByOrder[p.photo.orderIndex] = .uploading
         task.resume()
+    }
+
+    private func updateStore(_ pending: Pending) {
+        var items = loadStore()
+        guard let index = items.firstIndex(where: { $0.id == pending.id }) else { return }
+        items[index] = pending
+        saveStore(items)
     }
 
     private func writeMultipartBody(for p: Pending) -> URL? {
@@ -1262,7 +1488,20 @@ extension BackgroundUploader: URLSessionDataDelegate {
             self.responseData[tid] = nil
             guard let id = id else { return }
             if error == nil, (200..<300).contains(code) {
-                self.finishSuccess(id)
+                if let pending = self.loadStore().first(where: { $0.id == id }),
+                   let target = pending.directTarget {
+                    do {
+                        _ = try await BackendAPIClient.shared.completePhotoDirectUpload(
+                            sessionId: pending.sessionId,
+                            photo: pending.photo,
+                            target: target)
+                        self.finishSuccess(id)
+                    } catch {
+                        self.handleFailure(id: id)
+                    }
+                } else {
+                    self.finishSuccess(id)
+                }
             } else {
                 self.handleFailure(id: id)
             }
