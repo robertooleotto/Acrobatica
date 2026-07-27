@@ -891,8 +891,14 @@ def _compose_plane(
             existing.update(filler_report)
         covered |= filler_mask
 
-    rgba = coverage_rgba(mosaic(accepted_images, compositing_masks, reference),
-                         compositing_masks)
+    rgba = coverage_rgba(
+        mosaic(
+            accepted_images, compositing_masks, reference,
+            content_aware_seams=True,
+            content_aware_photo_count=len(corrections),
+        ),
+        compositing_masks,
+    )
     coverage = float(covered[polygon].mean()) if polygon.any() else 0.0
     report = {
         "horizontal_flipped_for_front_view": horizontal_flipped,

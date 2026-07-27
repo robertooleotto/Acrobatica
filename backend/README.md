@@ -43,6 +43,9 @@ demo on-the-go. Per produzione vera, deploy su VPS.
 - `POST /facade-sessions/{session_id}/process` — esegue stitching + rettifica + segmentazione.
 - `GET  /facade-sessions/{session_id}/result` — risultato (URL immagine, poligoni, m² pixel).
 - `GET  /facade-sessions/{session_id}/files/{filename}` — serve immagini generate.
+- `POST /facade-sessions/{session_id}/detect-balconies` — riconosce sulla mesh
+  strutture con soletta orizzontale e parapetto, scarta cornici/davanzali e
+  genera il modello JSON + OBJ (richiede mesh OBJ e piani persistiti).
 
 ## Pipeline
 

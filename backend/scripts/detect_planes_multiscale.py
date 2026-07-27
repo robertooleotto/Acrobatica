@@ -1770,7 +1770,6 @@ def build_family_envelope_faces(
     structural = [family for family in families if family.get("role") == "structural"]
     if not structural:
         return []
-    family_by_id = {family["id"]: family for family in families}
     all_bounds = {family["id"]: _family_bounds(family, candidates) for family in structural}
     global_y_min = min(bounds["y_min"] for bounds in all_bounds.values())
     global_y_max = max(bounds["y_max"] for bounds in all_bounds.values())
@@ -1815,10 +1814,12 @@ def build_family_envelope_faces(
                 _point_on_plane_at_uy(family, horizontal, component["u_max"], y_max),
                 _point_on_plane_at_uy(family, horizontal, component["u_min"], y_max),
             ])
-            corners, snapped = _snap_corners_to_junctions(
-                corners, family["id"], family_by_id, envelope_junctions
-            )
-            if family_height_ratio < 0.35 and not snapped:
+            family_junctions = [
+                int(junction["id"])
+                for junction in envelope_junctions
+                if family["id"] in junction.get("families", [])
+            ]
+            if family_height_ratio < 0.35 and not family_junctions:
                 continue
             faces.append({
                 "id": len(faces),
@@ -1831,10 +1832,253 @@ def build_family_envelope_faces(
                 "corners": corners.tolist(),
                 "height_aligned": family_height_ratio >= 0.72,
                 "height_ratio": family_height_ratio,
-                "snapped_junction_ids": snapped,
+                "snapped_junction_ids": [],
                 "confidence": "high",
             })
     return faces
+
+
+def weld_envelope_faces(
+    faces: list[dict],
+    families: list[dict],
+    junctions: list[dict],
+    voxel: float,
+) -> tuple[list[dict], list[dict]]:
+    """Grow/trim envelope sides to one shared plane-intersection edge.
+
+    Junctions already carry multi-section evidence. This stage only resolves
+    which disconnected family component and which of its two vertical sides
+    participates in each junction, then enforces the same geometric edge on
+    both faces.
+    """
+    from scipy.optimize import Bounds, LinearConstraint, milp
+
+    corrected = [dict(face, corners=[list(point) for point in face["corners"]]) for face in faces]
+    family_by_id = {int(family["id"]): family for family in families}
+    edge_vertices = {"min": (0, 3), "max": (1, 2)}
+
+    def endpoint_options(family_id: int, other_id: int) -> list[dict]:
+        family = family_by_id.get(family_id)
+        other = family_by_id.get(other_id)
+        if family is None or other is None:
+            return []
+        horizontal, _ = _plane_axes(np.asarray(family["normal"], dtype=float))
+        options = []
+        for face_index, face in enumerate(corrected):
+            if int(face.get("family_id", -1)) != family_id:
+                continue
+            corners = np.asarray(face["corners"], dtype=float)
+            for side, vertex_ids in edge_vertices.items():
+                midpoint = corners[list(vertex_ids)].mean(axis=0)
+                intersection = _plane_intersection_at_y(family, other, float(midpoint[1]))
+                if intersection is None:
+                    continue
+                opposite_ids = edge_vertices["max" if side == "min" else "min"]
+                opposite = corners[list(opposite_ids)].mean(axis=0)
+                width = abs(float((opposite - midpoint) @ horizontal))
+                displacement = float((intersection - midpoint) @ horizontal)
+                # A collision cannot invert or erase the face.
+                if width <= voxel or abs(displacement) >= width - voxel * 0.25:
+                    continue
+                options.append({
+                    "face_index": face_index,
+                    "face_id": int(face["id"]),
+                    "side": side,
+                    "vertex_ids": vertex_ids,
+                    "distance": abs(displacement),
+                    "signed_displacement": displacement,
+                })
+        return sorted(options, key=lambda item: (item["distance"], item["face_id"], item["side"]))
+
+    candidates = []
+    for junction in junctions:
+        if junction.get("status") != "accepted" or len(junction.get("families", [])) != 2:
+            continue
+        first_id, second_id = map(int, junction["families"])
+        first_options = endpoint_options(first_id, second_id)
+        second_options = endpoint_options(second_id, first_id)
+        if not first_options or not second_options:
+            continue
+        first = first_options[0]
+        second = second_options[0]
+        candidates.append({
+            "junction": junction,
+            "endpoints": (first, second),
+            "slots": (
+                (first["face_id"], first["side"]),
+                (second["face_id"], second["side"]),
+            ),
+            "distance": first["distance"] + second["distance"],
+        })
+
+    if not candidates:
+        return corrected, []
+
+    slots = sorted({slot for candidate in candidates for slot in candidate["slots"]})
+    slot_index = {slot: index for index, slot in enumerate(slots)}
+    incidence = np.zeros((len(slots), len(candidates)), dtype=float)
+    objective = np.zeros(len(candidates), dtype=float)
+    scale = max(float(voxel), 1e-9)
+    for candidate_index, candidate in enumerate(candidates):
+        for slot in candidate["slots"]:
+            incidence[slot_index[slot], candidate_index] = 1.0
+        confidence = float(candidate["junction"].get("junction_ratio", 0.0))
+        # Cardinality dominates; distance and evidence only break ties.
+        objective[candidate_index] = (
+            -1000.0 + min(candidate["distance"] / scale, 100.0) - confidence
+        )
+    result = milp(
+        c=objective,
+        integrality=np.ones(len(candidates)),
+        bounds=Bounds(0.0, 1.0),
+        constraints=LinearConstraint(incidence, 0.0, 1.0),
+        options={"time_limit": 5.0},
+    )
+    if result.x is None:
+        selected_indices = []
+        occupied = set()
+        for index in np.argsort(objective):
+            candidate = candidates[int(index)]
+            if any(slot in occupied for slot in candidate["slots"]):
+                continue
+            selected_indices.append(int(index))
+            occupied.update(candidate["slots"])
+    else:
+        selected_indices = [index for index, value in enumerate(result.x) if value >= 0.5]
+
+    for face in corrected:
+        face["snapped_junction_ids"] = []
+        face["shared_edge_ids"] = []
+
+    shared_edges = []
+    for candidate_index in selected_indices:
+        candidate = candidates[candidate_index]
+        junction = candidate["junction"]
+        first_id, second_id = map(int, junction["families"])
+        first_family = family_by_id[first_id]
+        second_family = family_by_id[second_id]
+        endpoint_records = []
+        for endpoint in candidate["endpoints"]:
+            face = corrected[endpoint["face_index"]]
+            corners = np.asarray(face["corners"], dtype=float)
+            for vertex_id in endpoint["vertex_ids"]:
+                intersection = _plane_intersection_at_y(
+                    first_family, second_family, float(corners[vertex_id, 1])
+                )
+                if intersection is not None:
+                    corners[vertex_id, [0, 2]] = intersection[[0, 2]]
+            face["corners"] = corners.tolist()
+            face["snapped_junction_ids"].append(int(junction["id"]))
+            face["shared_edge_ids"].append(len(shared_edges))
+            endpoint_records.append({
+                "face_id": endpoint["face_id"],
+                "side": endpoint["side"],
+                "displacement": endpoint["signed_displacement"],
+            })
+
+        y_min = max(
+            min(point[1] for point in corrected[item["face_index"]]["corners"])
+            for item in candidate["endpoints"]
+        )
+        y_max = min(
+            max(point[1] for point in corrected[item["face_index"]]["corners"])
+            for item in candidate["endpoints"]
+        )
+        bottom = _plane_intersection_at_y(first_family, second_family, y_min)
+        top = _plane_intersection_at_y(first_family, second_family, y_max)
+        shared_edges.append({
+            "id": len(shared_edges),
+            "junction_id": int(junction["id"]),
+            "families": [first_id, second_id],
+            "faces": [item["face_id"] for item in candidate["endpoints"]],
+            "endpoints": endpoint_records,
+            "line": [bottom.tolist(), top.tolist()] if bottom is not None and top is not None else [],
+            "confidence": junction.get("confidence", "medium"),
+        })
+    return corrected, shared_edges
+
+
+def collapse_narrow_envelope_faces(
+    raw_faces: list[dict],
+    families: list[dict],
+    junctions: list[dict],
+    voxel: float,
+    scale_m_per_unit: float,
+    min_width_m: float = 0.25,
+    max_width_height_ratio: float = 0.02,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Collapse metric sliver faces only when their two neighbors can meet."""
+    active = [dict(face, corners=[list(point) for point in face["corners"]]) for face in raw_faces]
+    collapsed = []
+    accepted_by_families = {}
+    for junction in junctions:
+        if junction.get("status") != "accepted" or len(junction.get("families", [])) != 2:
+            continue
+        key = tuple(sorted(map(int, junction["families"])))
+        accepted_by_families.setdefault(key, []).append(junction)
+
+    while len(active) >= 3:
+        welded, shared_edges = weld_envelope_faces(active, families, junctions, voxel)
+        shared_by_id = {int(edge["id"]): edge for edge in shared_edges}
+        removable = []
+        for face in welded:
+            corners = np.asarray(face["corners"], dtype=float)
+            if corners.shape != (4, 3):
+                continue
+            width = 0.5 * (
+                float(np.linalg.norm(corners[1] - corners[0]))
+                + float(np.linalg.norm(corners[2] - corners[3]))
+            ) * scale_m_per_unit
+            height = 0.5 * (
+                float(np.linalg.norm(corners[3] - corners[0]))
+                + float(np.linalg.norm(corners[2] - corners[1]))
+            ) * scale_m_per_unit
+            if width >= min_width_m or width / max(height, 1e-9) >= max_width_height_ratio:
+                continue
+            edge_ids = list(dict.fromkeys(map(int, face.get("shared_edge_ids", []))))
+            if len(edge_ids) != 2 or any(edge_id not in shared_by_id for edge_id in edge_ids):
+                continue
+            neighbors = []
+            for edge_id in edge_ids:
+                edge = shared_by_id[edge_id]
+                neighbors.extend(int(item) for item in edge["faces"] if int(item) != int(face["id"]))
+            neighbors = list(dict.fromkeys(neighbors))
+            if len(neighbors) != 2:
+                continue
+            face_by_id = {int(item["id"]): item for item in welded}
+            if any(neighbor not in face_by_id for neighbor in neighbors):
+                continue
+            neighbor_families = tuple(sorted(
+                int(face_by_id[neighbor]["family_id"]) for neighbor in neighbors
+            ))
+            replacements = accepted_by_families.get(neighbor_families, [])
+            if not replacements:
+                continue
+            replacement = max(
+                replacements,
+                key=lambda item: (
+                    float(item.get("junction_ratio", 0.0)),
+                    int(item.get("supported_sections", 0)),
+                ),
+            )
+            removable.append({
+                "face_id": int(face["id"]),
+                "family_id": int(face["family_id"]),
+                "width_m": width,
+                "height_m": height,
+                "neighbor_face_ids": neighbors,
+                "neighbor_family_ids": list(neighbor_families),
+                "replacement_junction_id": int(replacement["id"]),
+            })
+        if not removable:
+            return welded, shared_edges, collapsed
+
+        chosen = min(removable, key=lambda item: (item["width_m"], item["face_id"]))
+        active = [face for face in active if int(face["id"]) != chosen["face_id"]]
+        collapsed.append(chosen)
+
+    welded, shared_edges = weld_envelope_faces(active, families, junctions, voxel)
+    return welded, shared_edges, collapsed
 
 
 def build_candidates_v2(
@@ -2147,9 +2391,27 @@ def run(args: argparse.Namespace) -> Path:
     candidates_v2["contour_faces"] = contour_envelope["faces"]
     candidates_v2["contour_junctions"] = contour_envelope["junctions"]
     candidates_v2["contour_anchor_family_ids"] = contour_envelope["anchor_family_ids"]
-    candidates_v2["envelope_faces"] = build_family_envelope_faces(
+    envelope_faces = build_family_envelope_faces(
         candidates, families, envelope_junctions, voxel
     )
+    metric_scale = getattr(args, "scale", None)
+    if metric_scale is not None and metric_scale > 0.0:
+        envelope_faces, shared_edges, collapsed_faces = collapse_narrow_envelope_faces(
+            envelope_faces,
+            families,
+            envelope_junctions,
+            voxel,
+            scale_m_per_unit=float(metric_scale),
+            min_width_m=float(getattr(args, "min_face_width_m", 0.25)),
+        )
+    else:
+        envelope_faces, shared_edges = weld_envelope_faces(
+            envelope_faces, families, envelope_junctions, voxel
+        )
+        collapsed_faces = []
+    candidates_v2["envelope_faces"] = envelope_faces
+    candidates_v2["shared_edges"] = shared_edges
+    candidates_v2["collapsed_faces"] = collapsed_faces
     (output / "candidates.v2.json").write_text(json.dumps(candidates_v2, indent=2))
     write_colored_points(output / "support_points.ply", points, candidates, assignment)
     model_link = output / "model.obj"
@@ -2170,6 +2432,8 @@ def main() -> None:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--binary", type=Path, default=DEFAULT_BINARY)
     parser.add_argument("--voxel-factor", type=float, default=1.2)
+    parser.add_argument("--scale", type=float)
+    parser.add_argument("--min-face-width-m", type=float, default=0.25)
     args = parser.parse_args()
     run(args)
 

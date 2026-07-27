@@ -29,7 +29,7 @@ def _detected() -> DetectPlanesResult:
     )
 
 
-def test_automatic_pipeline_detects_saves_then_projects(monkeypatch):
+def test_automatic_pipeline_detects_saves_then_queues_mac_projection(monkeypatch):
     calls = []
     jobs = []
     monkeypatch.setattr(
@@ -41,8 +41,8 @@ def test_automatic_pipeline_detects_saves_then_projects(monkeypatch):
         lambda session_id, payload: calls.append(("save", payload)),
     )
     monkeypatch.setattr(
-        facade_sessions.projection_service, "project",
-        lambda session_id: calls.append(("project", session_id)),
+        facade_sessions.projection_service, "start_project",
+        lambda session_id: calls.append(("queue_projection", session_id)),
     )
     monkeypatch.setattr(
         facade_sessions.projection_service, "_set_job",
@@ -51,7 +51,9 @@ def test_automatic_pipeline_detects_saves_then_projects(monkeypatch):
 
     facade_sessions._run_automatic_mesh_pipeline("session-1")
 
-    assert [item[0] for item in calls] == ["detect", "save", "project"]
+    assert [item[0] for item in calls] == [
+        "detect", "save", "queue_projection",
+    ]
     payload = calls[1][1]
     assert payload["schema"] == "acro.planes/v1"
     assert payload["generator_version"] == facade_sessions.PLANES_PIPELINE_VERSION

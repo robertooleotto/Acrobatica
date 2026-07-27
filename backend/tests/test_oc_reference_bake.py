@@ -190,6 +190,76 @@ def test_diagnostic_overlay_accepts_an_empty_overlap():
     assert np.array_equal(output, reference)
 
 
+def test_residual_registration_accepts_a_narrow_limit_overrun_with_strong_evidence():
+    accepted, tier, failures = registration._residual_registration_decision(
+        inlier_count=31,
+        inlier_ratio=0.6889,
+        rotation_deg=-0.0603,
+        scale=0.969271,
+        max_displacement_px=29.385,
+        prior_error_px=3.786,
+        residual_px=1.067,
+        max_rotation_deg=0.5,
+        max_scale_error=0.03,
+        max_residual_px=40.0,
+        pixel_scale=1.0,
+    )
+
+    assert accepted is True
+    assert tier == "strong_evidence"
+    assert failures == ["scala oltre limite"]
+
+
+def test_residual_registration_never_uses_weak_evidence_to_override_limits():
+    accepted, tier, failures = registration._residual_registration_decision(
+        inlier_count=12,
+        inlier_ratio=0.31,
+        rotation_deg=0.1,
+        scale=0.965,
+        max_displacement_px=20.0,
+        prior_error_px=4.0,
+        residual_px=2.2,
+        max_rotation_deg=0.5,
+        max_scale_error=0.03,
+        max_residual_px=40.0,
+        pixel_scale=1.0,
+    )
+
+    assert accepted is False
+    assert tier == "rejected"
+    assert "scala oltre limite" in failures
+
+
+def test_overlap_graph_connects_photos_by_footprint_not_rank_distance():
+    masks = [np.zeros((30, 80), bool) for _ in range(8)]
+    for index in range(7):
+        start = min(index * 8, 48)
+        masks[index][:, start:start + 24] = True
+    masks[7][:, 4:28] = True
+
+    pairs = registration._candidate_overlap_pairs(
+        masks, min_pixels=100, min_ratio=0.10, max_neighbours=2,
+    )
+    pair_ids = {(first, second) for first, second, _, _ in pairs}
+
+    assert (0, 7) in pair_ids
+
+
+def test_overlap_graph_keeps_pairs_that_create_visible_coverage_seams():
+    masks = [np.zeros((30, 90), bool) for _ in range(3)]
+    masks[0][:, :55] = True
+    masks[1][:, 35:80] = True
+    masks[2][:, 70:] = True
+
+    pairs = registration._candidate_overlap_pairs(
+        masks, min_pixels=100, min_ratio=0.10, max_neighbours=0,
+    )
+    pair_ids = {(first, second) for first, second, _, _ in pairs}
+
+    assert (0, 1) in pair_ids
+    assert (1, 2) in pair_ids
+
+
 def test_rejected_registration_is_not_reused_as_pose_filler():
     ranked = [{"key": str(index), "score": 10 - index} for index in range(5)]
 

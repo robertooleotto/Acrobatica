@@ -14,9 +14,11 @@ from scripts.detect_planes_multiscale import (
     build_topology_proposals,
     classify_envelope_roles,
     classify_candidate_support,
+    collapse_narrow_envelope_faces,
     robust_plane,
     section_continuity,
     voxelize,
+    weld_envelope_faces,
 )
 from scripts.detect_planes_multiscale_online import envelope_face_to_plane
 
@@ -47,6 +49,82 @@ def candidate(index, center, normal, support=600, rms=0.005):
 
 
 class MultiscalePlanesTests(unittest.TestCase):
+    def test_narrow_face_is_replaced_by_a_direct_shared_edge(self):
+        height = 10.0
+        raw_faces = [
+            {
+                "id": 0, "family_id": 0, "corners": [
+                    [-1.0, 0.0, 0.0], [0.0, 0.0, 0.0],
+                    [0.0, height, 0.0], [-1.0, height, 0.0],
+                ],
+            },
+            {
+                "id": 1, "family_id": 1, "corners": [
+                    [0.0, 0.0, 0.0], [0.1, 0.0, 0.1],
+                    [0.1, height, 0.1], [0.0, height, 0.0],
+                ],
+            },
+            {
+                "id": 2, "family_id": 2, "corners": [
+                    [0.1, 0.0, 0.1], [0.1, 0.0, 1.0],
+                    [0.1, height, 1.0], [0.1, height, 0.1],
+                ],
+            },
+        ]
+        diagonal = 1.0 / math.sqrt(2.0)
+        families = [
+            {"id": 0, "normal": [0.0, 0.0, 1.0], "d": 0.0},
+            {"id": 1, "normal": [diagonal, 0.0, -diagonal], "d": 0.0},
+            {"id": 2, "normal": [1.0, 0.0, 0.0], "d": -0.1},
+        ]
+        junctions = [
+            {"id": 0, "families": [0, 1], "status": "accepted", "junction_ratio": 1.0},
+            {"id": 1, "families": [1, 2], "status": "accepted", "junction_ratio": 1.0},
+            {"id": 2, "families": [0, 2], "status": "accepted", "junction_ratio": 0.8},
+        ]
+        faces, shared, collapsed = collapse_narrow_envelope_faces(
+            raw_faces, families, junctions, voxel=0.01,
+            scale_m_per_unit=1.0, min_width_m=0.25,
+        )
+        self.assertEqual([face["id"] for face in faces], [0, 2])
+        self.assertEqual(len(shared), 1)
+        self.assertEqual(shared[0]["junction_id"], 2)
+        self.assertEqual(collapsed[0]["face_id"], 1)
+        self.assertEqual(collapsed[0]["neighbor_face_ids"], [0, 2])
+
+    def test_welded_faces_share_the_plane_intersection_edge(self):
+        faces = [
+            {
+                "id": 0, "family_id": 0, "corners": [
+                    [-0.9, 0.0, 0.0], [0.9, 0.0, 0.0],
+                    [0.9, 2.0, 0.0], [-0.9, 2.0, 0.0],
+                ],
+            },
+            {
+                "id": 1, "family_id": 1, "corners": [
+                    [-1.0, 0.0, 0.1], [-1.0, 0.0, 1.0],
+                    [-1.0, 2.0, 1.0], [-1.0, 2.0, 0.1],
+                ],
+            },
+        ]
+        families = [
+            {"id": 0, "normal": [0.0, 0.0, 1.0], "d": 0.0},
+            {"id": 1, "normal": [1.0, 0.0, 0.0], "d": 1.0},
+        ]
+        junctions = [{
+            "id": 0, "families": [0, 1], "status": "accepted",
+            "confidence": "high", "junction_ratio": 1.0,
+        }]
+        welded, shared = weld_envelope_faces(faces, families, junctions, voxel=0.02)
+        self.assertEqual(len(shared), 1)
+        self.assertEqual(shared[0]["faces"], [0, 1])
+        first = np.asarray(welded[0]["corners"])
+        second = np.asarray(welded[1]["corners"])
+        self.assertEqual(int(np.isclose(first[:, 0], -1.0).sum()), 2)
+        self.assertEqual(int(np.isclose(second[:, 2], 0.0).sum()), 2)
+        self.assertEqual(welded[0]["shared_edge_ids"], [0])
+        self.assertEqual(welded[1]["shared_edge_ids"], [0])
+
     def test_online_adapter_preserves_offline_corners_and_metric_dimensions(self):
         face = {
             "family_id": 7,

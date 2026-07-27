@@ -73,12 +73,27 @@ swiftc -O usdz2obj.swift -o usdz2obj
 
 Nel funzionamento continuo usare `oc_worker.py`: dopo Object Capture converte
 automaticamente USDZ in OBJ/MTL/texture, carica tutti gli asset e chiama
-`mesh-ready`. Da quel momento il backend calcola piani e proiezione senza altri
-comandi:
+`mesh-ready`. Lo stesso processo consuma anche la coda di proiezione: Railway
+calcola i piani, mentre foto, registrazione OC, compositing e bake restano sul
+Mac per non saturare la RAM del web service.
+
+```bash
+cd /Users/liscio/Acrobatica/backend
+python3 -m venv worker-venv
+worker-venv/bin/pip install -r photogrammetry/objectcapture/requirements-worker.txt
+
+BACKEND=https://acrobatica-production.up.railway.app \
+worker-venv/bin/python photogrammetry/objectcapture/oc_worker.py \
+  --hpg photogrammetry/objectcapture/hpg \
+  --converter photogrammetry/objectcapture/usdz2obj \
+  --detail raw
+```
+
+Per una macchina dedicata soltanto alla proiezione, senza binari Object Capture:
 
 ```bash
 BACKEND=https://acrobatica-production.up.railway.app \
-python3 oc_worker.py --hpg ./hpg --converter ./usdz2obj --detail full
+worker-venv/bin/python photogrammetry/objectcapture/oc_worker.py --projection-only
 ```
 Tempo atteso: pochi minuti (`.full`) / 10–30 min (`.raw`) su M2-Pro/M4.
 Se compare `[warn] automatic downsampling` → RAM insufficiente, scendi a `.full`

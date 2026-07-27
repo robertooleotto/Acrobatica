@@ -80,7 +80,7 @@ def recompose(output: Path) -> dict[str, object]:
         masks.append(adjusted_mask)
         applied.append(key)
 
-    blend = mosaic(images, masks, reference)
+    blend = mosaic(images, masks, reference, content_aware_seams=True)
     best = best_view(images, masks, reference)
     cv2.imwrite(str(output / "03_registered_mosaic_blend.png"), coverage_rgba(blend, masks))
     cv2.imwrite(str(output / "04_registered_best_view.png"), coverage_rgba(best, masks))

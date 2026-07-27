@@ -198,6 +198,128 @@ def extrude_polygon(
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# 1b) Riconoscimento ed estrusione automatica dei balconi
+# ──────────────────────────────────────────────────────────────────────────
+
+def detect_and_extrude_balconies(
+    cloud_points: np.ndarray,
+    plane: dict,
+    ppm: float,
+    *,
+    min_depth_m: float = 0.15,
+    cell_size_m: float = 0.20,
+    min_points_per_cell: int = 3,
+    min_area_m2: float = 0.30,
+    max_balconies: int = 20,
+) -> dict:
+    """Rileva gli aggetti compatibili con balconi e genera i relativi prismi.
+
+    Il riconoscimento avviene esclusivamente dalla geometria: i punti oltre
+    ``min_depth_m`` dal piano principale vengono raggruppati sul piano (u, v)
+    in componenti connesse. Per ogni componente la profondità è stimata solo
+    sui punti sporgenti, evitando che i campioni del muro retrostante portino
+    la mediana verso zero. Il risultato è quindi un elenco revisionabile di
+    candidati balcone e un modello già estruso con fronte e spallette.
+
+    Non è una classificazione semantica: una cornice molto estesa può restare
+    tra i candidati e deve poter essere esclusa dall'operatore.
+    """
+    if ppm <= 0:
+        raise ValueError(f"ppm non valido: {ppm}")
+    if min_depth_m <= 0:
+        raise ValueError("min_depth_m deve essere > 0")
+    if cell_size_m <= 0:
+        raise ValueError("cell_size_m deve essere > 0")
+    if min_points_per_cell < 1:
+        raise ValueError("min_points_per_cell deve essere >= 1")
+    if min_area_m2 <= 0:
+        raise ValueError("min_area_m2 deve essere > 0")
+    if max_balconies < 1:
+        raise ValueError("max_balconies deve essere >= 1")
+
+    # Import locale: facade_geometry resta utilizzabile anche nei tool che non
+    # caricano i modelli Pydantic usati dal documento di marcatura.
+    from .zone_proposals import proponi_zone
+
+    P = np.asarray(cloud_points, dtype=np.float64).reshape(-1, 3)
+    c, n, up, right, bounds = _plane_basis(plane)
+    proposals = proponi_zone(
+        P,
+        plane,
+        ppm=ppm,
+        soglia_m=min_depth_m,
+        cella_m=cell_size_m,
+        min_punti_cella=min_points_per_cell,
+        min_area_m2=min_area_m2,
+        max_zone=max_balconies,
+        solo_sporgenze=True,
+    )
+
+    if len(P):
+        rel = P - c
+        projected_uv = np.column_stack([rel @ right, rel @ up])
+        depths = rel @ n
+    else:
+        projected_uv = np.empty((0, 2), dtype=np.float64)
+        depths = np.empty(0, dtype=np.float64)
+
+    balconies: list[dict] = []
+    prisms: list[dict] = []
+    for zone in proposals.zone:
+        poly_px = np.asarray(zone.punti_px, dtype=np.float64).reshape(-1, 2)
+        poly_uv = _px_to_uv(poly_px, bounds, ppm)
+        selected = _point_in_polygon(projected_uv, poly_uv) & (depths > min_depth_m)
+        n_selected = int(selected.sum())
+        if n_selected < MIN_PUNTI_PROFONDITA:
+            # La griglia può chiudere una componente molto rada: non generiamo
+            # geometria automatica se non possiamo stimarne la profondità.
+            continue
+
+        depth_m, mad_m, n_inlier, _ = _robust_depth(depths[selected])
+        if depth_m <= min_depth_m or n_inlier < MIN_PUNTI_PROFONDITA:
+            continue
+
+        u_span = float(np.ptp(poly_uv[:, 0]))
+        v_span = float(np.ptp(poly_uv[:, 1]))
+        mad_cm = mad_m * 100.0
+        confidence = (
+            "alta" if n_inlier >= ALTA_MIN_PUNTI and mad_cm < ALTA_MAX_MAD_CM
+            else "media"
+        )
+        identifier = f"balcony-{len(balconies) + 1}"
+        polygon = [[float(x), float(y)] for x, y in poly_px]
+        balcony = {
+            "id": identifier,
+            "nome": f"Balcone {len(balconies) + 1} (auto)",
+            "poly_px": polygon,
+            "depth_m": float(depth_m),
+            "depth_mad_cm": float(mad_cm),
+            "width_m": u_span,
+            "height_m": v_span,
+            "area_m2": float(zone.area_m2),
+            "n_points": int(n_inlier),
+            "confidence": confidence,
+            "needs_review": True,
+        }
+        balconies.append(balcony)
+        prisms.append({
+            "poly_px": polygon,
+            "depth_m": float(depth_m),
+            "tipo": "balcone",
+            "nome": balcony["nome"],
+        })
+
+    built = build_facade_model(plane, prisms, ppm=ppm)
+    return {
+        "detector_version": "geometric_protrusions_v1",
+        "count": len(balconies),
+        "balconies": balconies,
+        "model_json": built["model_json"],
+        "obj_text": built["obj_text"],
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # 2) Sezione orizzontale: profilo di supporto per l'editor
 # ──────────────────────────────────────────────────────────────────────────
 

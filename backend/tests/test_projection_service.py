@@ -160,3 +160,90 @@ def test_public_projection_files_include_stable_checksum(monkeypatch):
 
     assert result["main_obj"]["checksum"] == "abc123"
     assert result["files"][0]["checksum"] == "abc123"
+
+
+def test_projection_job_id_is_preserved_until_a_new_queue(monkeypatch):
+    state = {"id": "session-1", "result": {}}
+    monkeypatch.setattr(
+        projection_service.session_store, "get_session", lambda _sid: state)
+
+    def update(_sid, fields):
+        state.update(fields)
+        return state
+
+    monkeypatch.setattr(projection_service.session_store, "update_session", update)
+
+    projection_service._set_job("session-1", "queued", 0.0, "queued")
+    first = state["result"]["projection_job"]["job_id"]
+    projection_service._set_job("session-1", "running", 0.2, "running")
+    assert state["result"]["projection_job"]["job_id"] == first
+
+    projection_service._set_job("session-1", "queued", 0.0, "queued again")
+    assert state["result"]["projection_job"]["job_id"] != first
+
+
+def test_worker_payload_returns_signed_urls_without_materializing_assets(monkeypatch):
+    session = {
+        "id": "session-1",
+        "result": {
+            "projection_job": {"job_id": "job-1", "state": "running"},
+            "planes": {"path": "out/planes.json"},
+            "mesh": {
+                "clean": {"files": [{"name": "clean.obj", "path": "clean.obj"}]},
+                "raw": {"files": [
+                    {"name": "model.obj", "path": "raw/model.obj"},
+                    {"name": "model.mtl", "path": "raw/model.mtl"},
+                    {"name": "albedo.png", "path": "raw/albedo.png"},
+                    {"name": "oc_poses.json", "path": "raw/oc_poses.json"},
+                ]},
+            },
+        },
+    }
+    monkeypatch.setattr(projection_service, "validate_oc_bundle", lambda _result: {})
+    monkeypatch.setattr(
+        projection_service.session_store, "list_photos",
+        lambda _sid: [{
+            "order_index": 7, "storage_path": "photos/0007.jpg",
+            "metadata": {"image_width": 4032, "image_height": 3024},
+        }],
+    )
+    monkeypatch.setattr(
+        projection_service.storage_service, "signed_url",
+        lambda path, expires_in_sec: f"signed://{path}",
+    )
+
+    payload = projection_service._worker_payload(session)
+
+    assert payload["job_id"] == "job-1"
+    assert payload["mesh"]["url"] == "signed://clean.obj"
+    assert payload["poses"]["url"] == "signed://raw/oc_poses.json"
+    assert payload["planes"]["url"] == "signed://out/planes.json"
+    assert payload["photos"] == [{
+        "order_index": 7,
+        "url": "signed://photos/0007.jpg",
+        "image_width": 4032,
+        "image_height": 3024,
+    }]
+    assert {item["name"] for item in payload["raw_reference"]} == {
+        "model.obj", "model.mtl", "albedo.png",
+    }
+
+
+def test_worker_result_is_rejected_after_job_invalidation(monkeypatch):
+    session = {
+        "id": "session-1",
+        "status": "mapping",
+        "result": {"projection_job": {"job_id": "new-job", "state": "running"}},
+    }
+    monkeypatch.setattr(
+        projection_service.session_store, "get_session", lambda _sid: session)
+
+    try:
+        projection_service.complete_worker_job(
+            "session-1", "old-job", {"main_obj": "planes.obj"},
+            [{"name": "planes.obj", "path": "out/planes.obj", "size": 1}],
+        )
+    except projection_service.ProjectionError as exc:
+        assert "obsoleto" in str(exc)
+    else:
+        raise AssertionError("Il risultato del vecchio job doveva essere rifiutato")

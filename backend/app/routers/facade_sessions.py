@@ -24,6 +24,8 @@ from fastapi import APIRouter, BackgroundTasks, Body, File, Form, HTTPException,
 
 from ..models import (
     ARMetadata,
+    BalconyDetectionRequest,
+    BalconyDetectionResult,
     ColumnCompositeModel,
     ColumnCompositeRequest,
     ColumnCompositeResult,
@@ -58,6 +60,9 @@ from ..models import (
     PlanesSaveResult,
     ProjectionJobResult,
     ProjectionScaffoldResult,
+    ProjectionWorkerFailure,
+    ProjectionWorkerJob,
+    ProjectionWorkerProgress,
     ProcessRequest,
     ProcessResult,
     RectifyPanoramaRequest,
@@ -120,6 +125,16 @@ def next_oc_job():
         for p in photos
     ]
     return OcJobResponse(session_id=row["id"], photos=job_photos)
+
+
+@router.get("/next-projection-job", response_model=ProjectionWorkerJob)
+def next_projection_job():
+    """Il Mac reclama un bake. Railway restituisce URL firmati, non asset."""
+    try:
+        payload = projection_service.claim_next_worker_job()
+    except projection_service.InputsMissing as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return ProjectionWorkerJob(**payload)
 
 
 @router.post("/{session_id}/photos", response_model=UploadPhotoResponse)
@@ -1370,7 +1385,7 @@ def project_session(session_id: str, background_tasks: BackgroundTasks):
         result, should_start = projection_service.start_project(session_id)
     except projection_service.InputsMissing as exc:
         raise HTTPException(409, str(exc)) from exc
-    if should_start:
+    if should_start and not projection_service.uses_mac_worker():
         background_tasks.add_task(projection_service.run_project_job, session_id)
     return ProjectionJobResult(session_id=session_id, **result)
 
@@ -1381,6 +1396,77 @@ def projection_status(session_id: str):
     result = projection_service.project_status(session_id)
     if result is None:
         raise HTTPException(404, "Sessione non trovata")
+    return ProjectionJobResult(session_id=session_id, **result)
+
+
+@router.post("/{session_id}/projection-worker-progress")
+def projection_worker_progress(
+    session_id: str, payload: ProjectionWorkerProgress,
+):
+    try:
+        projection_service.update_worker_progress(
+            session_id, payload.job_id, payload.progress, payload.message)
+    except projection_service.InputsMissing as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except projection_service.ProjectionError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"ok": True}
+
+
+@router.post("/{session_id}/projection-worker-fail")
+def projection_worker_fail(session_id: str, payload: ProjectionWorkerFailure):
+    projection_service.fail_worker_job(session_id, payload.job_id, payload.reason)
+    return {"ok": True}
+
+
+@router.put("/{session_id}/projection-worker-result", response_model=ProjectionJobResult)
+async def projection_worker_result(
+    session_id: str,
+    job_id: str = Form(...),
+    manifest: str = Form(...),
+    files: list[UploadFile] = File(...),
+):
+    """Riceve solo gli output gia' calcolati dal Mac e li pubblica atomicamente."""
+    try:
+        document = json.loads(manifest)
+    except ValueError as exc:
+        raise HTTPException(400, f"Manifesto proiezione non valido: {exc}") from exc
+    try:
+        projection_service.update_worker_progress(
+            session_id, job_id, 0.96, "Carico il risultato dal Mac")
+    except projection_service.InputsMissing as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except projection_service.ProjectionError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+    records = []
+    allowed = {".obj", ".mtl", ".png", ".txt", ".json"}
+    for upload in files:
+        name = Path(upload.filename or "").name
+        suffix = Path(name).suffix.lower()
+        if not name or suffix not in allowed:
+            raise HTTPException(400, f"File risultato non ammesso: {name}")
+        data = await upload.read()
+        remote = storage_service.out_path(
+            session_id, f"projection/jobs/{job_id}/{name}")
+        content_type = {
+            ".obj": "model/obj", ".mtl": "model/mtl", ".png": "image/png",
+            ".txt": "text/plain", ".json": "application/json",
+        }[suffix]
+        storage_service.upload_bytes(remote, data, content_type)
+        records.append({
+            "name": name,
+            "path": remote,
+            "size": len(data),
+            "checksum": hashlib.sha256(data).hexdigest(),
+        })
+    try:
+        result = projection_service.complete_worker_job(
+            session_id, job_id, document, records)
+    except projection_service.InputsMissing as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except projection_service.ProjectionError as exc:
+        raise HTTPException(409, str(exc)) from exc
     return ProjectionJobResult(session_id=session_id, **result)
 
 
@@ -1587,7 +1673,7 @@ def _automatic_planes_payload(detected: DetectPlanesResult) -> dict:
 
 
 def _run_automatic_mesh_pipeline(session_id: str) -> None:
-    """Mesh OC -> piani -> bake texture, senza interventi intermedi."""
+    """Mesh OC -> piani -> coda bake Mac, senza interventi intermedi."""
     try:
         projection_service._set_job(
             session_id, "running", 0.02, "Riconosco i piani della facciata",
@@ -1602,7 +1688,7 @@ def _run_automatic_mesh_pipeline(session_id: str) -> None:
             f"Piani riconosciuti: {detected.count}. Preparo la texture",
         )
         save_planes(session_id, _automatic_planes_payload(detected))
-        projection_service.project(session_id)
+        projection_service.start_project(session_id)
     except Exception as exc:
         detail = getattr(exc, "detail", None) or str(exc)
         projection_service._set_job(
@@ -1679,6 +1765,91 @@ def _main_plane(sess: dict) -> dict:
     return planes[0]
 
 
+def _load_obj_triangles(raw: bytes) -> tuple[np.ndarray, np.ndarray]:
+    """Parser OBJ minimo per il detector balconi (triangola anche gli n-gon)."""
+    vertices: list[list[float]] = []
+    faces: list[list[int]] = []
+    for line in raw.decode("utf-8", errors="ignore").splitlines():
+        if line.startswith("v "):
+            values = line.split()
+            if len(values) >= 4:
+                vertices.append([float(values[1]), float(values[2]), float(values[3])])
+        elif line.startswith("f "):
+            polygon: list[int] = []
+            for token in line.split()[1:]:
+                raw_index = int(token.split("/", 1)[0])
+                polygon.append(raw_index - 1 if raw_index > 0 else len(vertices) + raw_index)
+            for index in range(1, len(polygon) - 1):
+                faces.append([polygon[0], polygon[index], polygon[index + 1]])
+    if not vertices or not faces:
+        raise ValueError("OBJ senza vertici o facce triangolabili")
+    return np.asarray(vertices, dtype=np.float64), np.asarray(faces, dtype=np.int64)
+
+
+def _load_balcony_mesh_and_plane(session_id: str, sess: dict):
+    """Carica mesh e facciata nello stesso frame metrico da planes.json."""
+    result = sess.get("result") or {}
+    mesh_path, _mesh_kind = _mesh_obj_for_detection(result)
+    if not mesh_path:
+        raise HTTPException(409, "Mesh OBJ non disponibile")
+    try:
+        vertices, faces = _load_obj_triangles(storage_service.download_bytes(mesh_path))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(409, f"Mesh OBJ non leggibile: {exc}") from exc
+
+    planes_info = result.get("planes") or {}
+    if not planes_info.get("path"):
+        raise HTTPException(
+            409, "Piani mesh non disponibili: esegui prima detect-planes con persist=true")
+    try:
+        document = json.loads(storage_service.download_bytes(planes_info["path"]))
+    except Exception as exc:
+        raise HTTPException(409, f"planes.json non leggibile: {exc}") from exc
+    facade_candidates = [
+        plane for plane in document.get("planes", [])
+        if plane.get("tipo") in {"facciata", "facade"}
+        and len(plane.get("corners") or []) >= 3
+    ]
+    if not facade_candidates:
+        raise HTTPException(409, "Nessun piano di facciata valido in planes.json")
+    selected = max(facade_candidates, key=lambda plane: float(plane.get("area_m2", 0)))
+    scale = float(document.get("scale_m_per_mesh_unit") or 1.0)
+    vertices = vertices * scale
+    c = np.asarray(selected.get("punto"), dtype=np.float64) * scale
+    n = np.asarray(selected.get("normale"), dtype=np.float64)
+    n /= np.linalg.norm(n)
+    up = np.asarray(
+        (document.get("piano_base") or {}).get("up") or document.get("up") or [0, 1, 0],
+        dtype=np.float64)
+    up -= n * float(up @ n)
+    up /= np.linalg.norm(up)
+    corners = np.asarray(selected["corners"], dtype=np.float64) * scale
+
+    def make_plane(normal):
+        right = np.cross(up, normal)
+        right /= np.linalg.norm(right)
+        rel = corners - c
+        uu, vv = rel @ right, rel @ up
+        return {
+            "c": c.tolist(), "n": normal.tolist(), "up": up.tolist(),
+            "right": right.tolist(),
+            "bounds": [float(uu.min()), float(uu.max()), float(vv.min()), float(vv.max())],
+        }
+
+    plane = make_plane(n)
+    rel = vertices - c
+    right = np.asarray(plane["right"])
+    u_min, u_max, v_min, v_max = plane["bounds"]
+    uu, vv = rel @ right, rel @ up
+    within = (uu >= u_min) & (uu <= u_max) & (vv >= v_min) & (vv <= v_max)
+    # Il grosso dell'edificio deve stare dietro il piano; davanti è l'esterno.
+    if np.any(within) and float(np.median(rel[within] @ n)) > 0:
+        plane = make_plane(-n)
+    return vertices, faces, plane
+
+
 @router.post("/{session_id}/extrude", response_model=ExtrudePolygonResult)
 def extrude_polygon_endpoint(session_id: str, req: ExtrudePolygonRequest):
     """Profondità robusta della regione racchiusa dal poligono disegnato.
@@ -1699,6 +1870,72 @@ def extrude_polygon_endpoint(session_id: str, req: ExtrudePolygonRequest):
     except ValueError as e:
         raise HTTPException(400, str(e))
     return ExtrudePolygonResult(**out)
+
+
+@router.post("/{session_id}/detect-balconies", response_model=BalconyDetectionResult)
+def detect_balconies_endpoint(session_id: str, req: BalconyDetectionRequest):
+    """Riconosce gli aggetti della facciata ed estrude i candidati balcone.
+
+    La risposta contiene poligoni/profondità revisionabili e il modello a
+    prismi. Gli artefatti JSON e OBJ vengono inoltre salvati nello storage.
+    """
+    from ..services.balcony_mesh_geometry import detect_balconies_from_mesh
+
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        raise HTTPException(404, "Sessione non trovata")
+    vertices, faces, plane = _load_balcony_mesh_and_plane(session_id, sess)
+    try:
+        detected = detect_balconies_from_mesh(
+            vertices,
+            faces,
+            plane,
+            ppm=req.ppm,
+            min_projection_m=req.min_depth_m,
+            max_projection_m=req.max_depth_m,
+            min_width_m=req.min_width_m,
+            max_width_m=req.max_width_m,
+            min_slab_area_m2=req.min_slab_area_m2,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    model_json = detected["model_json"]
+    model_url = obj_url = None
+    try:
+        json_remote = storage_service.out_path(session_id, "balcony_model.json")
+        storage_service.upload_bytes(
+            json_remote,
+            json.dumps(model_json, ensure_ascii=False, indent=2).encode("utf-8"),
+            "application/json",
+        )
+        obj_remote = storage_service.out_path(session_id, "balcony_model.obj")
+        storage_service.upload_bytes(
+            obj_remote, detected["obj_text"].encode("utf-8"), "text/plain")
+        model_url = storage_service.signed_url(json_remote, expires_in_sec=3600)
+        obj_url = storage_service.signed_url(obj_remote, expires_in_sec=3600)
+    except Exception:
+        pass
+
+    existing = sess.get("result") or {}
+    existing["balcony_detection"] = {
+        "detector_version": detected["detector_version"],
+        "count": detected["count"],
+        "balconies": detected["balconies"],
+    }
+    session_store.update_session(session_id, {"result": existing})
+
+    return BalconyDetectionResult(
+        session_id=session_id,
+        detector_version=detected["detector_version"],
+        count=detected["count"],
+        balconies=detected["balconies"],
+        n_vertices=model_json["n_vertices"],
+        n_faces=model_json["n_faces"],
+        model_json=model_json,
+        model_url=model_url,
+        obj_url=obj_url,
+    )
 
 
 @router.get("/{session_id}/section", response_model=HorizontalSectionResult)

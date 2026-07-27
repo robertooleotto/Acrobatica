@@ -54,6 +54,8 @@ def detect(mesh: Path, output_json: Path, binary: Path, scale: float) -> dict:
         out=artifacts,
         binary=binary,
         voxel_factor=1.2,
+        scale=scale,
+        min_face_width_m=0.25,
     ))
     candidates = json.loads((artifacts / "candidates.json").read_text())
     corrected = json.loads((artifacts / "candidates.v2.json").read_text())

@@ -18,6 +18,7 @@ import json
 import os
 import shutil
 import tempfile
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -61,7 +62,12 @@ def invalidate_geometry_outputs(result: dict, clear_planes: bool = False) -> dic
     return result
 
 _ACTIVE_JOB_STATES = {"queued", "running"}
-_JOB_STALE_SECONDS = 15 * 60
+_JOB_STALE_SECONDS = int(os.environ.get("ACRO_PROJECTION_STALE_SECONDS", "7200"))
+
+
+def uses_mac_worker() -> bool:
+    """Il bake pesante gira sul Mac salvo override esplicito per sviluppo."""
+    return os.environ.get("ACRO_PROJECTION_EXECUTOR", "mac").lower() != "inline"
 
 
 def _now_iso() -> str:
@@ -363,7 +369,9 @@ def _set_job(session_id: str, state: str, progress: float,
     started_at = previous.get("started_at")
     if state == "queued" or not started_at:
         started_at = now
+    job_id = str(uuid.uuid4()) if state == "queued" else previous.get("job_id")
     result["projection_job"] = {
+        "job_id": job_id,
         "state": state,
         "progress": min(max(float(progress), 0.0), 1.0),
         "message": message,
@@ -372,6 +380,158 @@ def _set_job(session_id: str, state: str, progress: float,
         "updated_at": now,
     }
     session_store.update_session(session_id, {"result": result})
+
+
+def _worker_file(name: str, path: str, size: int | None = None) -> dict:
+    return {
+        "name": Path(name).name,
+        "url": storage_service.signed_url(path, expires_in_sec=12 * 60 * 60),
+        "size_bytes": size,
+    }
+
+
+def _worker_payload(sess: dict) -> dict:
+    """Costruisce input firmati; Railway non materializza gli asset pesanti."""
+    session_id = sess["id"]
+    result = sess.get("result") or {}
+    validate_oc_bundle(result)
+    mesh_path, _ = _projection_mesh(result)
+    poses_path = _file_in(_mesh_entry(result, "raw"), "oc_poses.json")
+    planes_path = (result.get("planes") or {}).get("path")
+    if not mesh_path or not poses_path or not planes_path:
+        raise InputsMissing("Input del worker Mac incompleti")
+
+    raw_entry = _mesh_entry(result, "raw")
+    raw_files = []
+    allowed = {".obj", ".mtl", ".png", ".jpg", ".jpeg"}
+    for item in raw_entry.get("files", []):
+        if not isinstance(item, dict):
+            continue
+        name = Path(item.get("name", "")).name
+        path = item.get("path")
+        if path and Path(name).suffix.lower() in allowed:
+            raw_files.append(_worker_file(name, path, item.get("size")))
+
+    photos = []
+    for photo in session_store.list_photos(session_id):
+        metadata = photo.get("metadata") or {}
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except ValueError:
+                metadata = {}
+        photos.append({
+            "order_index": int(photo["order_index"]),
+            "url": storage_service.signed_url(
+                photo["storage_path"], expires_in_sec=12 * 60 * 60),
+            "image_width": metadata.get("image_width"),
+            "image_height": metadata.get("image_height"),
+        })
+
+    job = (result.get("projection_job") or {})
+    return {
+        "session_id": session_id,
+        "job_id": job.get("job_id"),
+        "mesh": _worker_file("mesh.obj", mesh_path),
+        "poses": _worker_file("oc_poses.json", poses_path),
+        "planes": _worker_file("planes.json", planes_path),
+        "raw_reference": raw_files,
+        "photos": photos,
+        "config": {
+            "texel_mm": float(os.environ.get("ACRO_PROJECTION_TEXEL_MM", "20")),
+            "target_long_edge_px": int(os.environ.get(
+                "ACRO_PROJECTION_TARGET_LONG_EDGE_PX", "4096")),
+            "max_photos": int(os.environ.get("ACRO_PROJECTION_REGISTER_PHOTOS", "20")),
+            "registration_ceiling": int(os.environ.get(
+                "ACRO_PROJECTION_MAX_REGISTER_PHOTOS", "80")),
+            "coverage_photos": int(os.environ.get(
+                "ACRO_PROJECTION_COVERAGE_PHOTOS", "100")),
+            "oc_reference_bake": os.environ.get(
+                "ACRO_OC_REFERENCE_BAKE", "1") not in {"0", "false", "False"},
+            "default_scale": float(os.environ.get("ACRO_OC_SCALE", "6.0927")),
+        },
+    }
+
+
+def claim_next_worker_job() -> dict:
+    """Reclama il prossimo bake remoto e restituisce i soli URL firmati."""
+    sess = session_store.next_queued_projection_job()
+    if sess is None:
+        return {}
+    session_id = sess["id"]
+    _set_job(session_id, "running", 0.02, "Worker Mac: preparo gli input")
+    current = sess.get("status") or ""
+    if current in {session_state.PLANES_READY, session_state.COMPLETED}:
+        try:
+            session_store.update_status(session_id, session_state.MAPPING)
+        except ValueError:
+            pass
+    latest = session_store.get_session(session_id) or sess
+    try:
+        return _worker_payload(latest)
+    except Exception as exc:
+        _set_job(session_id, "failed", 1.0, "Input worker Mac non validi", str(exc)[:500])
+        raise
+
+
+def update_worker_progress(
+    session_id: str, job_id: str, progress: float, message: str,
+) -> None:
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        raise InputsMissing("Sessione non trovata")
+    current = ((sess.get("result") or {}).get("projection_job") or {})
+    if current.get("job_id") != job_id or current.get("state") != "running":
+        raise ProjectionError("Job di proiezione non piu' corrente")
+    _set_job(session_id, "running", progress, message)
+
+
+def complete_worker_job(
+    session_id: str, job_id: str, manifest: dict, files: list[dict],
+) -> dict:
+    """Pubblica atomicamente il manifesto solo se mesh/piani non sono cambiati."""
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        raise InputsMissing("Sessione non trovata")
+    result = sess.get("result") or {}
+    current = result.get("projection_job") or {}
+    if current.get("job_id") != job_id or current.get("state") != "running":
+        raise ProjectionError("Risultato obsoleto: mesh o piani sono stati modificati")
+    names = {item.get("name") for item in files}
+    main_obj = Path(str(manifest.get("main_obj") or "")).name
+    if not main_obj or main_obj not in names:
+        raise ProjectionError("Bundle del worker privo dell'OBJ principale")
+    projection = {
+        "main_obj": main_obj,
+        "files": files,
+        "planes": manifest.get("planes") or [],
+        "total_area_m2": float(manifest.get("total_area_m2", 0.0)),
+        "coverage": float(manifest.get("coverage", 0.0)),
+        "photo_count": int(manifest.get("photo_count", 0)),
+        "scale_m_per_mesh_unit": float(manifest.get("scale_m_per_mesh_unit", 1.0)),
+        "projection_mode": manifest.get("projection_mode", "pose_only"),
+        "texture_encoding": manifest.get("texture_encoding", "sRGB"),
+        "fallback_reason": manifest.get("fallback_reason", ""),
+    }
+    result["projection"] = projection
+    result.pop("metric_openings", None)
+    result.pop("opening_detection_job", None)
+    session_store.update_session(session_id, {"result": result})
+    try:
+        session_store.update_status(session_id, session_state.COMPLETED)
+    except Exception:
+        pass
+    _set_job(session_id, "complete", 1.0, "Texture pronta")
+    return _public_result(session_store.get_session(session_id) or sess)
+
+
+def fail_worker_job(session_id: str, job_id: str, error: str) -> None:
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        return
+    current = ((sess.get("result") or {}).get("projection_job") or {})
+    if current.get("job_id") == job_id:
+        _set_job(session_id, "failed", 1.0, "Proiezione non riuscita", error[:500])
 
 
 def _public_result(sess: dict) -> dict:

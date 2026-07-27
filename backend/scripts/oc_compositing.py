@@ -9,6 +9,9 @@ def mosaic(
     images: list[np.ndarray],
     masks: list[np.ndarray],
     fallback: np.ndarray,
+    *,
+    content_aware_seams: bool = False,
+    content_aware_photo_count: int | None = None,
 ) -> np.ndarray:
     if not images:
         return np.zeros_like(fallback)
@@ -16,6 +19,16 @@ def mosaic(
     output = np.zeros_like(fallback, dtype=np.float32)
     covered = np.zeros(fallback.shape[:2], bool)
     remaining = list(range(len(images)))
+    seam_finder = (
+        cv2.detail_GraphCutSeamFinder("COST_COLOR_GRAD", 10_000, 1_000)
+        if content_aware_seams else None
+    )
+    height, width = fallback.shape[:2]
+    seam_scale = min(1.0, 385.0 / max(width, height))
+    seam_size = (
+        max(1, int(round(width * seam_scale))),
+        max(1, int(round(height * seam_scale))),
+    )
     while remaining:
         contributions = [int((masks[index] & ~covered).sum()) for index in remaining]
         if not covered.any():
@@ -43,6 +56,71 @@ def mosaic(
                 output[overlap] - image[overlap], axis=0,
             )
             image = np.clip(image + np.clip(color_delta, -18.0, 18.0), 0, 255)
+
+        seam_allowed = (
+            content_aware_photo_count is None
+            or selected < content_aware_photo_count
+        )
+        if seam_finder is not None and seam_allowed and int(overlap.sum()) >= 1_000:
+            previous = output.copy()
+            seam_images = [
+                cv2.UMat(cv2.resize(
+                    output, seam_size, interpolation=cv2.INTER_AREA,
+                )),
+                cv2.UMat(cv2.resize(
+                    image, seam_size, interpolation=cv2.INTER_AREA,
+                )),
+            ]
+            seam_masks = [
+                cv2.UMat(cv2.resize(
+                    covered.astype(np.uint8), seam_size,
+                    interpolation=cv2.INTER_NEAREST,
+                ) * 255),
+                cv2.UMat(cv2.resize(
+                    mask.astype(np.uint8), seam_size,
+                    interpolation=cv2.INTER_NEAREST,
+                ) * 255),
+            ]
+            seam_finder.find(
+                seam_images, [(0, 0), (0, 0)], seam_masks,
+            )
+            keep_previous = cv2.resize(
+                seam_masks[0].get(), (width, height),
+                interpolation=cv2.INTER_NEAREST,
+            ) > 0
+            keep_source = cv2.resize(
+                seam_masks[1].get(), (width, height),
+                interpolation=cv2.INTER_NEAREST,
+            ) > 0
+            source_region = keep_source | new_pixels
+            output[source_region] = image[source_region]
+
+            # Feather only four pixels around the content-aware partition. The
+            # source remains sharp everywhere else, including window frames.
+            distance_to_source = cv2.distanceTransform(
+                (~source_region).astype(np.uint8), cv2.DIST_L2, 3,
+            )
+            distance_to_previous = cv2.distanceTransform(
+                (~keep_previous).astype(np.uint8), cv2.DIST_L2, 3,
+            )
+            transition = (
+                overlap
+                & (distance_to_source <= 4.0)
+                & (distance_to_previous <= 4.0)
+            )
+            denominator = (
+                distance_to_source[transition]
+                + distance_to_previous[transition]
+            )
+            alpha = distance_to_previous[transition] / np.maximum(
+                denominator, 1e-6,
+            )
+            output[transition] = (
+                previous[transition] * (1.0 - alpha[:, None])
+                + image[transition] * alpha[:, None]
+            )
+            covered |= mask
+            continue
 
         # Keep one source per region. Blend only a narrow strip where a new
         # coverage patch meets the existing mosaic.

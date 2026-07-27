@@ -57,6 +57,25 @@ def photo_path(photo_dir, k):
     return None
 
 
+def sample_image_bilinear(img, u, v, chunk_size=30_000):
+    """Sample arbitrary pixel coordinates without exceeding cv2.remap limits."""
+    samples = []
+    for start in range(0, len(u), chunk_size):
+        stop = min(start + chunk_size, len(u))
+        uu = u[start:stop].astype(np.float32).reshape(1, -1)
+        vv = v[start:stop].astype(np.float32).reshape(1, -1)
+        samples.append(
+            cv2.remap(
+                img,
+                uu,
+                vv,
+                cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_REFLECT,
+            )[0]
+        )
+    return np.concatenate(samples, axis=0) if samples else np.empty((0, 3), img.dtype)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--mesh", required=True, help="OBJ della mesh OC (frame OC)")
@@ -124,9 +143,7 @@ def main():
         if not upd.any():
             continue
         sel = idx[upd]
-        uu = u[sel].astype(np.float32).reshape(1, -1)
-        vv = v[sel].astype(np.float32).reshape(1, -1)
-        samp = cv2.remap(img, uu, vv, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)[0]
+        samp = sample_image_bilinear(img, u[sel], v[sel])
         col[sel] = samp[:, ::-1].astype(np.float32) / 255.0
         best[sel] = score[upd]
         src[sel] = int(k)

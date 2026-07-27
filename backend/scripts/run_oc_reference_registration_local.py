@@ -331,6 +331,63 @@ def _normalized_gray(image: np.ndarray) -> np.ndarray:
     return cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
 
 
+def _residual_registration_decision(
+    *,
+    inlier_count: int,
+    inlier_ratio: float,
+    rotation_deg: float,
+    scale: float,
+    max_displacement_px: float,
+    prior_error_px: float,
+    residual_px: float,
+    max_rotation_deg: float,
+    max_scale_error: float,
+    max_residual_px: float,
+    pixel_scale: float,
+) -> tuple[bool, str, list[str]]:
+    """Classify a residual transform using evidence, not one brittle cutoff.
+
+    The configured limits remain the normal acceptance envelope.  A transform
+    that only narrowly exceeds that envelope can still be used when many
+    geometrically distributed matches agree and RANSAC reduces the pose error
+    substantially.  Weak visual evidence can never override a geometric limit.
+    """
+    evidence_failures: list[str] = []
+    if inlier_count < 10 or inlier_ratio < 0.25:
+        evidence_failures.append("pochi inlier")
+    if residual_px > 2.5 * pixel_scale:
+        evidence_failures.append("residuo elevato")
+
+    geometry_failures: list[str] = []
+    if abs(rotation_deg) > max_rotation_deg:
+        geometry_failures.append("rotazione oltre limite")
+    if abs(scale - 1.0) > max_scale_error:
+        geometry_failures.append("scala oltre limite")
+    if max_displacement_px > max_residual_px:
+        geometry_failures.append("spostamento residuo oltre limite")
+
+    failures = [*evidence_failures, *geometry_failures]
+    if not failures:
+        return True, "strict", []
+
+    improvement_ratio = prior_error_px / max(residual_px, 1e-6)
+    strong_evidence = bool(
+        not evidence_failures
+        and inlier_count >= 20
+        and inlier_ratio >= 0.45
+        and residual_px <= 1.5 * pixel_scale
+        and improvement_ratio >= 2.0
+    )
+    bounded_override = bool(
+        abs(rotation_deg) <= max(max_rotation_deg * 1.5, max_rotation_deg + 0.15)
+        and abs(scale - 1.0) <= max(max_scale_error * 1.5, 0.045)
+        and max_displacement_px <= max_residual_px * 1.25
+    )
+    if strong_evidence and bounded_override:
+        return True, "strong_evidence", failures
+    return False, "rejected", failures
+
+
 def register_residual(
     reference: np.ndarray,
     reference_mask: np.ndarray,
@@ -417,18 +474,21 @@ def register_residual(
         "median_residual_px": round(residual, 3),
         "matrix": matrix.tolist(),
     })
-    failures = []
-    if count < 10 or ratio < 0.25:
-        failures.append("pochi inlier")
-    if abs(rotation) > max_rotation_deg:
-        failures.append("rotazione oltre limite")
-    if abs(scale - 1.0) > max_scale_error:
-        failures.append("scala oltre limite")
-    if max_displacement > max_residual_px:
-        failures.append("spostamento residuo oltre limite")
-    if residual > 2.5 * pixel_scale:
-        failures.append("residuo elevato")
-    if failures:
+    accepted, tier, failures = _residual_registration_decision(
+        inlier_count=count,
+        inlier_ratio=ratio,
+        rotation_deg=rotation,
+        scale=scale,
+        max_displacement_px=max_displacement,
+        prior_error_px=prior_error,
+        residual_px=residual,
+        max_rotation_deg=max_rotation_deg,
+        max_scale_error=max_scale_error,
+        max_residual_px=max_residual_px,
+        pixel_scale=pixel_scale,
+    )
+    result["acceptance_tier"] = tier
+    if not accepted:
         result["reason"] = ", ".join(failures)
         return source, source_mask, result
 
@@ -438,7 +498,10 @@ def register_residual(
     aligned_mask = cv2.warpAffine(source_mask.astype(np.uint8), matrix, size,
                                   flags=cv2.INTER_NEAREST) > 0
     result["accepted"] = True
-    result["reason"] = "ok"
+    result["reason"] = (
+        "ok" if tier == "strict"
+        else f"ok (evidenza forte: {', '.join(failures)})"
+    )
     return aligned, aligned_mask, result
 
 
@@ -514,6 +577,89 @@ def _connected_components(count: int, constraints: list[dict[str, object]]) -> l
     return components
 
 
+def _candidate_overlap_pairs(
+    masks: list[np.ndarray],
+    *,
+    min_pixels: int = 5_000,
+    min_ratio: float = 0.04,
+    max_neighbours: int = 8,
+) -> list[tuple[int, int, int, float]]:
+    """Build an order-independent sparse graph from actual photo footprints."""
+    count = len(masks)
+    if count < 2:
+        return []
+    areas = [max(1, int(mask.sum())) for mask in masks]
+    bounds: list[tuple[int, int, int, int] | None] = []
+    for mask in masks:
+        rows, cols = np.nonzero(mask)
+        bounds.append(
+            None if not len(rows)
+            else (int(cols.min()), int(rows.min()), int(cols.max()), int(rows.max()))
+        )
+
+    candidates: list[list[tuple[float, int, int]]] = [[] for _ in masks]
+    pair_metrics: dict[tuple[int, int], tuple[int, float]] = {}
+    for first in range(count):
+        box_a = bounds[first]
+        if box_a is None:
+            continue
+        for second in range(first + 1, count):
+            box_b = bounds[second]
+            if box_b is None:
+                continue
+            if (box_a[2] < box_b[0] or box_b[2] < box_a[0]
+                    or box_a[3] < box_b[1] or box_b[3] < box_a[1]):
+                continue
+            overlap_pixels = int((masks[first] & masks[second]).sum())
+            overlap_ratio = overlap_pixels / min(areas[first], areas[second])
+            if overlap_pixels < min_pixels or overlap_ratio < min_ratio:
+                continue
+            pair_metrics[(first, second)] = (overlap_pixels, overlap_ratio)
+            candidates[first].append((overlap_ratio, overlap_pixels, second))
+            candidates[second].append((overlap_ratio, overlap_pixels, first))
+
+    selected: set[tuple[int, int]] = set()
+    for first, neighbours in enumerate(candidates):
+        for _, _, second in sorted(neighbours, reverse=True)[:max_neighbours]:
+            selected.add((min(first, second), max(first, second)))
+
+    # Also preserve the graph edges that the compositor will actually expose.
+    # A pair can have many near-duplicate overlaps and fall outside both local
+    # top-N lists even though their footprint boundary becomes a visible seam.
+    # Replaying the deterministic coverage expansion links each new patch to
+    # the three existing patches with which it shares the strongest boundary.
+    remaining = list(range(count))
+    covered = np.zeros_like(masks[0], dtype=bool)
+    composited: list[int] = []
+    while remaining:
+        contributions = [int((masks[index] & ~covered).sum()) for index in remaining]
+        if not covered.any():
+            selected_at = 0
+        else:
+            scores = [
+                contribution / (1.0 + index * 0.08)
+                for contribution, index in zip(contributions, remaining)
+            ]
+            selected_at = int(np.argmax(scores))
+        if contributions[selected_at] == 0:
+            break
+        current = remaining.pop(selected_at)
+        seam_neighbours = []
+        for previous in composited:
+            pair = (min(current, previous), max(current, previous))
+            if pair in pair_metrics:
+                pixels, ratio = pair_metrics[pair]
+                seam_neighbours.append((pixels, ratio, pair))
+        for _, _, pair in sorted(seam_neighbours, reverse=True)[:3]:
+            selected.add(pair)
+        covered |= masks[current]
+        composited.append(current)
+    return [
+        (first, second, pair_metrics[(first, second)][0], pair_metrics[(first, second)][1])
+        for first, second in sorted(selected)
+    ]
+
+
 def global_align_photos(
     images: list[np.ndarray],
     masks: list[np.ndarray],
@@ -564,21 +710,9 @@ def global_align_photos(
     pairs_considered = 0
     pair_diagnostics: list[dict[str, object]] = []
 
-    for first in range(count):
-        for second in range(first + 1, count):
-            # A sparse anchored graph is enough: every photo is tied to the
-            # three strongest anchors and to its three rank neighbours.
-            if first >= 3 and second - first > 3:
-                continue
+    overlap_pairs = _candidate_overlap_pairs(analysis_masks)
+    for first, second, overlap_pixels, overlap_ratio in overlap_pairs:
             overlap = analysis_masks[first] & analysis_masks[second]
-            overlap_pixels = int(overlap.sum())
-            smaller_area = max(1, min(
-                int(analysis_masks[first].sum()),
-                int(analysis_masks[second].sum()),
-            ))
-            overlap_ratio = overlap_pixels / smaller_area
-            if overlap_pixels < 5_000 or overlap_ratio < 0.04:
-                continue
             pairs_considered += 1
             feature_a, feature_b = features[first], features[second]
             if feature_a.descriptors is None or feature_b.descriptors is None:
@@ -793,6 +927,52 @@ def _photo_path(directory: Path, key: str) -> Path | None:
     return None
 
 
+def load_plane_document(path: Path) -> dict[str, object]:
+    """Load reviewed planes or the consolidated multiscale topology envelope."""
+    document = json.loads(path.read_text())
+    planes = document.get("planes")
+    if isinstance(planes, list):
+        return document
+
+    envelope_faces = document.get("envelope_faces")
+    if not isinstance(envelope_faces, list):
+        raise ValueError(
+            f"{path} non contiene ne planes ne envelope_faces"
+        )
+
+    role_names = {
+        "main": "Facciata principale",
+        "return": "Spalletta",
+    }
+    normalized = []
+    for face in envelope_faces:
+        corners = face.get("corners")
+        normal = face.get("normal")
+        if not isinstance(corners, list) or len(corners) < 3 or not isinstance(normal, list):
+            continue
+        plane_id = int(face.get("id", len(normalized)))
+        envelope_role = str(face.get("envelope_role", "plane"))
+        center = np.asarray(corners, dtype=np.float64).mean(axis=0).tolist()
+        normalized.append({
+            "id": plane_id,
+            "nome": f"{role_names.get(envelope_role, 'Piano')} {plane_id + 1}",
+            "tipo": "facciata" if envelope_role == "main" else "spalletta",
+            "normale": normal,
+            "punto": center,
+            "corners": corners,
+            "triangoli": [],
+            "source_candidate_ids": face.get("source_candidate_ids", []),
+            "topology_family_id": face.get("family_id"),
+        })
+    if not normalized:
+        raise ValueError(f"Nessun envelope_face valido in {path}")
+    return {
+        "schema": "facade_planes.from_multiscale_topology.v1",
+        "source_schema": document.get("schema"),
+        "planes": normalized,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mesh", type=Path, required=True)
@@ -803,6 +983,7 @@ def main() -> None:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--plane-id", type=int, default=4)
     parser.add_argument("--texel-mm", type=float, default=20.0)
+    parser.add_argument("--target-height-px", type=int, default=0)
     parser.add_argument("--scale", type=float, default=6.0927)
     parser.add_argument("--depth-m", type=float, default=2.0)
     parser.add_argument("--max-photos", type=int, default=20)
@@ -815,7 +996,7 @@ def main() -> None:
     args.out.mkdir(parents=True, exist_ok=True)
     poses = json.loads(args.poses.read_text())
     cams = ob.load_cameras(poses)
-    doc = json.loads(args.planes.read_text())
+    doc = load_plane_document(args.planes)
     plane = next((p for p in doc.get("planes", []) if int(p.get("id", -1)) == args.plane_id), None)
     if plane is None:
         raise SystemExit(f"Piano {args.plane_id} non trovato")
@@ -826,6 +1007,17 @@ def main() -> None:
     )
     if pf is None:
         raise SystemExit("Impossibile costruire il frame del piano")
+    resolved_texel_mm = args.texel_mm
+    if args.target_height_px > 0:
+        resolved_texel_mm = pf.height_m / args.target_height_px * 1000.0
+        pf = ob.plane_frame(
+            plane, np.array([0.0, 1.0, 0.0]), vertices, faces,
+            resolved_texel_mm / 1000.0, args.scale,
+        )
+        if pf is None:
+            raise SystemExit("Impossibile applicare l'altezza target al piano")
+    registration_pixel_scale = max(1.0, max(pf.tex_w, pf.tex_h) / 1100.0)
+    scaled_max_residual_px = args.max_residual_px * registration_pixel_scale
     normal = orient_normal(np.asarray(plane["normale"]), pf.corners.mean(0), cams)
     horizontal_flipped = orient_frame_for_front_view(pf, normal)
 
@@ -870,7 +1062,12 @@ def main() -> None:
     else:
         reference_points, reference_descriptors = [], None
 
-    registration_candidates = ranked[:args.max_photos] if can_register else []
+    # Every photo that may contribute coverage must first pass through the same
+    # OC-reference and photo-graph registration.  The old split registered only
+    # ``max_photos`` and then inserted the remaining coverage views from their
+    # raw poses, recreating visible seams exactly at the facade borders.
+    registration_limit = max(args.max_photos, args.coverage_photos)
+    registration_candidates = ranked[:registration_limit] if can_register else []
     for rank, candidate in enumerate(registration_candidates, 1):
         key = str(candidate["key"])
         path = _photo_path(args.photos, key)
@@ -885,7 +1082,7 @@ def main() -> None:
             posed, posed_mask,
             max_rotation_deg=args.max_rotation_deg,
             max_scale_error=args.max_scale_error,
-            max_residual_px=args.max_residual_px,
+            max_residual_px=scaled_max_residual_px,
         )
         item["registration"] = registration
         stem = f"photo_{rank:02d}_{int(key):04d}"
@@ -941,8 +1138,8 @@ def main() -> None:
     coverage_union = np.zeros(reference.shape[:2], bool)
     for mask in compositing_masks:
         coverage_union |= mask
-    coverage_limit = max(args.max_photos, args.coverage_photos)
-    filler_start = args.max_photos if accepted_images else 0
+    coverage_limit = registration_limit
+    filler_start = registration_limit if accepted_images else 0
     for rank, candidate in enumerate(
         ranked[filler_start:coverage_limit], filler_start + 1,
     ):
@@ -994,7 +1191,10 @@ def main() -> None:
             existing.update(item)
         coverage_union |= posed_mask
 
-    registered_mosaic = mosaic(accepted_images, compositing_masks, reference)
+    registered_mosaic = mosaic(
+        accepted_images, compositing_masks, reference,
+        content_aware_seams=True,
+    )
     registered_best_view = best_view(accepted_images, compositing_masks, reference)
     cv2.imwrite(str(args.out / "03_registered_mosaic_blend.png"),
                 coverage_rgba(registered_mosaic, compositing_masks))
@@ -1029,10 +1229,13 @@ def main() -> None:
         "plane_name": plane.get("nome", ""),
         "size_px": [pf.tex_w, pf.tex_h],
         "size_m": [round(pf.width_m, 3), round(pf.height_m, 3)],
-        "texel_mm": args.texel_mm,
+        "texel_mm": round(resolved_texel_mm, 6),
+        "target_height_px": args.target_height_px or None,
         "horizontal_flipped_for_front_view": horizontal_flipped,
         "registration_limits": {
-            "max_residual_px": args.max_residual_px,
+            "max_residual_px": round(scaled_max_residual_px, 3),
+            "base_max_residual_px": args.max_residual_px,
+            "pixel_scale": round(registration_pixel_scale, 4),
             "max_rotation_deg": args.max_rotation_deg,
             "max_scale_error": args.max_scale_error,
         },

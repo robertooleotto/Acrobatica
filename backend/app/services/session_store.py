@@ -60,6 +60,29 @@ def claim_next_oc_job() -> Optional[dict]:
     return update_status(sess["id"], session_state.COMPUTING_OC)
 
 
+def next_queued_projection_job() -> Optional[dict]:
+    """Trova il job di proiezione piu' vecchio in attesa del worker Mac.
+
+    Come la coda Object Capture, questa installazione usa un solo worker. Il
+    passaggio a ``running`` viene scritto immediatamente dal chiamante prima di
+    restituire gli URL firmati.
+    """
+    client = get_supabase()
+    res = (
+        client.table(SESSIONS)
+        .select("*")
+        .contains("result", {"projection_job": {"state": "queued"}})
+        .order("updated_at")
+        .limit(1)
+        .execute()
+    )
+    for sess in res.data or []:
+        job = ((sess.get("result") or {}).get("projection_job") or {})
+        if job.get("state") == "queued" and job.get("job_id"):
+            return sess
+    return None
+
+
 def upsert_photo(session_id: str, order_index: int, storage_path: str, metadata: dict) -> dict:
     client = get_supabase()
     res = client.table(PHOTOS).upsert(

@@ -347,6 +347,49 @@ class ExtrudePolygonResult(BaseModel):
     needs_user_depth: bool
 
 
+class BalconyDetectionRequest(BaseModel):
+    """Parametri del riconoscimento mesh-aware soletta + parapetto."""
+    ppm: float = Field(default=110.0, gt=0)
+    min_depth_m: float = Field(default=0.45, gt=0)
+    max_depth_m: float = Field(default=1.80, gt=0)
+    min_width_m: float = Field(default=0.80, gt=0)
+    max_width_m: float = Field(default=6.00, gt=0)
+    min_slab_area_m2: float = Field(default=0.08, gt=0)
+
+
+class BalconyCandidate(BaseModel):
+    """Aggetto riconosciuto geometricamente e pronto per la revisione."""
+    id: str
+    nome: str
+    poly_px: list[list[float]] = Field(..., min_length=3)
+    depth_m: float
+    depth_mad_cm: float
+    width_m: float
+    height_m: float
+    area_m2: float
+    n_points: int
+    confidence: str
+    confidence_score: Optional[float] = None
+    needs_review: bool = True
+    slab_elevation_m: Optional[float] = None
+    projection_depth_m: Optional[float] = None
+    parapet_height_m: Optional[float] = None
+    slab_area_m2: Optional[float] = None
+
+
+class BalconyDetectionResult(BaseModel):
+    """Candidati balcone e modello a prismi prodotto automaticamente."""
+    session_id: str
+    detector_version: str
+    count: int
+    balconies: list[BalconyCandidate] = []
+    n_vertices: int
+    n_faces: int
+    model_json: dict
+    model_url: Optional[str] = None
+    obj_url: Optional[str] = None
+
+
 class SectionBin(BaseModel):
     """Un campione del profilo di sezione orizzontale: w mediano a quota u."""
     u_m: float
@@ -494,6 +537,43 @@ class ProjectionJobResult(ProjectionResult):
     progress: float = 0.0
     message: str = ""
     error: str = ""
+
+
+class ProjectionWorkerFile(BaseModel):
+    """Input remoto firmato che il worker Mac materializza su disco."""
+    name: str
+    url: str
+    size_bytes: Optional[int] = None
+
+
+class ProjectionWorkerPhoto(BaseModel):
+    order_index: int
+    url: str
+    image_width: Optional[int] = None
+    image_height: Optional[int] = None
+
+
+class ProjectionWorkerJob(BaseModel):
+    """Job completo assegnato al Mac. `session_id=None` indica coda vuota."""
+    session_id: Optional[str] = None
+    job_id: Optional[str] = None
+    mesh: Optional[ProjectionWorkerFile] = None
+    poses: Optional[ProjectionWorkerFile] = None
+    planes: Optional[ProjectionWorkerFile] = None
+    raw_reference: list[ProjectionWorkerFile] = []
+    photos: list[ProjectionWorkerPhoto] = []
+    config: dict = {}
+
+
+class ProjectionWorkerProgress(BaseModel):
+    job_id: str
+    progress: float = Field(..., ge=0.0, le=1.0)
+    message: str
+
+
+class ProjectionWorkerFailure(BaseModel):
+    job_id: str
+    reason: str = ""
 
 
 class MetricOpening(BaseModel):
