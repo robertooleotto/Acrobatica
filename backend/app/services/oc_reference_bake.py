@@ -942,6 +942,7 @@ def bake_planes(
     crop: float = 0.9,
     scale_m_per_mesh_unit: float = 1.0,
     target_long_edge_px: int = 0,
+    target_height_px: int = 0,
     photo_resolver=None,
     progress=None,
     log=print,
@@ -964,7 +965,7 @@ def bake_planes(
     planes = planes_doc.get("planes", [])
     texel_m = ob.resolve_texel_m(
         planes, up_world, vertices, faces, texel_mm / 1000.0,
-        scale_m_per_mesh_unit, target_long_edge_px,
+        scale_m_per_mesh_unit, target_long_edge_px, target_height_px,
     )
     texel_mm = texel_m * 1000.0
     frames: list[tuple[int, str, str, ob.PlaneFrame]] = []

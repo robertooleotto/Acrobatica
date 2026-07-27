@@ -99,6 +99,14 @@ Tempo atteso: pochi minuti (`.full`) / 10–30 min (`.raw`) su M2-Pro/M4.
 Se compare `[warn] automatic downsampling` → RAM insufficiente, scendi a `.full`
 o prendi una macchina con più RAM.
 
+Il runner corrente produce nella stessa sessione anche `model_projection.usdz`
+con dettaglio `.medium`. Questo riferimento conserva texture e coordinate OC ma
+riduce il costo del bake sui piani. Per i bundle legacy privi del riferimento il
+worker usa Blender una sola volta per creare un proxy da circa 180.000 triangoli
+e lo conserva, insieme alle foto scaricate, in
+`~/Library/Caches/AcrobaticaProjectionWorker`. Il percorso di Blender si può
+forzare con `ACRO_BLENDER`; la cache con `ACRO_PROJECTION_CACHE_DIR`.
+
 ### 5. Riporta il risultato
 ```bash
 # dal tuo Mac locale

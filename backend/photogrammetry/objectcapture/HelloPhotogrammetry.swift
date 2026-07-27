@@ -13,7 +13,7 @@
 //   sampleOrdering    = unordered | sequential                    (default: sequential)
 //   featureSensitivity= normal | high                             (default: high)
 //
-// Output: <output.usdz>  +  <output_dir>/oc_poses.json
+// Output: <output.usdz> + <stem>_projection.usdz + <output_dir>/oc_poses.json
 //   oc_poses.json: { "<sampleIndex>": { rotation_wxyz:[w,x,y,z] (camera→world),
 //                                        translation:[x,y,z] (centro camera C),
 //                                        image:"NNNN.jpg" }, ... }
@@ -40,6 +40,12 @@ struct Runner {
         outputFile.deletingLastPathComponent().appendingPathComponent("oc_poses.json")
     }
 
+    var projectionFile: URL {
+        let stem = outputFile.deletingPathExtension().lastPathComponent
+        return outputFile.deletingLastPathComponent()
+            .appendingPathComponent("\(stem)_projection.usdz")
+    }
+
     func run() async throws {
         var configuration = PhotogrammetrySession.Configuration()
         configuration.sampleOrdering = sampleOrdering
@@ -50,6 +56,7 @@ struct Runner {
         print("== Object Capture (mesh + pose) ==")
         print("  input:   \(inputFolder.path)")
         print("  output:  \(outputFile.path)")
+        print("  proxy:   \(projectionFile.path) (.medium)")
         print("  poses:   \(posesFile.path)")
         print("  detail:  \(detail)  ordering:\(sampleOrdering)  sensitivity:\(featureSensitivity)")
 
@@ -58,6 +65,7 @@ struct Runner {
 
         let requests: [PhotogrammetrySession.Request] = [
             .modelFile(url: outputFile, detail: detail),
+            .modelFile(url: projectionFile, detail: .medium),
             .poses,
         ]
         try session.process(requests: requests)

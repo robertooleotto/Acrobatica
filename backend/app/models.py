@@ -599,6 +599,7 @@ class ProjectionWorkerFile(BaseModel):
     name: str
     url: str
     size_bytes: Optional[int] = None
+    sha256: Optional[str] = None
 
 
 class ProjectionWorkerPhoto(BaseModel):
@@ -616,6 +617,8 @@ class ProjectionWorkerJob(BaseModel):
     poses: Optional[ProjectionWorkerFile] = None
     planes: Optional[ProjectionWorkerFile] = None
     raw_reference: list[ProjectionWorkerFile] = []
+    reference_cache_key: str = ""
+    reference_kind: str = "raw"
     photos: list[ProjectionWorkerPhoto] = []
     config: dict = {}
 

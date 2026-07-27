@@ -184,9 +184,10 @@ def resolve_texel_m(
     planes: list[dict], up_world: np.ndarray, vertices: np.ndarray,
     faces: np.ndarray, requested_texel_m: float,
     scale_m_per_mesh_unit: float, target_long_edge_px: int,
+    target_height_px: int = 0,
 ) -> float:
     """Sceglie una densita unica portando la faccia dominante al target."""
-    if target_long_edge_px <= 0:
+    if target_long_edge_px <= 0 and target_height_px <= 0:
         return requested_texel_m
     spans = []
     for plane in planes:
@@ -195,10 +196,14 @@ def resolve_texel_m(
             scale_m_per_mesh_unit=scale_m_per_mesh_unit,
         )
         if frame is not None:
-            spans.append(max(frame.width_m, frame.height_m))
+            spans.append(
+                frame.height_m if target_height_px > 0
+                else max(frame.width_m, frame.height_m)
+            )
     if not spans:
         return requested_texel_m
-    target_texel_m = max(spans) / float(target_long_edge_px)
+    target_pixels = target_height_px if target_height_px > 0 else target_long_edge_px
+    target_texel_m = max(spans) / float(target_pixels)
     return min(requested_texel_m, max(target_texel_m, 1e-4))
 
 
@@ -530,6 +535,7 @@ def bake_planes(mesh_path: str, poses: dict, photos_dir: str, planes_doc: dict,
                 occlusion: bool = False, facing_min: float = 0.20,
                 crop: float = 0.9, scale_m_per_mesh_unit: float = 1.0,
                 target_long_edge_px: int = 0,
+                target_height_px: int = 0,
                 log=print, progress=None, photo_resolver=None,
                 available_photo_keys=None) -> dict:
     """Bake di tutti i piani del documento. Ritorna un riepilogo (piani, aree, file).
@@ -549,7 +555,7 @@ def bake_planes(mesh_path: str, poses: dict, photos_dir: str, planes_doc: dict,
     planes = planes_doc.get("planes", [])
     texel_m = resolve_texel_m(
         planes, up_world, V, faces, texel_mm / 1000.0,
-        scale_m_per_mesh_unit, target_long_edge_px,
+        scale_m_per_mesh_unit, target_long_edge_px, target_height_px,
     )
     texel_mm = texel_m * 1000.0
     log(f"mesh {len(V)} v / {len(faces)} f · camere {len(cams)} · piani {len(planes)} · "

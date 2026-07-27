@@ -35,7 +35,7 @@ OBJECT_CAPTURE_PRESET = {
     "feature_sensitivity": "high",
     "ignore_bounding_box": True,
     "object_masking_enabled": False,
-    "requests": ["model_file", "poses"],
+    "requests": ["model_file", "projection_reference", "poses"],
     "model_and_poses_same_session": True,
     "photo_naming": "{order_index:04d}.jpg",
 }
@@ -114,6 +114,20 @@ def write_bundle_manifest(
         "poses_file": "oc_poses.json",
         "files": records,
     }
+    proxy_obj = next((name for name, _ in files if name == "projection_proxy.obj"), None)
+    proxy_mtl = next((name for name, _ in files if name == "projection_proxy.mtl"), None)
+    if proxy_obj and proxy_mtl:
+        proxy_files = [
+            name for name, _ in files
+            if name in {proxy_obj, proxy_mtl}
+            or name.startswith("projection_proxy_texture_")
+        ]
+        document["projection_reference"] = {
+            "detail": "medium",
+            "model_file": proxy_obj,
+            "mtl_file": proxy_mtl,
+            "files": proxy_files,
+        }
     Path(output_path).write_text(
         json.dumps(document, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -149,6 +163,47 @@ def materialize_usdz_textures(
         normalized.append(line)
     mtl.write_text("\n".join(normalized) + "\n", encoding="utf-8")
     return extracted
+
+
+def flatten_projection_proxy(source_dir: Path, output_dir: Path) -> list[Path]:
+    """Copy a converted proxy into the flat OC bundle with collision-free names."""
+    source_obj = source_dir / "projection_proxy.obj"
+    source_mtl = source_dir / "projection_proxy.mtl"
+    if not source_obj.exists() or not source_mtl.exists():
+        raise RuntimeError("Conversione projection proxy incompleta")
+
+    images = [
+        path for path in source_dir.iterdir()
+        if path.suffix.lower() in {".png", ".jpg", ".jpeg"}
+    ]
+    renamed: dict[str, str] = {}
+    copied: list[Path] = []
+    for index, image in enumerate(sorted(images), 1):
+        suffix = image.suffix.lower()
+        name = f"projection_proxy_texture_{index}{suffix}"
+        destination = output_dir / name
+        shutil.copy2(image, destination)
+        renamed[image.name] = name
+        copied.append(destination)
+
+    output_mtl = output_dir / "projection_proxy.mtl"
+    lines = []
+    for line in source_mtl.read_text(errors="ignore").splitlines():
+        parts = line.split(maxsplit=1)
+        if len(parts) == 2 and parts[0].lower().startswith("map_"):
+            original = Path(parts[1]).name
+            line = f"{parts[0]} {renamed.get(original, original)}"
+        lines.append(line)
+    output_mtl.write_text("\n".join(lines) + "\n")
+
+    output_obj = output_dir / "projection_proxy.obj"
+    obj_lines = []
+    for line in source_obj.read_text(errors="ignore").splitlines():
+        if line.lower().startswith("mtllib "):
+            line = "mtllib projection_proxy.mtl"
+        obj_lines.append(line)
+    output_obj.write_text("\n".join(obj_lines) + "\n")
+    return [output_obj, output_mtl, *copied]
 
 
 class Client:
@@ -355,11 +410,13 @@ def process_job(cli: Client, job: dict, hpg: str, converter: str,
                 data = requests.get(ph["url"], timeout=120).content
                 dest.write_bytes(data)
         usdz = Path(tmp) / "model.usdz"
+        projection_usdz = Path(tmp) / "model_projection.usdz"
         poses = Path(tmp) / "oc_poses.json"
         obj = Path(tmp) / "model.obj"
         if dry:
             print(f"  [dry] {hpg} {pdir} {usdz} {detail} sequential high")
             print(f"  [dry] {converter} {usdz} {obj}")
+            print(f"  [dry] {converter} {projection_usdz} projection_proxy.obj")
         else:
             subprocess.run([hpg, str(pdir), str(usdz), detail, "sequential", "high"], check=True)
             n = merge_intrinsics(str(poses), intr)
@@ -369,6 +426,22 @@ def process_job(cli: Client, job: dict, hpg: str, converter: str,
                 usdz, obj.with_suffix(".mtl"), Path(tmp),
             )
             print(f"  texture USDZ estratte: {len(textures)}")
+            if not projection_usdz.exists():
+                raise RuntimeError("Object Capture non ha prodotto il riferimento .medium")
+            proxy_dir = Path(tmp) / "projection_proxy"
+            proxy_dir.mkdir()
+            proxy_obj = proxy_dir / "projection_proxy.obj"
+            subprocess.run(
+                [converter, str(projection_usdz), str(proxy_obj)], check=True,
+            )
+            proxy_textures = materialize_usdz_textures(
+                projection_usdz, proxy_obj.with_suffix(".mtl"), proxy_dir,
+            )
+            proxy_files = flatten_projection_proxy(proxy_dir, Path(tmp))
+            print(
+                f"  riferimento proiezione: {len(proxy_files)} file, "
+                f"{len(proxy_textures)} texture"
+            )
         generated = [("model.usdz", str(usdz)), ("oc_poses.json", str(poses))]
         mesh_suffixes = {".obj", ".mtl", ".png", ".jpg", ".jpeg"}
         generated += [
@@ -401,15 +474,141 @@ def download_url(url: str, destination: Path) -> None:
                     handle.write(chunk)
 
 
-def prepare_raw_reference(records: list[dict], root: Path) -> dict | None:
+def projection_cache_root() -> Path:
+    configured = os.environ.get("ACRO_PROJECTION_CACHE_DIR", "").strip()
+    root = (
+        Path(configured).expanduser()
+        if configured
+        else Path.home() / "Library" / "Caches" / "AcrobaticaProjectionWorker"
+    )
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _cached_download(record: dict, destination: Path) -> None:
+    expected_size = record.get("size_bytes")
+    if destination.exists() and (
+        not expected_size or destination.stat().st_size == int(expected_size)
+    ):
+        return
+    temporary = destination.with_name(
+        f".{destination.name}.{uuid.uuid4().hex}.part"
+    )
+    try:
+        download_url(record["url"], temporary)
+        expected_hash = str(record.get("sha256") or "")
+        if expected_hash and sha256_file(temporary) != expected_hash:
+            raise RuntimeError(f"Checksum non valido per {record['name']}")
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _obj_face_count(path: Path) -> int:
+    with path.open("rb") as handle:
+        return sum(1 for line in handle if line.startswith(b"f "))
+
+
+def _limit_proxy_texture_resolution(mtl: Path, max_edge: int = 4096) -> None:
+    import cv2
+
+    names = []
+    for line in mtl.read_text(errors="ignore").splitlines():
+        parts = line.split(maxsplit=1)
+        if len(parts) == 2 and parts[0].lower() == "map_kd":
+            names.append(Path(parts[1]).name)
+    for name in dict.fromkeys(names):
+        path = mtl.parent / name
+        image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        if image is None or max(image.shape[:2]) <= max_edge:
+            continue
+        scale = max_edge / float(max(image.shape[:2]))
+        resized = cv2.resize(
+            image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA,
+        )
+        if not cv2.imwrite(str(path), resized):
+            raise RuntimeError(f"Impossibile ridurre la texture proxy {path.name}")
+
+
+def _build_legacy_projection_proxy(
+    reference: dict[str, Path], cache_directory: Path,
+    target_faces: int = 180_000,
+) -> dict[str, Path]:
+    """Create a cached proxy for bundles produced before the medium OC output."""
+    source_obj = reference["obj"]
+    if _obj_face_count(source_obj) <= target_faces * 1.25:
+        return reference
+    blender = os.environ.get("ACRO_BLENDER", "").strip() or shutil.which("blender")
+    if not blender:
+        blender = next((
+            str(path) for path in (
+                Path("/opt/homebrew/bin/blender"),
+                Path("/usr/local/bin/blender"),
+                Path("/Applications/Blender.app/Contents/MacOS/Blender"),
+            ) if path.exists()
+        ), "")
+    if not blender:
+        print("  Blender assente: uso il riferimento OC raw")
+        return reference
+
+    proxy_dir = cache_directory / "generated_proxy"
+    proxy_obj = proxy_dir / "projection_proxy.obj"
+    proxy_mtl = proxy_dir / "projection_proxy.mtl"
+    if proxy_obj.exists() and proxy_mtl.exists():
+        return {"obj": proxy_obj, "mtl": proxy_mtl}
+
+    proxy_dir.mkdir(parents=True, exist_ok=True)
+    script = Path(__file__).with_name("build_projection_proxy_blender.py")
+    temporary_obj = proxy_dir / "projection_proxy.building.obj"
+    subprocess.run([
+        blender, "-b", "--python", str(script), "--",
+        str(source_obj), str(temporary_obj), str(target_faces),
+    ], check=True)
+    temporary_mtl = temporary_obj.with_suffix(".mtl")
+    if not temporary_obj.exists() or not temporary_mtl.exists():
+        raise RuntimeError("Blender non ha prodotto il projection proxy")
+    temporary_obj.replace(proxy_obj)
+    temporary_mtl.replace(proxy_mtl)
+    obj_lines = []
+    for line in proxy_obj.read_text(errors="ignore").splitlines():
+        if line.lower().startswith("mtllib "):
+            line = "mtllib projection_proxy.mtl"
+        obj_lines.append(line)
+    proxy_obj.write_text("\n".join(obj_lines) + "\n")
+    normalized = []
+    for line in proxy_mtl.read_text(errors="ignore").splitlines():
+        parts = line.split(maxsplit=1)
+        if len(parts) == 2 and parts[0].lower().startswith("map_"):
+            line = f"{parts[0]} {Path(parts[1]).name}"
+        normalized.append(line)
+    proxy_mtl.write_text("\n".join(normalized) + "\n")
+    _limit_proxy_texture_resolution(proxy_mtl)
+    print(
+        f"  proxy legacy pronto: {_obj_face_count(source_obj)} -> "
+        f"{_obj_face_count(proxy_obj)} triangoli"
+    )
+    return {"obj": proxy_obj, "mtl": proxy_mtl}
+
+
+def prepare_raw_reference(
+    records: list[dict], root: Path, *, cache_key: str = "",
+    build_legacy_proxy: bool = False,
+) -> dict | None:
     if not records:
         return None
-    directory = root / "raw_reference"
-    directory.mkdir()
+    safe_key = "".join(
+        character for character in cache_key
+        if character.isalnum() or character in {"-", "_"}
+    )
+    directory = (
+        projection_cache_root() / "references" / safe_key
+        if safe_key else root / "raw_reference"
+    )
+    directory.mkdir(parents=True, exist_ok=True)
     paths = []
     for record in records:
         destination = directory / Path(record["name"]).name
-        download_url(record["url"], destination)
+        _cached_download(record, destination)
         paths.append(destination)
     obj = next((path for path in paths if path.suffix.lower() == ".obj"), None)
     mtls = [path for path in paths if path.suffix.lower() == ".mtl"]
@@ -427,7 +626,10 @@ def prepare_raw_reference(records: list[dict], root: Path) -> dict | None:
             line = f"map_Kd {Path(line.split()[-1]).name}"
         normalized.append(line)
     mtl.write_text("\n".join(normalized) + "\n")
-    return {"obj": obj, "mtl": mtl}
+    reference = {"obj": obj, "mtl": mtl}
+    if build_legacy_proxy:
+        return _build_legacy_projection_proxy(reference, directory)
+    return reference
 
 
 def process_projection_job(cli: Client, job: dict, dry: bool) -> None:
@@ -465,9 +667,15 @@ def process_projection_job(cli: Client, job: dict, dry: bool) -> None:
                 pose["image_width_height"] = [
                     int(record["image_width"]), int(record["image_height"])]
 
-        raw_reference = prepare_raw_reference(job.get("raw_reference", []), root)
+        raw_reference = prepare_raw_reference(
+            job.get("raw_reference", []), root,
+            cache_key=str(job.get("reference_cache_key") or ""),
+            build_legacy_proxy=job.get("reference_kind") != "projection_proxy",
+        )
         photos_dir = root / "photos"
         photos_dir.mkdir()
+        photo_cache = projection_cache_root() / "photos" / sid
+        photo_cache.mkdir(parents=True, exist_ok=True)
         downloaded = [0]
         reported_progress = [0.06]
 
@@ -481,9 +689,9 @@ def process_projection_job(cli: Client, job: dict, dry: bool) -> None:
             record = photo_records.get(str(int(key)))
             if not record:
                 return None
-            local = photos_dir / f"{int(key):04d}.jpg"
+            local = photo_cache / f"{int(key):04d}.jpg"
             if not local.exists():
-                download_url(record["url"], local)
+                _cached_download(record, local)
                 downloaded[0] += 1
                 report(0.12, f"Mac: scarico foto selezionate {downloaded[0]}")
             return str(local)
@@ -508,7 +716,8 @@ def process_projection_job(cli: Client, job: dict, dry: bool) -> None:
                     poses, str(photos_dir), planes, str(out_dir),
                     texel_mm=float(cfg.get("texel_mm", 20.0)),
                     max_photos=int(cfg.get("max_photos", 12)),
-                    target_long_edge_px=int(cfg.get("target_long_edge_px", 4096)),
+                    target_long_edge_px=int(cfg.get("target_long_edge_px", 0)),
+                    target_height_px=int(cfg.get("target_height_px", 3000)),
                     registration_ceiling=int(cfg.get("registration_ceiling", 12)),
                     coverage_photos=int(cfg.get("coverage_photos", 24)),
                     crop=0.9, scale_m_per_mesh_unit=scale,
@@ -522,7 +731,8 @@ def process_projection_job(cli: Client, job: dict, dry: bool) -> None:
                 summary = ortho_bake.bake_planes(
                     str(mesh), poses, str(photos_dir), planes, str(out_dir),
                     texel_mm=float(cfg.get("texel_mm", 20.0)),
-                    target_long_edge_px=int(cfg.get("target_long_edge_px", 4096)),
+                    target_long_edge_px=int(cfg.get("target_long_edge_px", 0)),
+                    target_height_px=int(cfg.get("target_height_px", 3000)),
                     max_photos=int(cfg.get("max_photos", 12)),
                     occlusion=False, facing_min=0.342, crop=0.9,
                     scale_m_per_mesh_unit=scale,
@@ -537,7 +747,8 @@ def process_projection_job(cli: Client, job: dict, dry: bool) -> None:
             summary = ortho_bake.bake_planes(
                 str(mesh), poses, str(photos_dir), planes, str(out_dir),
                 texel_mm=float(cfg.get("texel_mm", 20.0)),
-                target_long_edge_px=int(cfg.get("target_long_edge_px", 4096)),
+                target_long_edge_px=int(cfg.get("target_long_edge_px", 0)),
+                target_height_px=int(cfg.get("target_height_px", 3000)),
                 max_photos=int(cfg.get("max_photos", 12)),
                 occlusion=False, facing_min=0.342, crop=0.9,
                 scale_m_per_mesh_unit=scale,

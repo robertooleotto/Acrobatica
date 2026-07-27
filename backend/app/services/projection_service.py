@@ -167,6 +167,15 @@ def validate_oc_bundle(result: dict) -> dict:
                 f"Pacchetto OC incoerente: {name} non appartiene al bundle "
                 f"{document['bundle_id']}"
             )
+    proxy = document.get("projection_reference") or {}
+    for name in proxy.get("files", []):
+        stored = _file_record(raw, name)
+        expected = manifest_files.get(name) if isinstance(manifest_files, dict) else None
+        expected_hash = expected.get("sha256") if isinstance(expected, dict) else None
+        if stored is None or not expected_hash or stored.get("checksum") != expected_hash:
+            raise InputsMissing(
+                f"Riferimento di proiezione incoerente nel bundle: {name}"
+            )
     return document
 
 
@@ -178,11 +187,29 @@ def _projection_mesh(result: dict) -> tuple[Optional[str], str]:
     return _mesh_obj_path(_mesh_entry(result, "raw")), "raw"
 
 
-def _download_raw_reference(result: dict, root: Path) -> Optional[dict[str, Path]]:
-    """Scarica solo OBJ, MTL e immagini necessarie al riferimento OC."""
+def _projection_reference_items(result: dict, manifest: dict | None = None) -> list[dict]:
     raw = _mesh_entry(result, "raw")
     files = [item for item in raw.get("files", []) if isinstance(item, dict)]
-    main_name = Path(raw.get("main_obj") or "").name
+    proxy = (manifest or {}).get("projection_reference") or {}
+    wanted = {Path(name).name for name in proxy.get("files", [])}
+    if wanted and wanted.issubset({Path(item.get("name", "")).name for item in files}):
+        return [item for item in files if Path(item.get("name", "")).name in wanted]
+    allowed = {".obj", ".mtl", ".png", ".jpg", ".jpeg"}
+    return [
+        item for item in files
+        if Path(item.get("name", "")).suffix.lower() in allowed
+        and not Path(item.get("name", "")).name.startswith("projection_proxy")
+    ]
+
+
+def _download_raw_reference(
+    result: dict, root: Path, manifest: dict | None = None,
+) -> Optional[dict[str, Path]]:
+    """Scarica solo OBJ, MTL e immagini necessarie al riferimento OC."""
+    raw = _mesh_entry(result, "raw")
+    files = _projection_reference_items(result, manifest)
+    proxy = (manifest or {}).get("projection_reference") or {}
+    main_name = Path(proxy.get("model_file") or raw.get("main_obj") or "").name
     obj_item = next((item for item in files
                      if Path(item.get("name", "")).name == main_name
                      and Path(main_name).suffix.lower() == ".obj"), None)
@@ -307,7 +334,7 @@ def gather_inputs(session_id: str) -> Optional[dict]:
 
 def _download_inputs(session_id: str, sess: dict, root: Path) -> dict:
     result = sess.get("result") or {}
-    validate_oc_bundle(result)
+    manifest = validate_oc_bundle(result)
     mesh_path, mesh_kind = _projection_mesh(result)
     poses_path = _file_in(_mesh_entry(result, "raw"), "oc_poses.json")
     planes_path = (result.get("planes") or {}).get("path")
@@ -348,7 +375,7 @@ def _download_inputs(session_id: str, sess: dict, root: Path) -> dict:
             pose["image_width_height"] = [
                 int(metadata["image_width"]), int(metadata["image_height"])]
     try:
-        raw_reference = _download_raw_reference(result, root)
+        raw_reference = _download_raw_reference(result, root, manifest)
     except Exception:
         raw_reference = None
     return {"mesh": mesh, "mesh_kind": mesh_kind,
@@ -382,35 +409,38 @@ def _set_job(session_id: str, state: str, progress: float,
     session_store.update_session(session_id, {"result": result})
 
 
-def _worker_file(name: str, path: str, size: int | None = None) -> dict:
-    return {
+def _worker_file(
+    name: str, path: str, size: int | None = None, checksum: str | None = None,
+) -> dict:
+    record = {
         "name": Path(name).name,
         "url": storage_service.signed_url(path, expires_in_sec=12 * 60 * 60),
         "size_bytes": size,
     }
+    if checksum:
+        record["sha256"] = checksum
+    return record
 
 
 def _worker_payload(sess: dict) -> dict:
     """Costruisce input firmati; Railway non materializza gli asset pesanti."""
     session_id = sess["id"]
     result = sess.get("result") or {}
-    validate_oc_bundle(result)
+    manifest = validate_oc_bundle(result)
     mesh_path, _ = _projection_mesh(result)
     poses_path = _file_in(_mesh_entry(result, "raw"), "oc_poses.json")
     planes_path = (result.get("planes") or {}).get("path")
     if not mesh_path or not poses_path or not planes_path:
         raise InputsMissing("Input del worker Mac incompleti")
 
-    raw_entry = _mesh_entry(result, "raw")
     raw_files = []
-    allowed = {".obj", ".mtl", ".png", ".jpg", ".jpeg"}
-    for item in raw_entry.get("files", []):
-        if not isinstance(item, dict):
-            continue
+    for item in _projection_reference_items(result, manifest):
         name = Path(item.get("name", "")).name
         path = item.get("path")
-        if path and Path(name).suffix.lower() in allowed:
-            raw_files.append(_worker_file(name, path, item.get("size")))
+        if path:
+            raw_files.append(_worker_file(
+                name, path, item.get("size"), item.get("checksum"),
+            ))
 
     photos = []
     for photo in session_store.list_photos(session_id):
@@ -429,6 +459,11 @@ def _worker_payload(sess: dict) -> dict:
         })
 
     job = (result.get("projection_job") or {})
+    reference_hash = next(
+        (item.get("sha256", "")[:16] for item in raw_files
+         if item["name"].endswith(".obj")),
+        "",
+    )
     return {
         "session_id": session_id,
         "job_id": job.get("job_id"),
@@ -436,11 +471,17 @@ def _worker_payload(sess: dict) -> dict:
         "poses": _worker_file("oc_poses.json", poses_path),
         "planes": _worker_file("planes.json", planes_path),
         "raw_reference": raw_files,
+        "reference_cache_key": f"{manifest.get('bundle_id', session_id)}-{reference_hash}",
+        "reference_kind": (
+            "projection_proxy" if manifest.get("projection_reference") else "raw"
+        ),
         "photos": photos,
         "config": {
             "texel_mm": float(os.environ.get("ACRO_PROJECTION_TEXEL_MM", "20")),
             "target_long_edge_px": int(os.environ.get(
-                "ACRO_PROJECTION_TARGET_LONG_EDGE_PX", "4096")),
+                "ACRO_PROJECTION_TARGET_LONG_EDGE_PX", "0")),
+            "target_height_px": int(os.environ.get(
+                "ACRO_PROJECTION_TARGET_HEIGHT_PX", "3000")),
             "max_photos": int(os.environ.get("ACRO_PROJECTION_REGISTER_PHOTOS", "12")),
             "registration_ceiling": int(os.environ.get(
                 "ACRO_PROJECTION_MAX_REGISTER_PHOTOS", "12")),
@@ -655,8 +696,10 @@ def project(session_id: str) -> dict:
 
             texel_mm = float(os.environ.get("ACRO_PROJECTION_TEXEL_MM", "20"))
             target_long_edge_px = int(os.environ.get(
-                "ACRO_PROJECTION_TARGET_LONG_EDGE_PX", "4096"))
-            max_photos = int(os.environ.get("ACRO_PROJECTION_REGISTER_PHOTOS", "20"))
+                "ACRO_PROJECTION_TARGET_LONG_EDGE_PX", "0"))
+            target_height_px = int(os.environ.get(
+                "ACRO_PROJECTION_TARGET_HEIGHT_PX", "3000"))
+            max_photos = int(os.environ.get("ACRO_PROJECTION_REGISTER_PHOTOS", "12"))
             registration_ceiling = int(os.environ.get(
                 "ACRO_PROJECTION_MAX_REGISTER_PHOTOS", "12"))
             coverage_photos = int(os.environ.get("ACRO_PROJECTION_COVERAGE_PHOTOS", "24"))
@@ -676,6 +719,7 @@ def project(session_id: str) -> dict:
                         str(inp["photos"]), inp["planes"], str(out_dir),
                         texel_mm=texel_mm, max_photos=max_photos,
                         target_long_edge_px=target_long_edge_px,
+                        target_height_px=target_height_px,
                         registration_ceiling=registration_ceiling,
                         coverage_photos=coverage_photos, crop=0.9,
                         scale_m_per_mesh_unit=scale,
@@ -693,6 +737,7 @@ def project(session_id: str) -> dict:
                         str(inp["mesh"]), inp["poses"], str(inp["photos"]),
                         inp["planes"], str(out_dir), texel_mm=texel_mm,
                         target_long_edge_px=target_long_edge_px,
+                        target_height_px=target_height_px,
                         max_photos=max_photos, occlusion=False, facing_min=0.342,
                         crop=0.9, scale_m_per_mesh_unit=scale,
                         photo_resolver=resolve_photo,
@@ -708,6 +753,7 @@ def project(session_id: str) -> dict:
                     str(inp["mesh"]), inp["poses"], str(inp["photos"]),
                     inp["planes"], str(out_dir), texel_mm=texel_mm,
                     target_long_edge_px=target_long_edge_px,
+                    target_height_px=target_height_px,
                     max_photos=max_photos, occlusion=False, facing_min=0.342,
                     crop=0.9, scale_m_per_mesh_unit=scale,
                     photo_resolver=resolve_photo,

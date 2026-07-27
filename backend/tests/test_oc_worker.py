@@ -48,6 +48,31 @@ def test_bundle_manifest_binds_model_and_poses(tmp_path):
     }
 
 
+def test_bundle_manifest_declares_medium_projection_reference(tmp_path):
+    files = []
+    for name in (
+        "model.obj", "oc_poses.json", "projection_proxy.obj",
+        "projection_proxy.mtl", "projection_proxy_texture_1.png",
+    ):
+        path = tmp_path / name
+        path.write_bytes(name.encode())
+        files.append((name, str(path)))
+
+    document = oc_worker.write_bundle_manifest(
+        tmp_path / "manifest.json", files, photo_count=1, detail="raw",
+    )
+
+    assert document["projection_reference"] == {
+        "detail": "medium",
+        "model_file": "projection_proxy.obj",
+        "mtl_file": "projection_proxy.mtl",
+        "files": [
+            "projection_proxy.obj", "projection_proxy.mtl",
+            "projection_proxy_texture_1.png",
+        ],
+    }
+
+
 def test_materialize_usdz_textures_rewrites_archive_references(tmp_path):
     usdz = tmp_path / "model.usdz"
     with zipfile.ZipFile(usdz, "w") as archive:
@@ -61,3 +86,20 @@ def test_materialize_usdz_textures_rewrites_archive_references(tmp_path):
     assert textures == [tmp_path / "albedo.png"]
     assert textures[0].read_bytes() == b"png-data"
     assert mtl.read_text().endswith("map_Kd albedo.png\n")
+
+
+def test_cached_download_reuses_a_complete_file(monkeypatch, tmp_path):
+    destination = tmp_path / "asset.obj"
+    destination.write_bytes(b"already cached")
+
+    monkeypatch.setattr(
+        oc_worker, "download_url",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("download inatteso")),
+    )
+
+    oc_worker._cached_download(
+        {"name": "asset.obj", "url": "signed://asset", "size_bytes": 14},
+        destination,
+    )
+
+    assert destination.read_bytes() == b"already cached"
