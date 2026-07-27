@@ -455,11 +455,17 @@ def _worker_payload(sess: dict) -> dict:
 
 def claim_next_worker_job() -> dict:
     """Reclama il prossimo bake remoto e restituisce i soli URL firmati."""
-    sess = session_store.next_queued_projection_job()
+    now = _now_iso()
+    sess = session_store.claim_next_projection_job({
+        "state": "running",
+        "progress": 0.02,
+        "message": "Worker Mac: preparo gli input",
+        "error": "",
+        "updated_at": now,
+    })
     if sess is None:
         return {}
     session_id = sess["id"]
-    _set_job(session_id, "running", 0.02, "Worker Mac: preparo gli input")
     current = sess.get("status") or ""
     if current in {session_state.PLANES_READY, session_state.COMPLETED}:
         try:

@@ -443,6 +443,61 @@ class MeshUploadResult(BaseModel):
     files: list[MeshFileInfo] = []
 
 
+class DirectUploadFileRequest(BaseModel):
+    """File che un client vuole inviare direttamente allo storage."""
+    name: str
+    size_bytes: int = Field(..., ge=1)
+    checksum: Optional[str] = None
+
+
+class DirectUploadRecord(DirectUploadFileRequest):
+    """Oggetto gia' caricato, identificato dal suo path canonico."""
+    path: str
+
+
+class DirectUploadTarget(BaseModel):
+    name: str
+    path: str
+    url: str
+    headers: dict[str, str] = {}
+
+
+class DirectUploadTargets(BaseModel):
+    expires_in_sec: int
+    files: list[DirectUploadTarget] = []
+
+
+class PhotoUploadTicketRequest(BaseModel):
+    metadata: ARMetadata
+    size_bytes: int = Field(..., ge=1, le=100 * 1024 * 1024)
+
+
+class PhotoUploadCompleteRequest(BaseModel):
+    metadata: ARMetadata
+    file: DirectUploadRecord
+
+
+class MeshDirectUploadRequest(BaseModel):
+    kind: Literal["raw", "clean"] = "raw"
+    files: list[DirectUploadFileRequest] = Field(..., min_length=1, max_length=64)
+
+
+class MeshDirectUploadComplete(BaseModel):
+    kind: Literal["raw", "clean"] = "raw"
+    files: list[DirectUploadRecord] = Field(..., min_length=1, max_length=64)
+
+
+class ProjectionDirectUploadRequest(BaseModel):
+    job_id: str
+    files: list[DirectUploadFileRequest] = Field(..., min_length=1, max_length=64)
+
+
+class ProjectionDirectUploadComplete(BaseModel):
+    job_id: str
+    manifest: dict
+    files: list[DirectUploadRecord] = Field(..., min_length=1, max_length=64)
+
+
 class MeshInfoResult(BaseModel):
     """Mesh disponibile per la sessione: file + URL firmati per il download."""
     session_id: str

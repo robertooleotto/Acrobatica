@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import os
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -20,7 +21,12 @@ from typing import Optional
 
 import cv2
 import numpy as np
-from fastapi import APIRouter, BackgroundTasks, Body, File, Form, HTTPException, UploadFile
+from fastapi import (
+    APIRouter, BackgroundTasks, Body, Depends, File, Form, Header,
+    HTTPException, UploadFile,
+)
+
+from .. import config
 
 from ..models import (
     ARMetadata,
@@ -56,8 +62,18 @@ from ..models import (
     OpeningReviewRequest,
     DetectedPlane,
     DetectPlanesResult,
+    DirectUploadFileRequest,
+    DirectUploadRecord,
+    DirectUploadTarget,
+    DirectUploadTargets,
+    MeshDirectUploadComplete,
+    MeshDirectUploadRequest,
     PlanesDataResult,
     PlanesSaveResult,
+    PhotoUploadCompleteRequest,
+    PhotoUploadTicketRequest,
+    ProjectionDirectUploadComplete,
+    ProjectionDirectUploadRequest,
     ProjectionJobResult,
     ProjectionScaffoldResult,
     ProjectionWorkerFailure,
@@ -97,6 +113,58 @@ router = APIRouter(prefix="/facade-sessions", tags=["facade-sessions"])
 # Incrementare quando cambia la geometria prodotta dal detector. I documenti
 # precedenti vengono rigenerati prima di essere caricati nell'editor.
 PLANES_PIPELINE_VERSION = "multiscale_envelope_v1"
+DIRECT_UPLOAD_TTL_SEC = 15 * 60
+
+
+def _require_worker_token(x_worker_token: Optional[str] = Header(default=None)) -> None:
+    expected = config.WORKER_TOKEN
+    if expected and (
+        not x_worker_token or not secrets.compare_digest(x_worker_token, expected)
+    ):
+        raise HTTPException(401, "Credenziali worker non valide")
+
+
+def _require_legacy_uploads() -> None:
+    if not config.LEGACY_MULTIPART_UPLOADS:
+        raise HTTPException(410, "Upload multipart disabilitato: usare ticket R2")
+
+
+def _direct_upload_target(
+    name: str, remote: str, content_type: str,
+) -> DirectUploadTarget:
+    try:
+        url, headers = storage_service.signed_upload_url(
+            remote, content_type, expires_in_sec=DIRECT_UPLOAD_TTL_SEC)
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    return DirectUploadTarget(
+        name=name, path=remote, url=url, headers=headers)
+
+
+def _verify_direct_record(record: DirectUploadRecord, expected_path: str) -> dict:
+    """Accetta il commit solo se l'oggetto canonico esiste ed e' completo."""
+    if record.path != expected_path or Path(record.name).name != record.name:
+        raise HTTPException(400, f"Path upload non valido per '{record.name}'")
+    head = storage_service.head_object(expected_path)
+    if head is None:
+        raise HTTPException(409, f"Upload non trovato: '{record.name}'")
+    actual_size = int(head["size"])
+    if actual_size != record.size_bytes:
+        raise HTTPException(
+            409,
+            f"Upload incompleto per '{record.name}': {actual_size}/{record.size_bytes} byte",
+        )
+    checksum = (record.checksum or "").lower() or None
+    if checksum is not None and (
+        len(checksum) != 64 or any(c not in "0123456789abcdef" for c in checksum)
+    ):
+        raise HTTPException(400, f"Checksum SHA-256 non valido: '{record.name}'")
+    return {
+        "name": record.name,
+        "path": expected_path,
+        "size": actual_size,
+        "checksum": checksum,
+    }
 
 
 @router.post("", response_model=CreateSessionResponse, status_code=201)
@@ -107,7 +175,10 @@ def create_session():
 
 # NB: questa rotta LETTERALE va PRIMA di GET /{session_id} (parametrica), altrimenti
 # "next-oc-job" verrebbe catturato come session_id.
-@router.get("/next-oc-job", response_model=OcJobResponse)
+@router.get(
+    "/next-oc-job", response_model=OcJobResponse,
+    dependencies=[Depends(_require_worker_token)],
+)
 def next_oc_job():
     """Passo 3 — il worker OC reclama il prossimo job dalla coda `queued_oc`.
     Prenota la sessione (→ computing_oc) e restituisce foto (URL firmati) +
@@ -127,7 +198,10 @@ def next_oc_job():
     return OcJobResponse(session_id=row["id"], photos=job_photos)
 
 
-@router.get("/next-projection-job", response_model=ProjectionWorkerJob)
+@router.get(
+    "/next-projection-job", response_model=ProjectionWorkerJob,
+    dependencies=[Depends(_require_worker_token)],
+)
 def next_projection_job():
     """Il Mac reclama un bake. Railway restituisce URL firmati, non asset."""
     try:
@@ -143,6 +217,7 @@ async def upload_photo(
     image: UploadFile = File(...),
     metadata: str = Form(...),
 ):
+    _require_legacy_uploads()
     sess = session_store.get_session(session_id)
     if sess is None:
         raise HTTPException(404, "Sessione non trovata")
@@ -166,6 +241,45 @@ async def upload_photo(
     return UploadPhotoResponse(
         session_id=session_id,
         order_index=meta_obj.order_index,
+        photos_count=len(photos),
+    )
+
+
+@router.post(
+    "/{session_id}/photos/upload-ticket", response_model=DirectUploadTargets)
+def create_photo_upload_ticket(
+    session_id: str, payload: PhotoUploadTicketRequest,
+):
+    """Firma un PUT foto iPhone->R2: Railway non riceve il JPEG."""
+    if session_store.get_session(session_id) is None:
+        raise HTTPException(404, "Sessione non trovata")
+    remote = storage_service.photo_path(session_id, payload.metadata.order_index)
+    return DirectUploadTargets(
+        expires_in_sec=DIRECT_UPLOAD_TTL_SEC,
+        files=[_direct_upload_target(Path(remote).name, remote, "image/jpeg")],
+    )
+
+
+@router.post(
+    "/{session_id}/photos/complete", response_model=UploadPhotoResponse)
+def complete_photo_upload(
+    session_id: str, payload: PhotoUploadCompleteRequest,
+):
+    """Verifica il JPEG su R2 e registra i metadati ARKit nel database."""
+    if session_store.get_session(session_id) is None:
+        raise HTTPException(404, "Sessione non trovata")
+    remote = storage_service.photo_path(session_id, payload.metadata.order_index)
+    _verify_direct_record(payload.file, remote)
+    session_store.upsert_photo(
+        session_id=session_id,
+        order_index=payload.metadata.order_index,
+        storage_path=remote,
+        metadata=payload.metadata.model_dump(),
+    )
+    photos = session_store.list_photos(session_id)
+    return UploadPhotoResponse(
+        session_id=session_id,
+        order_index=payload.metadata.order_index,
         photos_count=len(photos),
     )
 
@@ -244,7 +358,10 @@ def start_automatic_pipeline(session_id: str):
     return request_mesh(session_id)
 
 
-@router.post("/{session_id}/mesh-ready", response_model=SessionState)
+@router.post(
+    "/{session_id}/mesh-ready", response_model=SessionState,
+    dependencies=[Depends(_require_worker_token)],
+)
 def mesh_ready(session_id: str, background_tasks: BackgroundTasks):
     """Passo 4 — il worker ha caricato mesh e pose.
 
@@ -267,7 +384,10 @@ def mesh_ready(session_id: str, background_tasks: BackgroundTasks):
     return _session_state(row, session_store.list_photos(session_id))
 
 
-@router.post("/{session_id}/fail", response_model=SessionState)
+@router.post(
+    "/{session_id}/fail", response_model=SessionState,
+    dependencies=[Depends(_require_worker_token)],
+)
 def fail_session(session_id: str, req: Optional[FailRequest] = None):
     """Segna la sessione come fallita (da qualunque stadio di lavoro). Il worker
     la chiama se OC va in errore; l'app potrà ri-accodare."""
@@ -1039,6 +1159,47 @@ def _mesh_dict(result: dict | None) -> dict:
     return mesh
 
 
+def _publish_mesh_records(
+    session_id: str, kind: str, sess: dict, records: list[dict],
+) -> MeshUploadResult:
+    first_obj = next(
+        (r["name"] for r in records if Path(r["name"]).suffix.lower() == ".obj"),
+        None,
+    )
+    first_usdz = next(
+        (r["name"] for r in records if Path(r["name"]).suffix.lower() == ".usdz"),
+        None,
+    )
+    infos = [MeshFileInfo(
+        name=record["name"],
+        url=storage_service.signed_url(record["path"], expires_in_sec=3600),
+        size_bytes=int(record["size"]),
+        checksum=record.get("checksum"),
+    ) for record in records]
+
+    existing = sess.get("result") or {}
+    meshes = _mesh_dict(existing)
+    meshes[kind] = {
+        "files": records,
+        "main_obj": first_obj or first_usdz,
+    }
+    existing["mesh"] = meshes
+    projection_service.invalidate_geometry_outputs(existing, clear_planes=True)
+    session_store.update_session(session_id, {"result": existing})
+
+    if kind == "clean":
+        try:
+            current = (session_store.get_session(session_id) or {}).get("status", "")
+            if current in {session_state.MESH_READY, session_state.COMPLETED}:
+                session_store.update_status(session_id, session_state.CLEANING)
+                current = session_state.CLEANING
+            if current == session_state.CLEANING:
+                session_store.update_status(session_id, session_state.CLEAN_UPLOADED)
+        except Exception:
+            pass
+    return MeshUploadResult(session_id=session_id, files=infos)
+
+
 @router.put("/{session_id}/mesh", response_model=MeshUploadResult)
 async def upload_mesh(
     session_id: str,
@@ -1049,6 +1210,7 @@ async def upload_mesh(
     'clean' (mesh ripulita dall'iPad). Le due sono conservate SEPARATE: la pulita
     non sovrascrive la grezza, così si può sempre ripartire dalla grezza.
     Il primo .obj (o in mancanza .usdz) è la mesh principale."""
+    _require_legacy_uploads()
     if kind not in _MESH_KINDS:
         raise HTTPException(400, f"kind deve essere uno di {_MESH_KINDS}")
     sess = session_store.get_session(session_id)
@@ -1057,10 +1219,7 @@ async def upload_mesh(
     if not files:
         raise HTTPException(400, "Nessun file mesh caricato")
 
-    infos: list[MeshFileInfo] = []
     manifest: list[dict] = []
-    first_obj: str | None = None
-    first_usdz: str | None = None
     for f in files:
         name = Path(f.filename or "mesh").name
         ext = Path(name).suffix.lower()
@@ -1072,41 +1231,71 @@ async def upload_mesh(
         storage_service.upload_bytes(remote, data, _MESH_CONTENT_TYPES[ext])
         manifest.append({"name": name, "size": len(data), "path": remote,
                          "checksum": checksum})
-        if ext == ".obj" and first_obj is None:
-            first_obj = name
-        elif ext == ".usdz" and first_usdz is None:
-            first_usdz = name
-        infos.append(MeshFileInfo(
-            name=name,
-            url=storage_service.signed_url(remote, expires_in_sec=3600),
-            size_bytes=len(data),
-            checksum=checksum,
+    return _publish_mesh_records(session_id, kind, sess, manifest)
+
+
+def _validate_mesh_upload_files(
+    session_id: str, kind: str, files: list[DirectUploadFileRequest],
+) -> list[tuple[DirectUploadFileRequest, str, str]]:
+    validated = []
+    seen: set[str] = set()
+    for file in files:
+        name = Path(file.name).name
+        ext = Path(name).suffix.lower()
+        if name != file.name or name in seen:
+            raise HTTPException(400, f"Nome file mesh non valido: '{file.name}'")
+        if ext not in _MESH_CONTENT_TYPES:
+            raise HTTPException(400, f"Estensione mesh non supportata: '{name}'")
+        if file.size_bytes > 20 * 1024 * 1024 * 1024:
+            raise HTTPException(413, f"File mesh troppo grande: '{name}'")
+        seen.add(name)
+        validated.append((
+            file,
+            _mesh_remote(session_id, kind, name),
+            _MESH_CONTENT_TYPES[ext],
         ))
+    return validated
 
-    existing = sess.get("result") or {}
-    meshes = _mesh_dict(existing)
-    meshes[kind] = {"files": manifest, "main_obj": first_obj or first_usdz}
-    existing["mesh"] = meshes
-    # Ogni nuova geometria rende obsoleti piani, texture e aperture. Per la raw
-    # questo conta soprattutto quando il worker ricalcola una sessione esistente.
-    projection_service.invalidate_geometry_outputs(existing, clear_planes=True)
-    session_store.update_session(session_id, {"result": existing})
 
-    # L'upload della mesh pulita conclude davvero il passo di pulizia. Le vecchie
-    # sessioni demo possono essere ancora `mesh_ready`, quindi attraversiamo i
-    # due stati previsti invece di lasciare i salvataggi successivi fuori flusso.
-    if kind == "clean":
-        try:
-            current = (session_store.get_session(session_id) or {}).get("status", "")
-            if current in {session_state.MESH_READY, session_state.COMPLETED}:
-                session_store.update_status(session_id, session_state.CLEANING)
-                current = session_state.CLEANING
-            if current == session_state.CLEANING:
-                session_store.update_status(session_id, session_state.CLEAN_UPLOADED)
-        except Exception:
-            pass
+@router.post(
+    "/{session_id}/mesh/upload-tickets", response_model=DirectUploadTargets)
+def create_mesh_upload_tickets(
+    session_id: str, payload: MeshDirectUploadRequest,
+):
+    """Firma PUT Mac/iPad->R2 per tutti i file di una mesh."""
+    if session_store.get_session(session_id) is None:
+        raise HTTPException(404, "Sessione non trovata")
+    validated = _validate_mesh_upload_files(
+        session_id, payload.kind, payload.files)
+    return DirectUploadTargets(
+        expires_in_sec=DIRECT_UPLOAD_TTL_SEC,
+        files=[
+            _direct_upload_target(file.name, remote, content_type)
+            for file, remote, content_type in validated
+        ],
+    )
 
-    return MeshUploadResult(session_id=session_id, files=infos)
+
+@router.post(
+    "/{session_id}/mesh/complete", response_model=MeshUploadResult)
+def complete_mesh_upload(
+    session_id: str, payload: MeshDirectUploadComplete,
+):
+    """Pubblica atomicamente nel manifest una mesh gia' presente su R2."""
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        raise HTTPException(404, "Sessione non trovata")
+    requests = [DirectUploadFileRequest(
+        name=file.name, size_bytes=file.size_bytes, checksum=file.checksum,
+    ) for file in payload.files]
+    validated = _validate_mesh_upload_files(session_id, payload.kind, requests)
+    by_name = {file.name: (remote, content_type)
+               for file, remote, content_type in validated}
+    records = [
+        _verify_direct_record(file, by_name[file.name][0])
+        for file in payload.files
+    ]
+    return _publish_mesh_records(session_id, payload.kind, sess, records)
 
 
 @router.get("/{session_id}/mesh", response_model=MeshInfoResult)
@@ -1399,7 +1588,10 @@ def projection_status(session_id: str):
     return ProjectionJobResult(session_id=session_id, **result)
 
 
-@router.post("/{session_id}/projection-worker-progress")
+@router.post(
+    "/{session_id}/projection-worker-progress",
+    dependencies=[Depends(_require_worker_token)],
+)
 def projection_worker_progress(
     session_id: str, payload: ProjectionWorkerProgress,
 ):
@@ -1413,13 +1605,19 @@ def projection_worker_progress(
     return {"ok": True}
 
 
-@router.post("/{session_id}/projection-worker-fail")
+@router.post(
+    "/{session_id}/projection-worker-fail",
+    dependencies=[Depends(_require_worker_token)],
+)
 def projection_worker_fail(session_id: str, payload: ProjectionWorkerFailure):
     projection_service.fail_worker_job(session_id, payload.job_id, payload.reason)
     return {"ok": True}
 
 
-@router.put("/{session_id}/projection-worker-result", response_model=ProjectionJobResult)
+@router.put(
+    "/{session_id}/projection-worker-result", response_model=ProjectionJobResult,
+    dependencies=[Depends(_require_worker_token)],
+)
 async def projection_worker_result(
     session_id: str,
     job_id: str = Form(...),
@@ -1427,6 +1625,7 @@ async def projection_worker_result(
     files: list[UploadFile] = File(...),
 ):
     """Riceve solo gli output gia' calcolati dal Mac e li pubblica atomicamente."""
+    _require_legacy_uploads()
     try:
         document = json.loads(manifest)
     except ValueError as exc:
@@ -1463,6 +1662,87 @@ async def projection_worker_result(
     try:
         result = projection_service.complete_worker_job(
             session_id, job_id, document, records)
+    except projection_service.InputsMissing as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except projection_service.ProjectionError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return ProjectionJobResult(session_id=session_id, **result)
+
+
+_PROJECTION_CONTENT_TYPES = {
+    ".obj": "model/obj",
+    ".mtl": "model/mtl",
+    ".png": "image/png",
+    ".txt": "text/plain",
+    ".json": "application/json",
+}
+
+
+def _projection_direct_files(
+    session_id: str, job_id: str, files: list[DirectUploadFileRequest],
+) -> list[tuple[DirectUploadFileRequest, str, str]]:
+    validated = []
+    seen: set[str] = set()
+    for file in files:
+        name = Path(file.name).name
+        suffix = Path(name).suffix.lower()
+        if name != file.name or name in seen or suffix not in _PROJECTION_CONTENT_TYPES:
+            raise HTTPException(400, f"File risultato non ammesso: {file.name}")
+        if file.size_bytes > 20 * 1024 * 1024 * 1024:
+            raise HTTPException(413, f"File risultato troppo grande: '{name}'")
+        seen.add(name)
+        remote = storage_service.out_path(
+            session_id, f"projection/jobs/{job_id}/{name}")
+        validated.append((file, remote, _PROJECTION_CONTENT_TYPES[suffix]))
+    return validated
+
+
+@router.post(
+    "/{session_id}/projection-worker-upload-tickets",
+    response_model=DirectUploadTargets,
+    dependencies=[Depends(_require_worker_token)],
+)
+def create_projection_upload_tickets(
+    session_id: str, payload: ProjectionDirectUploadRequest,
+):
+    """Firma PUT Mac->R2 per il bundle di proiezione, senza transitare Railway."""
+    try:
+        projection_service.update_worker_progress(
+            session_id, payload.job_id, 0.95, "Preparo il caricamento diretto")
+    except projection_service.InputsMissing as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except projection_service.ProjectionError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    validated = _projection_direct_files(session_id, payload.job_id, payload.files)
+    return DirectUploadTargets(
+        expires_in_sec=DIRECT_UPLOAD_TTL_SEC,
+        files=[
+            _direct_upload_target(file.name, remote, content_type)
+            for file, remote, content_type in validated
+        ],
+    )
+
+
+@router.post(
+    "/{session_id}/projection-worker-complete",
+    response_model=ProjectionJobResult,
+    dependencies=[Depends(_require_worker_token)],
+)
+def complete_projection_direct_upload(
+    session_id: str, payload: ProjectionDirectUploadComplete,
+):
+    requests = [DirectUploadFileRequest(
+        name=file.name, size_bytes=file.size_bytes, checksum=file.checksum,
+    ) for file in payload.files]
+    validated = _projection_direct_files(session_id, payload.job_id, requests)
+    by_name = {file.name: remote for file, remote, _ in validated}
+    records = [
+        _verify_direct_record(file, by_name[file.name])
+        for file in payload.files
+    ]
+    try:
+        result = projection_service.complete_worker_job(
+            session_id, payload.job_id, payload.manifest, records)
     except projection_service.InputsMissing as exc:
         raise HTTPException(404, str(exc)) from exc
     except projection_service.ProjectionError as exc:

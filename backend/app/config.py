@@ -21,3 +21,12 @@ S3_REGION: str = os.environ.get("S3_REGION", "auto")                  # R2 vuole
 
 # Tempo di vita dei signed URL per le immagini servite all'app iOS.
 SIGNED_URL_TTL_SEC: int = int(os.environ.get("SIGNED_URL_TTL_SEC", "3600"))
+
+# Migrazione compatibile: lasciare true finche' tutti i client usano i ticket R2,
+# poi impostare false su Railway per impedire body mesh/foto grandi sul web API.
+LEGACY_MULTIPART_UPLOADS: bool = os.environ.get(
+    "LEGACY_MULTIPART_UPLOADS", "true").lower() in {"1", "true", "yes"}
+
+# Se valorizzato, tutte le rotte che assegnano o aggiornano job Mac richiedono
+# `X-Worker-Token`. Va condiviso solo con i worker, mai con l'app iOS.
+WORKER_TOKEN: str | None = os.environ.get("WORKER_TOKEN")

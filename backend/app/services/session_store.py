@@ -51,13 +51,21 @@ def claim_next_oc_job() -> Optional[dict]:
         .select("*")
         .eq("status", session_state.QUEUED_OC)
         .order("created_at")
-        .limit(1)
+        .limit(16)
         .execute()
     )
-    if not res.data:
-        return None
-    sess = res.data[0]
-    return update_status(sess["id"], session_state.COMPUTING_OC)
+    for sess in res.data or []:
+        # Compare-and-swap: con piu' worker solo uno puo' cambiare queued_oc.
+        claimed = (
+            client.table(SESSIONS)
+            .update({"status": session_state.COMPUTING_OC})
+            .eq("id", sess["id"])
+            .eq("status", session_state.QUEUED_OC)
+            .execute()
+        )
+        if claimed.data:
+            return claimed.data[0]
+    return None
 
 
 def next_queued_projection_job() -> Optional[dict]:
@@ -80,6 +88,47 @@ def next_queued_projection_job() -> Optional[dict]:
         job = ((sess.get("result") or {}).get("projection_job") or {})
         if job.get("state") == "queued" and job.get("job_id"):
             return sess
+    return None
+
+
+def claim_next_projection_job(job_update: dict) -> Optional[dict]:
+    """Claim atomico del bake tramite filtro JSONB compare-and-swap.
+
+    `job_update` e' il documento `projection_job` gia' portato a running. Il
+    filtro include stato e job_id precedenti: due worker possono leggere lo
+    stesso candidato, ma soltanto il primo aggiornamento viene applicato.
+    """
+    client = get_supabase()
+    res = (
+        client.table(SESSIONS)
+        .select("*")
+        .contains("result", {"projection_job": {"state": "queued"}})
+        .order("updated_at")
+        .limit(8)
+        .execute()
+    )
+    for sess in res.data or []:
+        result = sess.get("result") or {}
+        previous = result.get("projection_job") or {}
+        job_id = previous.get("job_id")
+        if previous.get("state") != "queued" or not job_id:
+            continue
+        updated_result = {**result, "projection_job": {
+            **job_update,
+            "job_id": job_id,
+            "started_at": previous.get("started_at") or job_update.get("updated_at"),
+        }}
+        claimed = (
+            client.table(SESSIONS)
+            .update({"result": updated_result})
+            .eq("id", sess["id"])
+            .contains("result", {"projection_job": {
+                "state": "queued", "job_id": job_id,
+            }})
+            .execute()
+        )
+        if claimed.data:
+            return claimed.data[0]
     return None
 
 

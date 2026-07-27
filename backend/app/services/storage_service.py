@@ -103,6 +103,25 @@ def head_size(remote_path: str) -> int | None:
         return None
 
 
+def head_object(remote_path: str) -> dict | None:
+    """Metadati minimi di un oggetto senza materializzarne il contenuto."""
+    if _use_s3():
+        try:
+            response = _s3().head_object(Bucket=config.S3_BUCKET, Key=remote_path)
+        except Exception:
+            return None
+        return {
+            "size": int(response["ContentLength"]),
+            "content_type": response.get("ContentType") or "",
+            "etag": (response.get("ETag") or "").strip('"'),
+        }
+    try:
+        data = _supabase_bucket().download(remote_path)
+    except Exception:
+        return None
+    return {"size": len(data), "content_type": "", "etag": ""}
+
+
 def signed_url(remote_path: str, expires_in_sec: int | None = None) -> str:
     ttl = expires_in_sec or config.SIGNED_URL_TTL_SEC
     if _use_s3():
@@ -114,3 +133,29 @@ def signed_url(remote_path: str, expires_in_sec: int | None = None) -> str:
     res = _supabase_bucket().create_signed_url(remote_path, ttl)
     # supabase-py 2.x ritorna {'signedURL': '...', 'signedUrl': '...'}; copriamo entrambi.
     return res.get("signedURL") or res.get("signedUrl") or ""
+
+
+def signed_upload_url(
+    remote_path: str,
+    content_type: str,
+    expires_in_sec: int = 900,
+) -> tuple[str, dict[str, str]]:
+    """URL PUT diretto allo storage.
+
+    Il client deve inviare esattamente gli header restituiti. Per ora il flusso
+    diretto richiede S3/R2; le vecchie rotte multipart restano disponibili come
+    fallback per installazioni Supabase Storage.
+    """
+    if not _use_s3():
+        raise RuntimeError("Upload diretto disponibile solo con storage S3/R2")
+    headers = {"Content-Type": content_type}
+    url = _s3().generate_presigned_url(
+        "put_object",
+        Params={
+            "Bucket": config.S3_BUCKET,
+            "Key": remote_path,
+            "ContentType": content_type,
+        },
+        ExpiresIn=expires_in_sec,
+    )
+    return url, headers

@@ -155,15 +155,20 @@ class Client:
     def __init__(self, base: str, dry: bool = False):
         self.base = base.rstrip("/")
         self.dry = dry
+        token = os.environ.get("WORKER_TOKEN", "").strip()
+        self.headers = {"X-Worker-Token": token} if token else {}
 
     def next_job(self) -> dict:
-        r = requests.get(f"{self.base}/facade-sessions/next-oc-job", timeout=30)
+        r = requests.get(
+            f"{self.base}/facade-sessions/next-oc-job",
+            headers=self.headers, timeout=30)
         r.raise_for_status()
         return r.json()
 
     def next_projection_job(self) -> dict:
         r = requests.get(
-            f"{self.base}/facade-sessions/next-projection-job", timeout=30)
+            f"{self.base}/facade-sessions/next-projection-job",
+            headers=self.headers, timeout=30)
         r.raise_for_status()
         return r.json()
 
@@ -176,8 +181,45 @@ class Client:
         requests.post(
             f"{self.base}/facade-sessions/{sid}/projection-worker-progress",
             json={"job_id": job_id, "progress": progress, "message": message},
+            headers=self.headers,
             timeout=30,
         ).raise_for_status()
+
+    @staticmethod
+    def _upload_descriptors(paths: list[tuple[str, str | Path]]) -> list[dict]:
+        return [{
+            "name": name,
+            "size_bytes": Path(path).stat().st_size,
+            "checksum": sha256_file(path),
+        } for name, path in paths]
+
+    @staticmethod
+    def _put_direct_files(
+        targets: list[dict], paths: list[tuple[str, str | Path]],
+    ) -> list[dict]:
+        local = {name: Path(path) for name, path in paths}
+        descriptors = {
+            item["name"]: item for item in Client._upload_descriptors(paths)
+        }
+        records = []
+        for target in targets:
+            name = target["name"]
+            path = local.get(name)
+            if path is None:
+                raise RuntimeError(f"Ticket upload senza file locale: {name}")
+            with path.open("rb") as handle:
+                response = requests.put(
+                    target["url"],
+                    data=handle,
+                    headers=target.get("headers") or {},
+                    timeout=1800,
+                )
+            response.raise_for_status()
+            records.append({
+                **descriptors[name],
+                "path": target["path"],
+            })
+        return records
 
     def upload_projection(
         self, sid: str, job_id: str, manifest: dict, output_dir: Path,
@@ -186,6 +228,29 @@ class Client:
         if self.dry:
             print(f"  [dry] upload projection: {[p.name for p in paths]}")
             return
+        named_paths = [(path.name, path) for path in paths]
+        ticket = requests.post(
+            f"{self.base}/facade-sessions/{sid}/projection-worker-upload-tickets",
+            json={
+                "job_id": job_id,
+                "files": self._upload_descriptors(named_paths),
+            },
+            headers=self.headers,
+            timeout=30,
+        )
+        if ticket.status_code not in {404, 405, 503}:
+            ticket.raise_for_status()
+            records = self._put_direct_files(ticket.json()["files"], named_paths)
+            response = requests.post(
+                f"{self.base}/facade-sessions/{sid}/projection-worker-complete",
+                json={"job_id": job_id, "manifest": manifest, "files": records},
+                headers=self.headers,
+                timeout=120,
+            )
+            response.raise_for_status()
+            return
+
+        print("  backend senza upload diretto R2: uso multipart legacy")
         handles = [path.open("rb") for path in paths]
         try:
             multipart = [
@@ -196,6 +261,7 @@ class Client:
                 f"{self.base}/facade-sessions/{sid}/projection-worker-result",
                 data={"job_id": job_id, "manifest": json.dumps(manifest)},
                 files=multipart,
+                headers=self.headers,
                 timeout=1800,
             )
             response.raise_for_status()
@@ -210,7 +276,8 @@ class Client:
         try:
             requests.post(
                 f"{self.base}/facade-sessions/{sid}/projection-worker-fail",
-                json={"job_id": job_id, "reason": reason[:500]}, timeout=30,
+                json={"job_id": job_id, "reason": reason[:500]},
+                headers=self.headers, timeout=30,
             )
         except Exception:
             pass
@@ -218,6 +285,26 @@ class Client:
     def upload_mesh(self, sid: str, files: list[tuple[str, str]], kind: str = "raw"):
         if self.dry:
             print(f"  [dry] PUT /{sid}/mesh?kind={kind} {[n for n, _ in files]}"); return
+        descriptors = self._upload_descriptors(files)
+        ticket = requests.post(
+            f"{self.base}/facade-sessions/{sid}/mesh/upload-tickets",
+            json={"kind": kind, "files": descriptors},
+            headers=self.headers,
+            timeout=30,
+        )
+        if ticket.status_code not in {404, 405, 503}:
+            ticket.raise_for_status()
+            records = self._put_direct_files(ticket.json()["files"], files)
+            response = requests.post(
+                f"{self.base}/facade-sessions/{sid}/mesh/complete",
+                json={"kind": kind, "files": records},
+                headers=self.headers,
+                timeout=120,
+            )
+            response.raise_for_status()
+            return
+
+        print("  backend senza upload diretto R2: uso multipart legacy")
         handles = [open(path, "rb") for _, path in files]
         try:
             multipart = [
@@ -225,7 +312,8 @@ class Client:
                 for (name, _), handle in zip(files, handles)
             ]
             r = requests.put(f"{self.base}/facade-sessions/{sid}/mesh",
-                             data={"kind": kind}, files=multipart, timeout=600)
+                             data={"kind": kind}, files=multipart,
+                             headers=self.headers, timeout=600)
             r.raise_for_status()
         finally:
             for handle in handles:
@@ -234,14 +322,17 @@ class Client:
     def mesh_ready(self, sid: str):
         if self.dry:
             print(f"  [dry] POST /{sid}/mesh-ready"); return
-        requests.post(f"{self.base}/facade-sessions/{sid}/mesh-ready", timeout=30).raise_for_status()
+        requests.post(
+            f"{self.base}/facade-sessions/{sid}/mesh-ready",
+            headers=self.headers, timeout=30).raise_for_status()
 
     def fail(self, sid: str, reason: str):
         if self.dry:
             print(f"  [dry] POST /{sid}/fail: {reason}"); return
         try:
             requests.post(f"{self.base}/facade-sessions/{sid}/fail",
-                          json={"reason": reason[:500]}, timeout=30)
+                          json={"reason": reason[:500]},
+                          headers=self.headers, timeout=30)
         except Exception:
             pass
 
