@@ -378,6 +378,13 @@ def process_projection_job(cli: Client, job: dict, dry: bool) -> None:
         photos_dir = root / "photos"
         photos_dir.mkdir()
         downloaded = [0]
+        reported_progress = [0.06]
+
+        def report(progress: float, message: str) -> None:
+            reported_progress[0] = max(reported_progress[0], progress)
+            cli.projection_progress(
+                sid, job_id, reported_progress[0], message,
+            )
 
         def resolve_photo(key: str) -> str | None:
             record = photo_records.get(str(int(key)))
@@ -387,10 +394,7 @@ def process_projection_job(cli: Client, job: dict, dry: bool) -> None:
             if not local.exists():
                 download_url(record["url"], local)
                 downloaded[0] += 1
-                cli.projection_progress(
-                    sid, job_id, 0.12,
-                    f"Mac: scarico foto selezionate {downloaded[0]}",
-                )
+                report(0.12, f"Mac: scarico foto selezionate {downloaded[0]}")
             return str(local)
 
         cfg = job.get("config") or {}
@@ -400,18 +404,14 @@ def process_projection_job(cli: Client, job: dict, dry: bool) -> None:
         fallback_reason = ""
 
         def plane_progress(done: int, total: int, name: str, verb: str) -> None:
-            cli.projection_progress(
-                sid, job_id, 0.15 + 0.75 * done / max(total, 1),
-                f"Mac: {verb} piano {done}/{total}: {name}",
-            )
+            report(
+                0.15 + 0.75 * done / max(total, 1),
+                f"Mac: {verb} piano {done}/{total}: {name}")
 
         enhanced = bool(raw_reference) and bool(cfg.get("oc_reference_bake", True))
         if enhanced:
             try:
-                cli.projection_progress(
-                    sid, job_id, 0.14,
-                    "Mac: allineo le foto al riferimento Object Capture",
-                )
+                report(0.14, "Mac: allineo le foto al riferimento Object Capture")
                 summary = oc_reference_bake.bake_planes(
                     str(mesh), str(raw_reference["obj"]), str(raw_reference["mtl"]),
                     poses, str(photos_dir), planes, str(out_dir),
@@ -470,7 +470,7 @@ def process_projection_job(cli: Client, job: dict, dry: bool) -> None:
             "texture_encoding": summary.get("texture_encoding", "sRGB"),
             "fallback_reason": fallback_reason,
         }
-        cli.projection_progress(sid, job_id, 0.94, "Mac: carico il bundle finale")
+        report(0.94, "Mac: carico il bundle finale")
         cli.upload_projection(sid, job_id, manifest, out_dir)
     print(f"✔ projection {sid} → texture pronta")
 
