@@ -145,7 +145,6 @@ struct EditorMesh3DView: View {
                     revisioneWorkspaceSalvata, revisioneWorkspace)
                 toastCloud = "Avvio la proiezione…"
                 var result = try await BackendAPIClient.shared.projectPlanes(sessionId: sid)
-                var polls = 0
                 var erroriPollingConsecutivi = 0
                 while result.state == "queued" || result.state == "running" {
                     let percent = Int((result.progress * 100).rounded())
@@ -165,13 +164,6 @@ struct EditorMesh3DView: View {
                         default:
                             throw urlError
                         }
-                    }
-                    polls += 1
-                    if polls >= 360 {
-                        throw NSError(
-                            domain: "AcrobaticaProjection", code: 3,
-                            userInfo: [NSLocalizedDescriptionKey:
-                                "La proiezione non si è conclusa entro 30 minuti"])
                     }
                 }
                 if result.state == "failed" {

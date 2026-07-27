@@ -441,11 +441,11 @@ def _worker_payload(sess: dict) -> dict:
             "texel_mm": float(os.environ.get("ACRO_PROJECTION_TEXEL_MM", "20")),
             "target_long_edge_px": int(os.environ.get(
                 "ACRO_PROJECTION_TARGET_LONG_EDGE_PX", "4096")),
-            "max_photos": int(os.environ.get("ACRO_PROJECTION_REGISTER_PHOTOS", "20")),
+            "max_photos": int(os.environ.get("ACRO_PROJECTION_REGISTER_PHOTOS", "12")),
             "registration_ceiling": int(os.environ.get(
-                "ACRO_PROJECTION_MAX_REGISTER_PHOTOS", "80")),
+                "ACRO_PROJECTION_MAX_REGISTER_PHOTOS", "12")),
             "coverage_photos": int(os.environ.get(
-                "ACRO_PROJECTION_COVERAGE_PHOTOS", "100")),
+                "ACRO_PROJECTION_COVERAGE_PHOTOS", "24")),
             "oc_reference_bake": os.environ.get(
                 "ACRO_OC_REFERENCE_BAKE", "1") not in {"0", "false", "False"},
             "default_scale": float(os.environ.get("ACRO_OC_SCALE", "6.0927")),
@@ -658,8 +658,8 @@ def project(session_id: str) -> dict:
                 "ACRO_PROJECTION_TARGET_LONG_EDGE_PX", "4096"))
             max_photos = int(os.environ.get("ACRO_PROJECTION_REGISTER_PHOTOS", "20"))
             registration_ceiling = int(os.environ.get(
-                "ACRO_PROJECTION_MAX_REGISTER_PHOTOS", "80"))
-            coverage_photos = int(os.environ.get("ACRO_PROJECTION_COVERAGE_PHOTOS", "100"))
+                "ACRO_PROJECTION_MAX_REGISTER_PHOTOS", "12"))
+            coverage_photos = int(os.environ.get("ACRO_PROJECTION_COVERAGE_PHOTOS", "24"))
             fallback_reason = ""
             raw_reference = inp.get("raw_reference")
             enhanced = bool(raw_reference) and os.environ.get(

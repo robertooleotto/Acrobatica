@@ -442,6 +442,21 @@ def adaptive_registration_budget(
     return min(max_photos, max(coverage_headroom, span_need, area_need))
 
 
+def pose_registration_budget(
+    pf: ob.PlaneFrame,
+    hard_cap: int = 12,
+) -> int:
+    """Numero massimo di viste da rifinire, deciso dalla geometria del piano.
+
+    Le pose restano la fonte di verita'. Un piano piccolo richiede poche viste;
+    una facciata estesa ne riceve di piu' per coprire colonne e altezze diverse,
+    ma la registrazione visiva non puo' mai espandere autonomamente la ricerca.
+    """
+    span_need = math.ceil(pf.width_m / 3.0)
+    area_need = math.ceil(pf.area_m2 / 40.0)
+    return min(max(1, hard_cap), max(3, span_need, area_need))
+
+
 def _alignment_is_connected(report: dict, photo_count: int) -> bool:
     """Verifica che tutte le foto registrate appartengano allo stesso grafo."""
     if photo_count < 2:
@@ -652,20 +667,13 @@ def _compose_plane(
     photo_reports: list[dict[str, object]] = []
 
     if can_register:
-        # Il tetto adattivo deve restare stabile per tutto il piano. Usare il
-        # target crescente come nuova base faceva convergere ogni faccia a 80
-        # foto, anche per spallette larghe pochi metri.
+        # La posa sceglie le viste; SIFT puo' solo rifinirle. Non allarghiamo
+        # piu' il gruppo quando la registrazione visiva non raggiunge una soglia.
         adaptive_ceiling = min(
             registration_ceiling,
-            max(
-                max_photos * 2,
-                adaptive_registration_budget(
-                    pf, base_photos=max_photos,
-                    max_photos=registration_ceiling,
-                ),
-            ),
+            pose_registration_budget(pf, hard_cap=max_photos),
         )
-        selection_target = min(max_photos, adaptive_ceiling)
+        selection_target = adaptive_ceiling
         selection_rounds: list[dict[str, object]] = []
         selection_report: dict[str, object] = {}
         global_report: dict[str, object] = {}
@@ -774,14 +782,9 @@ def _compose_plane(
             if len(attempted_keys) >= min(adaptive_ceiling, len(ranked)):
                 selection_report["stop_reason"] = "raggiunto il tetto tecnico"
                 break
-            next_target = min(
-                adaptive_ceiling,
-                max(selection_target + 8, int(math.ceil(selection_target * 1.5))),
-            )
-            if next_target <= selection_target:
-                selection_report["stop_reason"] = "raggiunto il tetto tecnico"
-                break
-            selection_target = next_target
+            selection_report["stop_reason"] = \
+                "gruppo determinato dalle pose esaurito"
+            break
 
         dominant_keys = _dominant_component_keys(global_report, accepted_keys)
         if dominant_keys and len(dominant_keys) < len(accepted_keys):
@@ -933,9 +936,9 @@ def bake_planes(
     out_dir: str,
     *,
     texel_mm: float = 20.0,
-    max_photos: int = 20,
-    registration_ceiling: int = 80,
-    coverage_photos: int = 100,
+    max_photos: int = 12,
+    registration_ceiling: int = 12,
+    coverage_photos: int = 24,
     crop: float = 0.9,
     scale_m_per_mesh_unit: float = 1.0,
     target_long_edge_px: int = 0,

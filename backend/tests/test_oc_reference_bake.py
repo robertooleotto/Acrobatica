@@ -19,6 +19,16 @@ def test_registration_budget_grows_with_real_plane_size():
     assert oc_reference_bake.adaptive_registration_budget(very_large_facade) == 75
 
 
+def test_pose_registration_budget_is_metric_and_hard_capped():
+    small = SimpleNamespace(width_m=2.0, area_m2=8.0)
+    facade = SimpleNamespace(width_m=24.0, area_m2=432.0)
+    very_large = SimpleNamespace(width_m=90.0, area_m2=2700.0)
+
+    assert oc_reference_bake.pose_registration_budget(small) == 3
+    assert oc_reference_bake.pose_registration_budget(facade) == 11
+    assert oc_reference_bake.pose_registration_budget(very_large) == 12
+
+
 def test_texture_plane_uses_preserved_frame_without_changing_geometry_fields():
     plane = {
         "id": 4,
@@ -273,7 +283,7 @@ def test_rejected_registration_is_not_reused_as_pose_filler():
     assert [item[1]["key"] for item in fillers] == ["3", "4"]
 
 
-def test_compose_plane_expands_until_registered_graph_is_connected(
+def test_compose_plane_does_not_expand_beyond_pose_budget(
     monkeypatch, tmp_path,
 ):
     frame = ortho_bake.PlaneFrame(
@@ -344,12 +354,12 @@ def test_compose_plane_expands_until_registered_graph_is_connected(
         max_rotation_deg=0.5, max_scale_error=0.03,
     )
 
-    assert global_counts == [2, 4]
+    assert global_counts == [2]
     assert coverage == 1.0
-    assert used == ["0", "1", "2", "3"]
-    assert report["registration_selection"]["rounds"][-1]["connected"] is True
+    assert used == ["0"]
+    assert report["registration_selection"]["rounds"][-1]["connected"] is False
     assert report["registration_selection"]["stop_reason"] == \
-        "copertura e componente dominante sufficienti"
+        "raggiunto il tetto tecnico"
 
 
 def test_compose_plane_uses_registered_photo_and_preserves_alpha(monkeypatch, tmp_path):
