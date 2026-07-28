@@ -81,6 +81,14 @@ def test_vertical_polygon_clip_preserves_intersections():
     assert service._polygon_area_uv(clipped) == pytest.approx(0.09)
 
 
+def test_polygon_covering_almost_the_whole_plane_is_not_an_opening():
+    whole_face = [[0.0, 0.0], [1.0, 0.0], [1.0, 0.96], [0.0, 0.96]]
+    large_window = [[0.08, 0.10], [0.92, 0.10], [0.92, 0.90], [0.08, 0.90]]
+
+    assert service._polygon_fills_plane(whole_face)
+    assert not service._polygon_fills_plane(large_window)
+
+
 def test_review_can_only_change_excluded_flag(monkeypatch):
     session = {
         "id": "session-1",
@@ -128,6 +136,31 @@ def test_deduplicate_keeps_best_overlapping_box():
     assert [item["score"] for item in result] == [0.9, 0.8]
 
 
+def test_nested_deduplication_keeps_the_inner_opening_box():
+    proposals = [
+        {"box": [10, 10, 110, 160], "score": 0.9, "label": "window"},
+        {"box": [20, 25, 100, 150], "score": 0.8, "label": "window"},
+    ]
+
+    result = service._deduplicate_nested(proposals)
+
+    assert [item["box"] for item in result] == [[20, 25, 100, 150]]
+
+
+def test_nested_deduplication_does_not_merge_a_balcony_with_its_window():
+    proposals = [
+        {"box": [0, 0, 300, 250], "score": 0.9, "label": "balcony door"},
+        {"box": [100, 20, 190, 170], "score": 0.8, "label": "window"},
+    ]
+
+    assert len(service._deduplicate_nested(proposals)) == 2
+
+
+def test_full_face_detector_box_is_rejected_but_large_opening_is_kept():
+    assert service._is_full_face_box([0, 0, 1000, 1000], (1000, 1000))
+    assert not service._is_full_face_box([100, 50, 900, 950], (1000, 1000))
+
+
 def test_tiles_cover_the_full_4k_image_without_gaps():
     bounds = service._tile_bounds((4096, 3520), tile_size=2048, overlap=384)
     coverage = np.zeros((3520, 4096), np.uint8)
@@ -137,6 +170,53 @@ def test_tiles_cover_the_full_4k_image_without_gaps():
     assert coverage.all()
     assert bounds[0][:2] == (0, 0)
     assert bounds[-1][2:] == (4096, 3520)
+
+
+def test_ground_detection_remaps_crop_boxes_to_full_image(monkeypatch):
+    image = service.Image.new("RGB", (1000, 1000))
+
+    monkeypatch.setattr(service, "_detect_boxes_tiled", lambda *args, **kwargs: [{
+        "box": [10, 20, 30, 40],
+        "score": 0.9,
+        "label": "shop window",
+        "_tile": (0, 0, 1000, 200),
+    }])
+
+    result = service._detect_ground_boxes_tiled(
+        image,
+        runtime=None,
+        tile_size=2048,
+        overlap=384,
+        ground_fraction=0.20,
+        min_aspect=0.25,
+    )
+
+    assert result[0]["box"] == [10, 820, 30, 840]
+    assert result[0]["_tile"] == (0, 800, 1000, 1000)
+
+
+def test_ground_detection_skips_narrow_return_faces(monkeypatch):
+    image = service.Image.new("RGB", (200, 1000))
+    called = False
+
+    def detector(*args, **kwargs):
+        nonlocal called
+        called = True
+        return []
+
+    monkeypatch.setattr(service, "_detect_boxes_tiled", detector)
+
+    result = service._detect_ground_boxes_tiled(
+        image,
+        runtime=None,
+        tile_size=2048,
+        overlap=384,
+        ground_fraction=0.24,
+        min_aspect=0.25,
+    )
+
+    assert result == []
+    assert called is False
 
 
 def test_tiled_segmentation_returns_polygons_in_original_coordinates():

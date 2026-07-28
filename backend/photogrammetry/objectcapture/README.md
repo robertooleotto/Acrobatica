@@ -96,9 +96,10 @@ BACKEND=https://acrobatica-production.up.railway.app \
 worker-venv/bin/python photogrammetry/objectcapture/oc_worker.py --projection-only
 ```
 
-Lo stesso worker consuma anche la coda Grounding DINO/SAM2. Per abilitarla
-installare le dipendenze vision (i pesi Hugging Face vengono scaricati una sola
-volta e poi restano nella cache del Mac):
+Lo stesso worker consuma anche la coda aperture. La pipeline predefinita usa
+Florence-2 sull'intera facciata, Grounding DINO sulla fascia inferiore e SAM2
+per le maschere. Per abilitarla installare le dipendenze vision (i pesi Hugging
+Face vengono scaricati una sola volta e poi restano nella cache del Mac):
 
 ```bash
 worker-venv/bin/pip install -r \

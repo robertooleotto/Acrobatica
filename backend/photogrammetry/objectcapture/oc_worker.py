@@ -854,6 +854,11 @@ def process_opening_job(cli: Client, job: dict, dry: bool) -> None:
         os.environ["ACRO_OPENING_DETECTOR_MODEL"] = str(config["detector_model"])
     if config.get("segmenter_model"):
         os.environ["ACRO_OPENING_SEGMENTER_MODEL"] = str(config["segmenter_model"])
+    if config.get("facade_detector_model"):
+        os.environ["ACRO_OPENING_FACADE_DETECTOR_MODEL"] = str(
+            config["facade_detector_model"])
+    if config.get("pipeline"):
+        os.environ["ACRO_OPENING_PIPELINE"] = str(config["pipeline"])
     os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
     backend_root = Path(__file__).resolve().parents[2]
@@ -882,6 +887,9 @@ def process_opening_job(cli: Client, job: dict, dry: bool) -> None:
         tile_size=int(config.get("tile_size", 2048)),
         tile_overlap=int(config.get("tile_overlap", 384)),
         min_area_m2=float(config.get("min_area_m2", 0.08)),
+        pipeline=str(config.get("pipeline", "florence_ground_hybrid")),
+        ground_fraction=float(config.get("ground_fraction", 0.24)),
+        ground_min_aspect=float(config.get("ground_min_aspect", 0.25)),
     )
     cli.opening_progress(sid, job_id, 0.97, "Mac: pubblico le aperture")
     cli.complete_openings(sid, job_id, openings)

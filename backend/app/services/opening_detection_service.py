@@ -38,6 +38,16 @@ _JOB_STALE_SECONDS = int(os.environ.get("ACRO_OPENING_STALE_SECONDS", "7200"))
 _INFERENCE_LOCK = threading.Lock()
 _DETECTOR_MODEL = os.environ.get(
     "ACRO_OPENING_DETECTOR_MODEL", "IDEA-Research/grounding-dino-tiny")
+_FACADE_DETECTOR_MODEL = os.environ.get(
+    "ACRO_OPENING_FACADE_DETECTOR_MODEL",
+    "florence-community/Florence-2-base-ft",
+)
+_FACADE_DETECTOR_REVISION = os.environ.get(
+    "ACRO_OPENING_FACADE_DETECTOR_REVISION",
+    "0b03b6f15a4a211370fb204aee4e7dd48887ea37",
+)
+_DETECTION_PIPELINE = os.environ.get(
+    "ACRO_OPENING_PIPELINE", "florence_ground_hybrid")
 _SEGMENTER_MODEL = os.environ.get(
     "ACRO_OPENING_SEGMENTER_MODEL", "facebook/sam2.1-hiera-tiny")
 _PROMPT_LABELS = [[
@@ -49,6 +59,13 @@ _PROMPT_LABELS = [[
     "storefront",
     "glass door",
 ]]
+_FLORENCE_PROMPTS = ("window", "door", "shop window")
+
+
+def _detector_label() -> str:
+    if _DETECTION_PIPELINE == "florence_ground_hybrid":
+        return f"{_FACADE_DETECTOR_MODEL}+{_DETECTOR_MODEL}"
+    return _DETECTOR_MODEL
 
 
 def _now_iso() -> str:
@@ -124,6 +141,22 @@ def _polygon_area_uv(points: list[list[float]] | list[tuple[float, float]]) -> f
         nxt = points[(index + 1) % len(points)]
         area += float(point[0]) * float(nxt[1]) - float(nxt[0]) * float(point[1])
     return abs(area) * 0.5
+
+
+def _polygon_fills_plane(
+    points: list[list[float]] | list[tuple[float, float]],
+) -> bool:
+    if len(points) < 3 or _polygon_area_uv(points) < 0.45:
+        return False
+    us = [float(point[0]) for point in points]
+    vs = [float(point[1]) for point in points]
+    touches = (
+        min(us) <= 0.02,
+        max(us) >= 0.98,
+        min(vs) <= 0.02,
+        max(vs) >= 0.98,
+    )
+    return sum(touches) >= 3
 
 
 def _trim_map(sess: dict) -> dict[int, tuple[float, float]]:
@@ -261,7 +294,7 @@ def _public_result(sess: dict) -> dict:
         "gross_area_m2": float(document.get("gross_area_m2", 0.0)),
         "excluded_area_m2": float(document.get("excluded_area_m2", 0.0)),
         "net_area_m2": float(document.get("net_area_m2", 0.0)),
-        "detector_model": document.get("detector_model", _DETECTOR_MODEL),
+        "detector_model": document.get("detector_model", _detector_label()),
         "segmenter_model": document.get("segmenter_model", _SEGMENTER_MODEL),
     }
 
@@ -316,7 +349,13 @@ def _worker_payload(sess: dict) -> dict:
             "tile_size": int(os.environ.get("ACRO_OPENING_TILE_SIZE", "2048")),
             "tile_overlap": int(os.environ.get("ACRO_OPENING_TILE_OVERLAP", "384")),
             "min_area_m2": float(os.environ.get("ACRO_OPENING_MIN_AREA_M2", "0.08")),
+            "pipeline": _DETECTION_PIPELINE,
             "detector_model": _DETECTOR_MODEL,
+            "facade_detector_model": _FACADE_DETECTOR_MODEL,
+            "ground_fraction": float(os.environ.get(
+                "ACRO_OPENING_GROUND_FRACTION", "0.24")),
+            "ground_min_aspect": float(os.environ.get(
+                "ACRO_OPENING_GROUND_MIN_ASPECT", "0.25")),
             "segmenter_model": _SEGMENTER_MODEL,
         },
     }
@@ -397,7 +436,7 @@ def complete_worker_job(session_id: str, job_id: str, openings: list[dict]) -> d
     validated = _validated_worker_openings(projection, openings)
     document = {
         **_totals(projection, validated, _trim_map(sess)),
-        "detector_model": _DETECTOR_MODEL,
+        "detector_model": _detector_label(),
         "segmenter_model": _SEGMENTER_MODEL,
         "updated_at": _now_iso(),
     }
@@ -512,7 +551,7 @@ def save_review(session_id: str, openings: list[dict]) -> dict:
         reviewed.append({**source, "excluded": bool(item.get("excluded", True))})
     document = {
         **_totals(projection, reviewed, _trim_map(sess)),
-        "detector_model": _DETECTOR_MODEL,
+        "detector_model": _detector_label(),
         "segmenter_model": _SEGMENTER_MODEL,
         "updated_at": _now_iso(),
     }
@@ -536,6 +575,49 @@ def _deduplicate(proposals: list[dict], threshold: float = 0.55) -> list[dict]:
     for proposal in sorted(proposals, key=lambda item: item["score"], reverse=True):
         if all(_iou(proposal["box"], item["box"]) < threshold for item in kept):
             kept.append(proposal)
+    return kept
+
+
+def _box_area(box: list[float]) -> float:
+    return max(box[2] - box[0], 0.0) * max(box[3] - box[1], 0.0)
+
+
+def _overlap_over_smaller(a: list[float], b: list[float]) -> float:
+    x0, y0 = max(a[0], b[0]), max(a[1], b[1])
+    x1, y1 = min(a[2], b[2]), min(a[3], b[3])
+    intersection = max(x1 - x0, 0.0) * max(y1 - y0, 0.0)
+    return intersection / max(min(_box_area(a), _box_area(b)), 1e-9)
+
+
+def _same_nested_opening(a: list[float], b: list[float]) -> bool:
+    area_a, area_b = _box_area(a), _box_area(b)
+    ratio = max(area_a, area_b) / max(min(area_a, area_b), 1e-9)
+    center_a = ((a[0] + a[2]) * 0.5, (a[1] + a[3]) * 0.5)
+    center_b = ((b[0] + b[2]) * 0.5, (b[1] + b[3]) * 0.5)
+    scale = max(
+        min(a[2] - a[0], b[2] - b[0]),
+        min(a[3] - a[1], b[3] - b[1]),
+        1e-9,
+    )
+    center_distance = (
+        (center_a[0] - center_b[0]) ** 2
+        + (center_a[1] - center_b[1]) ** 2
+    ) ** 0.5 / scale
+    return (
+        _overlap_over_smaller(a, b) >= 0.72
+        and ratio <= 2.8
+        and center_distance <= 0.55
+    )
+
+
+def _deduplicate_nested(proposals: list[dict]) -> list[dict]:
+    """Fonde box interno/esterno della stessa apertura, tenendo quello interno."""
+    kept = []
+    for proposal in sorted(proposals, key=lambda item: _box_area(item["box"])):
+        if any(_same_nested_opening(proposal["box"], item["box"])
+               for item in kept):
+            continue
+        kept.append(proposal)
     return kept
 
 
@@ -620,6 +702,24 @@ def _load_grounding():
     return torch, processor, model, device
 
 
+def _load_florence():
+    import torch
+    from transformers import AutoProcessor, Florence2ForConditionalGeneration
+
+    processor = AutoProcessor.from_pretrained(
+        _FACADE_DETECTOR_MODEL,
+        revision=_FACADE_DETECTOR_REVISION,
+    )
+    model = Florence2ForConditionalGeneration.from_pretrained(
+        _FACADE_DETECTOR_MODEL,
+        revision=_FACADE_DETECTOR_REVISION,
+        attn_implementation="eager",
+    )
+    device = _inference_device(torch)
+    model.to(device).eval()
+    return torch, processor, model, device
+
+
 def _load_sam2():
     import torch
     from transformers import Sam2Model, Sam2Processor
@@ -688,6 +788,53 @@ def _detect_boxes(image: Image.Image, runtime) -> list[dict]:
     return _deduplicate(proposals)
 
 
+def _is_full_face_box(box: list[float], image_size: tuple[int, int]) -> bool:
+    width, height = image_size
+    if _box_area(box) < width * height * 0.55:
+        return False
+    margin_x, margin_y = width * 0.02, height * 0.02
+    touches = (
+        box[0] <= margin_x,
+        box[2] >= width - margin_x,
+        box[1] <= margin_y,
+        box[3] >= height - margin_y,
+    )
+    return sum(touches) >= 3
+
+
+def _detect_boxes_florence(image: Image.Image, runtime) -> list[dict]:
+    torch, processor, model, device = _runtime_parts(runtime)
+    proposals = []
+    task = "<OPEN_VOCABULARY_DETECTION>"
+    for query in _FLORENCE_PROMPTS:
+        inputs = processor(
+            text=task + query, images=image, return_tensors="pt")
+        if device != "cpu":
+            inputs = inputs.to(device)
+        with torch.inference_mode():
+            generated = model.generate(
+                **inputs,
+                max_new_tokens=1024,
+                num_beams=3,
+                do_sample=False,
+            )
+        text = processor.batch_decode(
+            generated, skip_special_tokens=False)[0]
+        parsed = processor.post_process_generation(
+            text, task=task, image_size=image.size).get(task, {})
+        for box in parsed.get("bboxes", []):
+            coordinates = [float(value) for value in box]
+            if _is_full_face_box(coordinates, image.size):
+                continue
+            proposals.append({
+                "box": coordinates,
+                "score": 0.8,
+                "label": query,
+                "_tile": (0, 0, image.width, image.height),
+            })
+    return _deduplicate_nested(_deduplicate(proposals))
+
+
 def _axis_starts(length: int, tile_size: int, overlap: int) -> list[int]:
     if length <= tile_size:
         return [0]
@@ -736,6 +883,36 @@ def _detect_boxes_tiled(
                 continue
             proposals.append({**raw, "box": box, "_tile": (x0, y0, x1, y1)})
     return _deduplicate(proposals)
+
+
+def _detect_ground_boxes_tiled(
+    image: Image.Image,
+    runtime,
+    *,
+    tile_size: int,
+    overlap: int,
+    ground_fraction: float,
+    min_aspect: float,
+) -> list[dict]:
+    if image.height <= 0 or image.width / image.height < min_aspect:
+        return []
+    fraction = min(max(float(ground_fraction), 0.10), 0.50)
+    y_offset = int(round(image.height * (1.0 - fraction)))
+    crop = image.crop((0, y_offset, image.width, image.height))
+    proposals = _detect_boxes_tiled(
+        crop, runtime, tile_size=tile_size, overlap=overlap)
+    remapped = []
+    for proposal in proposals:
+        x0, y0, x1, y1 = proposal["_tile"]
+        remapped.append({
+            **proposal,
+            "box": [
+                proposal["box"][0], proposal["box"][1] + y_offset,
+                proposal["box"][2], proposal["box"][3] + y_offset,
+            ],
+            "_tile": (x0, y0 + y_offset, x1, y1 + y_offset),
+        })
+    return remapped
 
 
 def _segment_boxes(image: Image.Image, boxes: list[list[float]], runtime) -> list[np.ndarray]:
@@ -833,11 +1010,15 @@ def detect_openings_from_textures(
     texture_paths: dict[int, Path],
     *,
     progress: Callable[[float, str], None] | None = None,
+    facade_loader: Callable = _load_florence,
     grounding_loader: Callable = _load_grounding,
     sam_loader: Callable = _load_sam2,
     tile_size: int = 2048,
     tile_overlap: int = 384,
     min_area_m2: float = 0.08,
+    pipeline: str = _DETECTION_PIPELINE,
+    ground_fraction: float = 0.24,
+    ground_min_aspect: float = 0.25,
 ) -> list[dict]:
     """Inferenza pura su file locali, usabile sia da Railway sia dal worker Mac."""
     report = progress or (lambda _value, _message: None)
@@ -848,22 +1029,61 @@ def detect_openings_from_textures(
     if not planes:
         raise InputsMissing("Il bundle non contiene texture dei piani leggibili")
 
-    report(0.04, "Mac: carico Grounding DINO")
-    grounding = grounding_loader()
     proposals_by_plane: dict[int, list[dict]] = {}
+    use_hybrid = pipeline == "florence_ground_hybrid"
+    facade_detector = None
+    if use_hybrid:
+        try:
+            report(0.04, "Mac: carico Florence-2")
+            facade_detector = facade_loader()
+            for done, plane in enumerate(planes, 1):
+                plane_index = int(plane["index"])
+                image, _ = _read_texture(texture_paths[plane_index])
+                proposals_by_plane[plane_index] = _detect_boxes_florence(
+                    image, facade_detector)
+                report(
+                    0.05 + 0.25 * done / len(planes),
+                    f"Mac: analizzo facciata {done}/{len(planes)}",
+                )
+        except Exception as exc:
+            # Il job deve restare utilizzabile anche se il checkpoint Florence
+            # non e disponibile sul worker: in tal caso torna alla scansione DINO.
+            report(0.04, f"Mac: fallback Grounding DINO ({type(exc).__name__})")
+            proposals_by_plane.clear()
+            use_hybrid = False
+        finally:
+            if facade_detector is not None:
+                del facade_detector
+            gc.collect()
+
+    report(0.31 if use_hybrid else 0.04, "Mac: carico Grounding DINO")
+    grounding = grounding_loader()
     for done, plane in enumerate(planes, 1):
         plane_index = int(plane["index"])
         image, _ = _read_texture(texture_paths[plane_index])
-        proposals_by_plane[plane_index] = _detect_boxes_tiled(
-            image, grounding, tile_size=tile_size, overlap=tile_overlap)
-        report(
-            0.05 + 0.38 * done / len(planes),
-            f"Mac: cerco aperture, faccia {done}/{len(planes)}",
-        )
+        if use_hybrid:
+            grounded = _detect_ground_boxes_tiled(
+                image,
+                grounding,
+                tile_size=tile_size,
+                overlap=tile_overlap,
+                ground_fraction=ground_fraction,
+                min_aspect=ground_min_aspect,
+            )
+            proposals_by_plane[plane_index] = _deduplicate_nested(
+                proposals_by_plane.get(plane_index, []) + grounded)
+            start, span = 0.32, 0.16
+            message = f"Mac: controllo piano terra {done}/{len(planes)}"
+        else:
+            proposals_by_plane[plane_index] = _detect_boxes_tiled(
+                image, grounding, tile_size=tile_size, overlap=tile_overlap)
+            start, span = 0.05, 0.38
+            message = f"Mac: cerco aperture, faccia {done}/{len(planes)}"
+        report(start + span * done / len(planes), message)
     del grounding
     gc.collect()
 
-    report(0.46, "Mac: carico SAM2")
+    report(0.49 if use_hybrid else 0.46, "Mac: carico SAM2")
     sam = sam_loader()
     openings = []
     for done, plane in enumerate(planes, 1):
@@ -885,10 +1105,12 @@ def detect_openings_from_textures(
             }
             candidate["area_m2"] = round(
                 _opening_area_m2(candidate, plane), 3)
-            if len(polygon) >= 3 and candidate["area_m2"] >= min_area_m2:
+            if (len(polygon) >= 3
+                    and not _polygon_fills_plane(polygon)
+                    and candidate["area_m2"] >= min_area_m2):
                 openings.append(candidate)
         report(
-            0.48 + 0.47 * done / len(planes),
+            0.50 + 0.45 * done / len(planes),
             f"Mac: segmento aperture, faccia {done}/{len(planes)}",
         )
     del sam
@@ -898,6 +1120,7 @@ def detect_openings_from_textures(
 
 def detect_openings(
     session_id: str,
+    facade_loader: Callable = _load_florence,
     grounding_loader: Callable = _load_grounding,
     sam_loader: Callable = _load_sam2,
 ) -> dict:
@@ -925,17 +1148,23 @@ def detect_openings(
                 texture_paths,
                 progress=lambda value, message: _set_job(
                     session_id, "running", value, message.replace("Mac: ", "")),
+                facade_loader=facade_loader,
                 grounding_loader=grounding_loader,
                 sam_loader=sam_loader,
                 tile_size=int(os.environ.get("ACRO_OPENING_TILE_SIZE", "2048")),
                 tile_overlap=int(os.environ.get("ACRO_OPENING_TILE_OVERLAP", "384")),
                 min_area_m2=float(os.environ.get("ACRO_OPENING_MIN_AREA_M2", "0.08")),
+                pipeline=_DETECTION_PIPELINE,
+                ground_fraction=float(os.environ.get(
+                    "ACRO_OPENING_GROUND_FRACTION", "0.24")),
+                ground_min_aspect=float(os.environ.get(
+                    "ACRO_OPENING_GROUND_MIN_ASPECT", "0.25")),
             )
 
         latest = session_store.get_session(session_id) or sess
         document = {
             **_totals(projection, openings, _trim_map(latest)),
-            "detector_model": _DETECTOR_MODEL,
+            "detector_model": _detector_label(),
             "segmenter_model": _SEGMENTER_MODEL,
             "updated_at": _now_iso(),
         }
