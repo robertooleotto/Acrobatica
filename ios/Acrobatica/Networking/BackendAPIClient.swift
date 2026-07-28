@@ -669,6 +669,44 @@ actor BackendAPIClient {
         return try JSONDecoder().decode(ProjectionResult.self, from: data)
     }
 
+    struct MetricPlaneTrim: Codable, Identifiable, Equatable {
+        var id: Int { plane_index }
+        let plane_index: Int
+        var bottom: Double
+        var top: Double
+    }
+
+    struct MetricTrimsResult: Codable {
+        let session_id: String
+        let trims: [MetricPlaneTrim]
+        let gross_area_m2: Double
+        let excluded_area_m2: Double
+        let net_area_m2: Double
+    }
+
+    func metricTrims(sessionId: String) async throws -> MetricTrimsResult {
+        let url = baseURL.appendingPathComponent(
+            "/facade-sessions/\(sessionId)/metric-trims")
+        let (data, response) = try await urlSession.data(from: url)
+        try assertHTTPOK(response, data: data)
+        return try JSONDecoder().decode(MetricTrimsResult.self, from: data)
+    }
+
+    func saveMetricTrims(
+        sessionId: String,
+        trims: [MetricPlaneTrim]
+    ) async throws -> MetricTrimsResult {
+        let url = baseURL.appendingPathComponent(
+            "/facade-sessions/\(sessionId)/metric-trims")
+        var request = URLRequest(url: url)
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(["trims": trims])
+        let (data, response) = try await urlSession.data(for: request)
+        try assertHTTPOK(response, data: data)
+        return try JSONDecoder().decode(MetricTrimsResult.self, from: data)
+    }
+
     struct MetricOpening: Codable, Identifiable, Equatable {
         let id: String
         let plane_index: Int
@@ -792,6 +830,11 @@ actor BackendAPIClient {
         let deleted_files: Int
     }
 
+    struct LocalMeshWorkspace {
+        let meshURL: URL
+        let planesData: Data?
+    }
+
     /// Rimuove mesh clean e tutti gli output 3D derivati, conservando foto,
     /// pose e bundle Object Capture originale.
     func resetDerivedAssets(sessionId: String) async throws -> ResetDerivedResult {
@@ -875,6 +918,77 @@ actor BackendAPIClient {
         let (data, resp) = try await urlSession.data(for: req)
         try assertHTTPOK(resp, data: data)
         return try JSONDecoder().decode(MeshUploadResult.self, from: data)
+    }
+
+    /// Revisione dell'editor persistita esclusivamente sul dispositivo.
+    /// Diventa una mesh `clean` remota solo quando si avvia la proiezione.
+    func saveLocalMeshWorkspace(
+        sessionId: String,
+        meshURL: URL?,
+        planesData: Data?
+    ) throws {
+        let fileManager = FileManager.default
+        let namespace = localMeshWorkspaceDirectory(sessionId: sessionId)
+        let parent = namespace.deletingLastPathComponent()
+        try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        var mutableParent = parent
+        try? mutableParent.setResourceValues(values)
+
+        let staging = parent.appendingPathComponent(
+            ".workspace-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: staging, withIntermediateDirectories: true)
+        do {
+            let sourceMesh = meshURL ?? namespace.appendingPathComponent("mesh.obj")
+            guard fileManager.fileExists(atPath: sourceMesh.path) else {
+                throw APIError.httpError(0, "Mesh locale non disponibile")
+            }
+            try fileManager.copyItem(
+                at: sourceMesh,
+                to: staging.appendingPathComponent("mesh.obj"))
+            if let planesData {
+                try planesData.write(
+                    to: staging.appendingPathComponent("planes.json"),
+                    options: .atomic)
+            }
+            try Data("local-workspace-v1".utf8).write(
+                to: staging.appendingPathComponent(".complete"), options: .atomic)
+            if fileManager.fileExists(atPath: namespace.path) {
+                let previous = parent.appendingPathComponent(
+                    ".workspace-previous-\(UUID().uuidString)", isDirectory: true)
+                try fileManager.moveItem(at: namespace, to: previous)
+                do {
+                    try fileManager.moveItem(at: staging, to: namespace)
+                    try? fileManager.removeItem(at: previous)
+                } catch {
+                    try? fileManager.moveItem(at: previous, to: namespace)
+                    throw error
+                }
+            } else {
+                try fileManager.moveItem(at: staging, to: namespace)
+            }
+        } catch {
+            try? fileManager.removeItem(at: staging)
+            throw error
+        }
+    }
+
+    func localMeshWorkspace(sessionId: String) -> LocalMeshWorkspace? {
+        let directory = localMeshWorkspaceDirectory(sessionId: sessionId)
+        let marker = directory.appendingPathComponent(".complete")
+        let mesh = directory.appendingPathComponent("mesh.obj")
+        guard FileManager.default.fileExists(atPath: marker.path),
+              FileManager.default.fileExists(atPath: mesh.path) else { return nil }
+        let planes = directory.appendingPathComponent("planes.json")
+        return LocalMeshWorkspace(
+            meshURL: mesh,
+            planesData: try? Data(contentsOf: planes))
+    }
+
+    func deleteLocalMeshWorkspace(sessionId: String) {
+        try? FileManager.default.removeItem(
+            at: localMeshWorkspaceDirectory(sessionId: sessionId))
     }
 
     /// Mantiene mesh e texture in Application Support. La firma usa checksum,
@@ -1067,6 +1181,12 @@ actor BackendAPIClient {
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_."))
         let scalars = value.unicodeScalars.map { allowed.contains($0) ? Character(String($0)) : "_" }
         return String(scalars)
+    }
+
+    private func localMeshWorkspaceDirectory(sessionId: String) -> URL {
+        assetCacheRoot
+            .appendingPathComponent(cacheSafeName(sessionId), isDirectory: true)
+            .appendingPathComponent("editor-workspace", isDirectory: true)
     }
 
     private func pruneCachedVersions(in namespace: URL, keeping count: Int) {

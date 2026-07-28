@@ -18,6 +18,7 @@ struct EditorMesh3DView: View {
     private let onRipartiDaRaw: (() -> Void)?
     private let sessionId: String?
     private let consentiAutoPianiAllApertura: Bool
+    private let pianiLocaliIniziali: Data?
     @Environment(\.dismiss) private var dismiss
     @State private var urlsExport: [URL] = []
     @State private var caricandoCloud = false
@@ -26,11 +27,12 @@ struct EditorMesh3DView: View {
     @State private var autoSalvataggioTask: Task<Void, Never>?
     @State private var autoSalvataggioInCorso = false
     @State private var ripristinoRawInCorso = false
-    @State private var revisioneMeshSalvata = 0
+    @State private var revisioneMeshSalvata = -1
     @State private var revisioneWorkspaceSalvata = 0
     @State private var meshKindRiconoscimento: String
     @State private var confermaRipartenza = false
     @State private var confermaEliminaPiano = false
+    @State private var mostraSviluppoGenerato = false
     /// Strumenti del vecchio flusso di costruzione/rifinitura manuale. Restano
     /// implementati, ma non occupano il pannello del flusso automatico corrente.
     private let abilitaControlliManualiPiani = false
@@ -44,13 +46,14 @@ struct EditorMesh3DView: View {
             && model.workspaceRevision <= revisioneWorkspaceSalvata
     }
 
-    /// `meshFile` nil → mesh demo procedurale. `sessionId` presente → abilita il
-    /// salvataggio della mesh RIPULITA sul backend (kind=clean).
+    /// `meshFile` nil → mesh demo procedurale. Con una sessione, le modifiche
+    /// restano sul dispositivo e vengono sincronizzate solo per la proiezione.
     init(meshFile: URL? = nil,
          textureFile: URL? = nil,
          nome: String = "Mesh facciata",
          sessionId: String? = nil,
          meshKind: String = "raw",
+         pianiLocaliIniziali: Data? = nil,
          consentiAutoPianiAllApertura: Bool = false,
          onRipartiDaRaw: (() -> Void)? = nil,
          onChiudi: (() -> Void)? = nil) {
@@ -58,13 +61,14 @@ struct EditorMesh3DView: View {
             meshFile: meshFile, textureFile: textureFile, nome: nome))
         _meshKindRiconoscimento = State(initialValue: meshKind)
         self.sessionId = sessionId
+        self.pianiLocaliIniziali = pianiLocaliIniziali
         self.consentiAutoPianiAllApertura = consentiAutoPianiAllApertura
         self.onRipartiDaRaw = onRipartiDaRaw
         self.onChiudi = onChiudi
     }
 
-    /// Esporta la mesh ripulita e la carica sul backend come `clean`.
-    private func salvaSuCloud() {
+    /// Persiste immediatamente la revisione corrente sul dispositivo.
+    private func salvaSulDispositivo() {
         guard let sid = sessionId, !cloudOccupato else { return }
         autoSalvataggioTask?.cancel()
         let nome = model.nome.replacingOccurrences(of: " ", with: "_")
@@ -76,46 +80,20 @@ struct EditorMesh3DView: View {
         }
         let revisioneMesh = model.meshRevision
         let revisioneWorkspace = model.workspaceRevision
-        caricandoCloud = true
-        toastCloud = "Sincronizzo mesh e piani…"
+        autoSalvataggioInCorso = true
+        toastCloud = "Salvo mesh e piani sul dispositivo…"
         Task {
             do {
-                _ = try await BackendAPIClient.shared.uploadMesh(sessionId: sid, fileURL: obj, kind: "clean")
-                _ = try await BackendAPIClient.shared.uploadPlanes(
-                    sessionId: sid, jsonData: piani)
+                try await BackendAPIClient.shared.saveLocalMeshWorkspace(
+                    sessionId: sid, meshURL: obj, planesData: piani)
                 revisioneMeshSalvata = max(revisioneMeshSalvata, revisioneMesh)
                 revisioneWorkspaceSalvata = max(
                     revisioneWorkspaceSalvata, revisioneWorkspace)
-                toastCloud = "Mesh e piani sincronizzati ✓"
+                toastCloud = "Mesh e piani salvati sul dispositivo ✓"
             } catch {
-                toastCloud = "Upload fallito: \(error.localizedDescription)"
+                toastCloud = "Salvataggio fallito: \(error.localizedDescription)"
             }
-            caricandoCloud = false
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
-            if toastCloud?.contains("✓") == true { toastCloud = nil }
-        }
-    }
-
-    /// Serializza i piani decisi e li carica sul backend (out/planes.json su
-    /// storage) come input della proiezione foto→piani (passo 7).
-    private func salvaPianiSuCloud() {
-        guard let sid = sessionId, !cloudOccupato else { return }
-        autoSalvataggioTask?.cancel()
-        guard let data = model.esportaPianiPayload() else {
-            toastCloud = "Nessun piano da salvare"; return
-        }
-        caricandoCloud = true
-        toastCloud = "Carico i piani…"
-        Task {
-            do {
-                let r = try await BackendAPIClient.shared.uploadPlanes(sessionId: sid, jsonData: data)
-                revisioneWorkspaceSalvata = max(
-                    revisioneWorkspaceSalvata, model.workspaceRevision)
-                toastCloud = "Piani salvati sul cloud (\(r.count)) ✓"
-            } catch {
-                toastCloud = "Upload piani fallito: \(error.localizedDescription)"
-            }
-            caricandoCloud = false
+            autoSalvataggioInCorso = false
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             if toastCloud?.contains("✓") == true { toastCloud = nil }
         }
@@ -132,18 +110,22 @@ struct EditorMesh3DView: View {
         let revisioneMesh = model.meshRevision
         let revisioneWorkspace = model.workspaceRevision
         caricandoCloud = true
-        toastCloud = "Carico la mesh pulita…"
+        toastCloud = "Preparo la revisione locale…"
         Task {
             do {
+                try await BackendAPIClient.shared.saveLocalMeshWorkspace(
+                    sessionId: sid, meshURL: obj, planesData: planes)
+                toastCloud = "Carico la mesh pulita…"
                 _ = try await BackendAPIClient.shared.uploadMesh(
                     sessionId: sid, fileURL: obj, kind: "clean")
                 toastCloud = "Carico i piani revisionati…"
                 _ = try await BackendAPIClient.shared.uploadPlanes(
                     sessionId: sid, jsonData: planes)
+                meshKindRiconoscimento = "clean"
                 revisioneMeshSalvata = max(revisioneMeshSalvata, revisioneMesh)
                 revisioneWorkspaceSalvata = max(
                     revisioneWorkspaceSalvata, revisioneWorkspace)
-                toastCloud = "Avvio la proiezione…"
+                toastCloud = "Avvio compositing e proiezione…"
                 var result = try await BackendAPIClient.shared.projectPlanes(sessionId: sid)
                 var erroriPollingConsecutivi = 0
                 while result.state == "queued" || result.state == "running" {
@@ -181,39 +163,11 @@ struct EditorMesh3DView: View {
                 }
                 try model.caricaPianiTexturizzati(url)
                 toastCloud = String(
-                    format: "Texture pronta: %d piani, copertura %.0f%% ✓",
+                    format: "Compositing pronto: %d piani, copertura %.0f%% ✓",
                     result.count, result.coverage * 100)
+                mostraSviluppoGenerato = true
             } catch {
                 toastCloud = "Proiezione fallita: \(error.localizedDescription)"
-            }
-            caricandoCloud = false
-        }
-    }
-
-    private func caricaUltimaTexture() {
-        guard let sid = sessionId, !cloudOccupato else { return }
-        caricandoCloud = true
-        toastCloud = "Scarico i piani texturizzati…"
-        Task {
-            do {
-                let result = try await BackendAPIClient.shared.projectionStatus(sessionId: sid)
-                guard result.state == "complete", let main = result.main_obj else {
-                    throw NSError(
-                        domain: "AcrobaticaProjection", code: 5,
-                        userInfo: [NSLocalizedDescriptionKey: "Nessuna texture completata"])
-                }
-                let bundle = try await BackendAPIClient.shared.downloadProjectionBundle(
-                    sessionId: sid, files: result.files)
-                guard let url = bundle[main.name] else {
-                    throw NSError(
-                        domain: "AcrobaticaProjection", code: 6,
-                        userInfo: [NSLocalizedDescriptionKey: "OBJ texturizzato non ricevuto"])
-                }
-                try model.caricaPianiTexturizzati(url)
-                await ripristinaPianiSalvati(sessionId: sid)
-                toastCloud = "Texture calcolata caricata ✓"
-            } catch {
-                toastCloud = "Download fallito: \(error.localizedDescription)"
             }
             caricandoCloud = false
         }
@@ -283,7 +237,7 @@ struct EditorMesh3DView: View {
         autoSalvataggioTask?.cancel()
         autoSalvataggioTask = Task {
             do {
-                try await Task.sleep(nanoseconds: 1_200_000_000)
+                try await Task.sleep(nanoseconds: 2_000_000_000)
                 try Task.checkCancellation()
                 await eseguiSalvataggioAutomatico()
             } catch {
@@ -292,9 +246,8 @@ struct EditorMesh3DView: View {
         }
     }
 
-    /// Il reset remoto deve partire soltanto dopo la conclusione dell'eventuale
-    /// autosave precedente, altrimenti quell'upload puo' ricreare mesh clean e
-    /// piani obsoleti subito dopo che il backend li ha eliminati.
+    /// Il reset aspetta l'eventuale scrittura locale prima di eliminare il
+    /// workspace sul dispositivo e gli output derivati sul backend.
     private func avviaRipristinoMeshOriginale() {
         guard !ripristinoRawInCorso else { return }
         ripristinoRawInCorso = true
@@ -335,10 +288,6 @@ struct EditorMesh3DView: View {
             toastCloud = "Autosave mesh fallito: esportazione non riuscita"
             return
         }
-        // Il crop ha gia intersecato i poligoni dei piani con lo stesso box della
-        // mesh. Questo documento e' la revisione architettonica da preservare:
-        // rilanciare il detector sulla geometria parziale cambierebbe identita',
-        // orientamento e numero dei piani in base a quanto e' stretto il taglio.
         let piani = model.esportaPianiPayload(includiVuoto: true)
 
         autoSalvataggioInCorso = true
@@ -351,20 +300,13 @@ struct EditorMesh3DView: View {
             }
         }
         do {
-            if let obj {
-                _ = try await BackendAPIClient.shared.uploadMesh(
-                    sessionId: sid, fileURL: obj, kind: "clean")
-                revisioneMeshSalvata = max(revisioneMeshSalvata, revisioneMesh)
-                meshKindRiconoscimento = "clean"
-            }
-            if let piani {
-                _ = try await BackendAPIClient.shared.uploadPlanes(
-                    sessionId: sid, jsonData: piani)
-            }
+            try await BackendAPIClient.shared.saveLocalMeshWorkspace(
+                sessionId: sid, meshURL: obj, planesData: piani)
+            revisioneMeshSalvata = max(revisioneMeshSalvata, revisioneMesh)
             revisioneWorkspaceSalvata = max(
                 revisioneWorkspaceSalvata, revisioneWorkspace)
         } catch {
-            toastCloud = "Autosave non riuscito: \(error.localizedDescription)"
+            toastCloud = "Salvataggio locale non riuscito: \(error.localizedDescription)"
         }
     }
 
@@ -425,7 +367,14 @@ struct EditorMesh3DView: View {
         .onChange(of: model.numTriangoli) { n in
             if n > 0, let sid = sessionId, model.facce.isEmpty, !autoRiconoscimentoFatto {
                 autoRiconoscimentoFatto = true
-                Task { await preparaRisultatoAutomatico(sessionId: sid) }
+                if let pianiLocaliIniziali,
+                   model.applicaPianiPayloadLocale(pianiLocaliIniziali) {
+                    revisioneMeshSalvata = model.meshRevision
+                    revisioneWorkspaceSalvata = model.workspaceRevision
+                    toastCloud = "Workspace locale pronto ✓"
+                } else {
+                    Task { await preparaRisultatoAutomatico(sessionId: sid) }
+                }
             }
         }
         .onChange(of: model.workspaceRevision) { _ in
@@ -442,6 +391,13 @@ struct EditorMesh3DView: View {
         .sheet(isPresented: $model.mostraProfilo) {
             ProfiloRilievoSheet(model: model)
                 .presentationDetents([.medium, .large])
+        }
+        .fullScreenCover(isPresented: $mostraSviluppoGenerato) {
+            if let sid = sessionId {
+                ComputoMetricoView(
+                    sessionId: sid,
+                    onChiudi: { mostraSviluppoGenerato = false })
+            }
         }
     }
 
@@ -478,14 +434,17 @@ struct EditorMesh3DView: View {
             .disabled(!model.puoRedo)
             .foregroundStyle(model.puoRedo ? EditorTheme.testo : EditorTheme.testoMuto.opacity(0.4))
             if sessionId != nil {
-                Button { salvaSuCloud() } label: {
+                Button { salvaSulDispositivo() } label: {
                     Image(systemName: cloudOccupato
                           ? "arrow.triangle.2.circlepath"
-                          : (workspaceSalvato ? "checkmark.icloud" : "icloud.and.arrow.up"))
+                          : (workspaceSalvato ? "checkmark.circle" : "internaldrive"))
                         .frame(width: 36, height: 36)
                         .foregroundStyle(model.numTriangoli == 0 ? EditorTheme.testoMuto.opacity(0.4) : EditorTheme.accento)
                 }
                 .disabled(model.numTriangoli == 0 || cloudOccupato)
+                .help(workspaceSalvato
+                      ? "Mesh e piani salvati sul dispositivo"
+                      : "Salva sul dispositivo")
             }
             Menu {
                 Button {
@@ -499,19 +458,6 @@ struct EditorMesh3DView: View {
                 } label: { Label("Esporta piani", systemImage: "square.and.arrow.up") }
                     .disabled(model.facce.isEmpty)
                 if sessionId != nil {
-                    Divider()
-                    Button { salvaPianiSuCloud() } label: {
-                        Label("Salva piani sul cloud", systemImage: "cloud.and.arrow.up")
-                    }
-                    .disabled(model.facce.isEmpty || cloudOccupato)
-                    Button { proiettaTextureSuPiani() } label: {
-                        Label("Proietta texture sui piani", systemImage: "photo.on.rectangle.angled")
-                    }
-                    .disabled(model.facce.isEmpty || model.numTriangoli == 0 || cloudOccupato)
-                    Button { caricaUltimaTexture() } label: {
-                        Label("Carica texture calcolata", systemImage: "arrow.down.square")
-                    }
-                    .disabled(cloudOccupato)
                     Divider()
                     Button(role: .destructive) {
                         confermaRipartenza = true
@@ -916,6 +862,7 @@ struct EditorMesh3DView: View {
                     }
                 }
             }
+
         }
         .padding(.horizontal, 12)
     }
@@ -1054,6 +1001,36 @@ struct EditorMesh3DView: View {
                     .foregroundStyle(EditorTheme.testoMuto)
                     .help("Annulla punti")
                 }
+            }
+
+            if sessionId != nil {
+                Button { proiettaTextureSuPiani() } label: {
+                    HStack(spacing: 8) {
+                        if caricandoCloud {
+                            ProgressView()
+                                .tint(.white)
+                                .scaleEffect(0.8)
+                        } else {
+                            Image(systemName: "photo.stack.fill")
+                        }
+                        Text(caricandoCloud
+                             ? "Generazione in corso…"
+                             : "Proietta texture, compositing e sviluppo")
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                    }
+                    .font(Theme.Typo.caption(12, .bold))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 9)
+                    .background(EditorTheme.accento,
+                                in: RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+                .disabled(model.facce.isEmpty
+                          || model.numTriangoli == 0
+                          || cloudOccupato)
+                .opacity(model.facce.isEmpty || model.numTriangoli == 0 ? 0.45 : 1)
             }
         }
         .padding(.horizontal, 12)
@@ -8484,6 +8461,41 @@ final class Mesh3DModel: ObservableObject {
         return try? enc.encode(doc)
     }
 
+    /// Ripristina la revisione dei piani salvata nello stesso workspace locale
+    /// della mesh, senza consultare il backend e senza creare una nuova modifica.
+    func applicaPianiPayloadLocale(_ data: Data) -> Bool {
+        guard let document = try? JSONDecoder().decode(PianiUploadDoc.self, from: data)
+        else { return false }
+        let planes = document.planes.map { plane in
+            BackendAPIClient.DetectedPlane(
+                nome: plane.nome,
+                tipo: plane.tipo,
+                punto: plane.punto,
+                normale: plane.normale,
+                corners: plane.corners,
+                area_m2: 0,
+                w: 0,
+                h: 0,
+                triangoli: plane.triangoli)
+        }
+        let frame = document.frame_edificio.map { value in
+            BackendAPIClient.BuildingFrame(
+                origine: value.origine,
+                right: value.right,
+                up: value.up,
+                normale: value.normale,
+                source_plane_id: value.source_plane_id,
+                source: value.source,
+                locked: value.locked)
+        }
+        applicaPianiRilevati(
+            planes,
+            frameEdificio: frame,
+            upStimato: document.piano_base?.up,
+            registraModifica: false)
+        return true
+    }
+
     func esportaMeshRipulita(nomeBase: String) -> [URL] {
         guard mesh.vertexCount > 0, mesh.triangleCount > 0 else { return [] }
         let nomePulito = nomeBase
@@ -8845,15 +8857,17 @@ enum MeshFactory {
 
 // MARK: – Caricamento da sessione backend
 
-/// Scarica la mesh della sessione dal backend e apre l'editor 3D.
-/// 404 → nessuna mesh caricata dal Mac: mostra messaggio e tasto Chiudi.
+/// Apre prima il workspace persistito sul dispositivo. Solo in sua assenza
+/// scarica la mesh della sessione dal backend.
 struct EditorMesh3DCaricamentoView: View {
     let sessionId: String
     let onChiudi: () -> Void
 
     @State private var meshFile: URL?
     @State private var textureFile: URL?
+    @State private var pianiLocali: Data?
     @State private var usaMeshPulita = false
+    @State private var usaWorkspaceLocale = false
     @State private var errore: String?
     @State private var pronto = false
     @State private var messaggio = "Cerco la mesh salvata…"
@@ -8865,7 +8879,10 @@ struct EditorMesh3DCaricamentoView: View {
                                  textureFile: textureFile,
                                  nome: "Mesh facciata",
                                  sessionId: sessionId,
-                                 meshKind: usaMeshPulita ? "clean" : "raw",
+                                 meshKind: usaWorkspaceLocale
+                                    ? "raw"
+                                    : (usaMeshPulita ? "clean" : "raw"),
+                                 pianiLocaliIniziali: pianiLocali,
                                  consentiAutoPianiAllApertura: true,
                                  onRipartiDaRaw: {
                                      Task { await ripartiDallaMeshOriginale() }
@@ -8908,9 +8925,13 @@ struct EditorMesh3DCaricamentoView: View {
         do {
             _ = try await BackendAPIClient.shared.resetDerivedAssets(
                 sessionId: sessionId)
+            await BackendAPIClient.shared.deleteLocalMeshWorkspace(
+                sessionId: sessionId)
             meshFile = nil
             textureFile = nil
+            pianiLocali = nil
             usaMeshPulita = false
+            usaWorkspaceLocale = false
             messaggio = "Carico la mesh OC originale…"
             await carica()
         } catch {
@@ -8920,6 +8941,18 @@ struct EditorMesh3DCaricamentoView: View {
     }
 
     private func carica() async {
+        if let locale = await BackendAPIClient.shared.localMeshWorkspace(
+            sessionId: sessionId) {
+            messaggio = "Apro la revisione salvata sul dispositivo…"
+            meshFile = locale.meshURL
+            pianiLocali = locale.planesData
+            usaMeshPulita = true
+            usaWorkspaceLocale = true
+            textureFile = await caricaTextureRawDiRiferimento()
+            pronto = true
+            return
+        }
+
         // Controlla prima il manifest remoto: una sessione ripristinata alla raw
         // non deve mostrare neppure temporaneamente una vecchia revisione clean.
         // Il bundle resta in cache per checksum, quindi i file invariati non
@@ -8954,37 +8987,43 @@ struct EditorMesh3DCaricamentoView: View {
             // La geometria clean e la texture raw condividono il frame OC. Quando
             // il main e' un OBJ, scarica anche il modello raw come layer visivo.
             if main.name.lowercased().hasSuffix(".obj") {
-                if let raw = try? await BackendAPIClient.shared.fetchMeshInfo(
-                    sessionId: sessionId, kind: "raw") {
-                    if let usdz = raw.files.first(where: {
-                        $0.name.lowercased().hasSuffix(".usdz")
-                    }) {
-                        nuovaTexture = try? await BackendAPIClient.shared.downloadMeshFile(
-                            usdz, sessionId: sessionId, cacheGroup: "mesh-raw")
-                    } else if let rawOBJ = raw.main_obj ?? raw.files.first(where: {
-                        $0.name.lowercased().hasSuffix(".obj")
-                    }) {
-                        let estensioni = Set(["obj", "mtl", "png", "jpg", "jpeg"])
-                        let bundleFiles = raw.files.filter {
-                            estensioni.contains(URL(fileURLWithPath: $0.name)
-                                .pathExtension.lowercased())
-                        }
-                        if let bundle = try? await BackendAPIClient.shared
-                            .downloadMeshBundle(
-                                bundleFiles, sessionId: sessionId,
-                                cacheGroup: "mesh-raw") {
-                            nuovaTexture = bundle[rawOBJ.name]
-                        }
-                    }
-                }
+                nuovaTexture = await caricaTextureRawDiRiferimento()
             }
             meshFile = nuovaMesh
             textureFile = nuovaTexture
+            pianiLocali = nil
+            usaWorkspaceLocale = false
             pronto = true
         } catch {
             errore = error.localizedDescription
             pronto = true
         }
+    }
+
+    /// Recupera il modello OC texturizzato usato come riferimento visivo. Il
+    /// client lo conserva gia' nella cache per checksum, quindi non viene
+    /// riscaricato quando l'asset remoto non e' cambiato.
+    private func caricaTextureRawDiRiferimento() async -> URL? {
+        guard let raw = try? await BackendAPIClient.shared.fetchMeshInfo(
+            sessionId: sessionId, kind: "raw") else { return nil }
+        if let usdz = raw.files.first(where: {
+            $0.name.lowercased().hasSuffix(".usdz")
+        }) {
+            return try? await BackendAPIClient.shared.downloadMeshFile(
+                usdz, sessionId: sessionId, cacheGroup: "mesh-raw")
+        }
+        guard let rawOBJ = raw.main_obj ?? raw.files.first(where: {
+            $0.name.lowercased().hasSuffix(".obj")
+        }) else { return nil }
+        let estensioni = Set(["obj", "mtl", "png", "jpg", "jpeg"])
+        let bundleFiles = raw.files.filter {
+            estensioni.contains(URL(fileURLWithPath: $0.name)
+                .pathExtension.lowercased())
+        }
+        guard let bundle = try? await BackendAPIClient.shared.downloadMeshBundle(
+            bundleFiles, sessionId: sessionId, cacheGroup: "mesh-raw")
+        else { return nil }
+        return bundle[rawOBJ.name]
     }
 
     /// Non apre l'editor con la sola mesh: aspetta il job avviato da
