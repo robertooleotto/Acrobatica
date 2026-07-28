@@ -211,12 +211,17 @@ def _totals(
         item["area_m2"] = round(_opening_area_m2(
             item, plane, trims.get(int(item["plane_index"]), (0.0, 1.0))), 3)
         normalized.append(item)
-    gross = sum(
-        float(plane.get("area_m2", 0.0))
-        * max(0.0, trims.get(index, (0.0, 1.0))[1]
-              - trims.get(index, (0.0, 1.0))[0])
-        for index, plane in planes.items()
-    )
+    if trims:
+        gross = sum(
+            float(plane.get("area_m2", 0.0))
+            * max(0.0, trims.get(index, (0.0, 1.0))[1]
+                  - trims.get(index, (0.0, 1.0))[0])
+            for index, plane in planes.items()
+        )
+    else:
+        gross = float(projection.get("total_area_m2", 0.0)) or sum(
+            float(plane.get("area_m2", 0.0)) for plane in planes.values()
+        )
     excluded = min(_union_area_m2(normalized, planes, trims), gross)
     return {
         "openings": normalized,
