@@ -603,6 +603,14 @@ def compose_development(
         image = rendered_images[layout_index]
         geometric_flipped = layout.image_side_for_topology_side[entering_side] == 1
         geometric_image = cv2.flip(image, 1) if geometric_flipped else image
+        development_file = f"development_plane_{layout.index}.png"
+        # The app presents every facade frontally. Keep the geometric flip only
+        # in the diagnostic canvas; applying it to the interactive face mirrors
+        # signs, windows and the left/right returns.
+        if not cv2.imwrite(str(output / development_file), image):
+            raise RuntimeError(
+                f"Impossibile scrivere la faccia sviluppata {layout.index}"
+            )
         y = (
             int(round((global_max_up - layout.max_up) * pixels_per_meter))
             + vertical_offsets[layout_index] - minimum_offset
@@ -624,6 +632,7 @@ def compose_development(
             "name": layout.name,
             "role": layout.role,
             "file": layout.image_path.name,
+            "development_file": development_file,
             "x": x,
             "y": y,
             "width": image.shape[1],

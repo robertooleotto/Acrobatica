@@ -1,6 +1,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import cv2
 import numpy as np
 
 from scripts import bake_oc_reference_development_local as development
@@ -139,3 +140,34 @@ def test_level_shear_flattens_a_sloped_horizontal_band_at_left_anchor():
 
     brightest_row = np.argmax(straightened[..., :3].mean(axis=(1, 2)))
     assert brightest_row == 40
+
+
+def test_development_exports_rectified_texture_for_every_face(monkeypatch, tmp_path):
+    image = np.full((30, 20, 4), 180, np.uint8)
+    first_path = tmp_path / "plane_1.png"
+    second_path = tmp_path / "plane_2.png"
+    assert cv2.imwrite(str(first_path), image)
+    assert cv2.imwrite(str(second_path), image)
+    layouts = [
+        _layout(0, "main", 0.0, 1.0, [0, 1]),
+        _layout(1, "main", 1.0, 2.0, [0, 1]),
+    ]
+    layouts[0].image_path = first_path
+    layouts[1].image_path = second_path
+    layouts[0].image_width = layouts[1].image_width = 20
+    layouts[0].image_height = layouts[1].image_height = 30
+    monkeypatch.setattr(
+        development, "_build_layouts",
+        lambda *args, **kwargs: (layouts, np.array([0.0, 1.0, 0.0])),
+    )
+
+    manifest = development.compose_development(
+        [], {"planes": []}, tmp_path, Path("mesh.obj"), {}, 1.0,
+    )
+
+    assert manifest["plane_order"] == [0, 1]
+    assert [face["development_file"] for face in manifest["faces"]] == [
+        "development_plane_1.png", "development_plane_2.png",
+    ]
+    assert (tmp_path / "development_plane_1.png").exists()
+    assert (tmp_path / "development_plane_2.png").exists()

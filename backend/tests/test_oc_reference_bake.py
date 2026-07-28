@@ -456,6 +456,14 @@ def test_compose_plane_uses_registered_photo_and_preserves_alpha(monkeypatch, tm
                         lambda *args: (reference, mask, np.zeros((100, 100), np.float32)))
     monkeypatch.setattr(oc_reference_bake.registration, "rank_candidates",
                         lambda *args, **kwargs: [{"key": "0", "score": 1.0}])
+    monkeypatch.setattr(
+        oc_reference_bake.registration, "adaptive_registration_candidates",
+        lambda *args, **kwargs: ([{"key": "0", "score": 1.0}], {
+            "available": 1, "initial": 1, "selected": 1,
+            "single_coverage": 1.0, "double_coverage": 0.0,
+            "stop_reason": "analizzate tutte le pose utili",
+        }),
+    )
     monkeypatch.setattr(oc_reference_bake.registration, "warp_photo_to_plane",
                         lambda *args: (source, mask))
     monkeypatch.setattr(oc_reference_bake.registration, "register_residual",
@@ -479,6 +487,21 @@ def test_compose_plane_uses_registered_photo_and_preserves_alpha(monkeypatch, tm
     assert report["registered_photos"] == 1
     assert np.all(rgba[..., 3] == 255)
     assert float(rgba[..., 2].mean()) == 240.0
+
+    full_rgba, full_coverage, full_used, full_report = \
+        oc_reference_bake._compose_plane_full_resolution(
+            object(), frame, {"normale": [0, 0, 1]}, [camera],
+            lambda key: str(tmp_path / "photo.jpg"),
+            scale_m_per_mesh_unit=1.0, max_photos=1,
+            registration_ceiling=1, coverage_photos=1,
+            crop=0.9, depth_m=2.0, max_residual_px=40.0,
+            max_rotation_deg=0.5, max_scale_error=0.03,
+        )
+
+    assert full_coverage == 1.0
+    assert full_used == ["0"]
+    assert full_report["registered_photos"] == 1
+    assert np.all(full_rgba[..., 3] == 255)
 
 
 def test_rejected_photo_never_fills_an_uncovered_region(

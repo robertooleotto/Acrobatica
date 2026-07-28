@@ -646,6 +646,7 @@ def process_projection_job(cli: Client, job: dict, dry: bool) -> None:
         sys.path.insert(0, str(backend_root))
     from app.services import oc_reference_bake, ortho_bake
     from app.services.plane_geometry import regularize_planes_document
+    from scripts.bake_oc_reference_development_local import compose_development
 
     with tempfile.TemporaryDirectory(prefix=f"projection_{sid[:8]}_") as tmp:
         root = Path(tmp)
@@ -670,7 +671,10 @@ def process_projection_job(cli: Client, job: dict, dry: bool) -> None:
         raw_reference = prepare_raw_reference(
             job.get("raw_reference", []), root,
             cache_key=str(job.get("reference_cache_key") or ""),
-            build_legacy_proxy=job.get("reference_kind") != "projection_proxy",
+            # The local reference compositor uses the complete OC mesh. A
+            # generated 180k-face proxy removes support from narrow returns and
+            # makes their visual registration fail even when the photos exist.
+            build_legacy_proxy=False,
         )
         photos_dir = root / "photos"
         photos_dir.mkdir()
@@ -721,6 +725,7 @@ def process_projection_job(cli: Client, job: dict, dry: bool) -> None:
                     registration_ceiling=int(cfg.get("registration_ceiling", 60)),
                     coverage_photos=int(cfg.get("coverage_photos", 24)),
                     crop=0.9, scale_m_per_mesh_unit=scale,
+                    full_resolution_registration=True,
                     photo_resolver=resolve_photo,
                     progress=lambda done, total, name: plane_progress(
                         done, total, name, "registro"),
@@ -761,6 +766,13 @@ def process_projection_job(cli: Client, job: dict, dry: bool) -> None:
         if summary.get("count", 0) == 0:
             raise RuntimeError("Nessun piano ha prodotto una texture")
 
+        report(0.91, "Mac: rettifico e sviluppo le facciate")
+        development = compose_development(
+            planes.get("planes", []), summary, out_dir,
+            mesh, poses, scale,
+        )
+        summary["development"] = development
+
         manifest = {
             "main_obj": summary["main_obj"],
             "planes": summary["planes"],
@@ -770,6 +782,7 @@ def process_projection_job(cli: Client, job: dict, dry: bool) -> None:
             "scale_m_per_mesh_unit": scale,
             "projection_mode": summary.get("projection_mode", "pose_only"),
             "texture_encoding": summary.get("texture_encoding", "sRGB"),
+            "development": development,
             "fallback_reason": fallback_reason,
         }
         report(0.94, "Mac: carico il bundle finale")

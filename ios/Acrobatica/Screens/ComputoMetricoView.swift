@@ -763,6 +763,7 @@ private final class ComputoMetricoModel: ObservableObject {
 
     private var ritagliSalvati: [Int: BackendAPIClient.MetricPlaneTrim] = [:]
     private var objSviluppoURL: URL?
+    private var manifestSviluppoURL: URL?
     private var metadatiPiani: [BackendAPIClient.ProjectionResult.Plane] = []
     private var correggiCanali = false
     private var metricheSalvate = (lorda: 0.0, esclusa: 0.0, netta: 0.0)
@@ -784,7 +785,8 @@ private final class ComputoMetricoModel: ObservableObject {
 
             messaggio = "Preparo lo sviluppo delle facciate…"
             let bundle = try await BackendAPIClient.shared.downloadProjectionBundle(
-                sessionId: sessionId, files: risultato.files)
+                sessionId: sessionId, files: risultato.files,
+                includeDevelopment: true)
             guard let objURL = bundle[main.name] else {
                 throw NSError(domain: "ComputoMetrico", code: 2,
                               userInfo: [NSLocalizedDescriptionKey:
@@ -797,12 +799,23 @@ private final class ComputoMetricoModel: ObservableObject {
                 sessionId: sessionId)
             let trims = Dictionary(uniqueKeysWithValues:
                 (trimsResult?.trims ?? []).map { ($0.plane_index, $0) })
-            let sviluppo = try SviluppoFacciateBuilder.costruisci(
-                objURL: objURL,
-                metadati: risultato.planes ?? [],
-                correggiRossoBlu: vecchioBakeConCanaliInvertiti,
-                ritagli: trims)
+            let developmentURL = bundle["development.json"]
+            let sviluppo: SviluppoFacciateDocumento
+            if let developmentURL {
+                sviluppo = try SviluppoFacciateBuilder.costruisciPrecomposto(
+                    manifestURL: developmentURL,
+                    metadati: risultato.planes ?? [],
+                    correggiRossoBlu: vecchioBakeConCanaliInvertiti,
+                    ritagli: trims)
+            } else {
+                sviluppo = try SviluppoFacciateBuilder.costruisci(
+                    objURL: objURL,
+                    metadati: risultato.planes ?? [],
+                    correggiRossoBlu: vecchioBakeConCanaliInvertiti,
+                    ritagli: trims)
+            }
             objSviluppoURL = objURL
+            manifestSviluppoURL = developmentURL
             metadatiPiani = risultato.planes ?? []
             correggiCanali = vecchioBakeConCanaliInvertiti
             ritagliSalvati = trims
@@ -887,11 +900,19 @@ private final class ComputoMetricoModel: ObservableObject {
     private func ricostruisciSviluppo() {
         guard let objSviluppoURL else { return }
         do {
-            documento = try SviluppoFacciateBuilder.costruisci(
-                objURL: objSviluppoURL,
-                metadati: metadatiPiani,
-                correggiRossoBlu: correggiCanali,
-                ritagli: ritagli)
+            if let manifestSviluppoURL {
+                documento = try SviluppoFacciateBuilder.costruisciPrecomposto(
+                    manifestURL: manifestSviluppoURL,
+                    metadati: metadatiPiani,
+                    correggiRossoBlu: correggiCanali,
+                    ritagli: ritagli)
+            } else {
+                documento = try SviluppoFacciateBuilder.costruisci(
+                    objURL: objSviluppoURL,
+                    metadati: metadatiPiani,
+                    correggiRossoBlu: correggiCanali,
+                    ritagli: ritagli)
+            }
             aggiornaOverlay()
         } catch {
             erroreRitaglio = error.localizedDescription
@@ -1121,6 +1142,24 @@ private extension SviluppoFacciateDocumento {
 }
 
 private enum SviluppoFacciateBuilder {
+    private struct ManifestSviluppo: Decodable {
+        struct Faccia: Decodable {
+            let id: Int
+            let index: Int
+            let name: String
+            let role: String
+            let development_file: String
+            let x: Int
+            let y: Int
+            let width: Int
+            let height: Int
+        }
+
+        let canvas_px: [Int]
+        let pixels_per_meter: Double
+        let faces: [Faccia]
+    }
+
     private struct VerticeOBJ: Hashable {
         let posizione: Int
         let texture: Int
@@ -1201,6 +1240,125 @@ private enum SviluppoFacciateBuilder {
         }
         guard peso > 1e-5, simd_length(somma) > 1e-5 else { return gravita }
         return simd_normalize(somma)
+    }
+
+    static func costruisciPrecomposto(
+        manifestURL: URL,
+        metadati: [BackendAPIClient.ProjectionResult.Plane],
+        correggiRossoBlu: Bool,
+        ritagli: [Int: BackendAPIClient.MetricPlaneTrim] = [:]
+    ) throws -> SviluppoFacciateDocumento {
+        let data = try Data(contentsOf: manifestURL)
+        let manifest = try JSONDecoder().decode(ManifestSviluppo.self, from: data)
+        guard manifest.canvas_px.count == 2,
+              manifest.canvas_px[0] > 0,
+              manifest.canvas_px[1] > 0,
+              manifest.pixels_per_meter > 0,
+              !manifest.faces.isEmpty else {
+            throw NSError(domain: "ComputoMetrico", code: 5,
+                          userInfo: [NSLocalizedDescriptionKey:
+                            "Manifest dello sviluppo non valido."])
+        }
+
+        let ppm = Float(manifest.pixels_per_meter)
+        let canvasWidth = Float(manifest.canvas_px[0]) / ppm
+        let canvasHeight = Float(manifest.canvas_px[1]) / ppm
+        let metadata = Dictionary(uniqueKeysWithValues:
+            metadati.map { ($0.index, $0) })
+        let scena = SCNScene()
+        let radice = SCNNode()
+        radice.name = "sviluppo-facciate"
+        scena.rootNode.addChildNode(radice)
+        var piani: [PianoSviluppato] = []
+        var texturePiani: [Int: UIImage] = [:]
+
+        for faccia in manifest.faces {
+            let imageURL = manifestURL.deletingLastPathComponent()
+                .appendingPathComponent(faccia.development_file)
+            guard let image = UIImage(contentsOfFile: imageURL.path) else {
+                throw NSError(domain: "ComputoMetrico", code: 6,
+                              userInfo: [NSLocalizedDescriptionKey:
+                                "Texture sviluppata mancante per \(faccia.name)."])
+            }
+            let trim = ritagli[faccia.index]
+            let bottom = Float(min(max(trim?.bottom ?? 0, 0), 0.98))
+            let top = Float(min(max(
+                trim?.top ?? 1, Double(bottom) + 0.02), 1))
+            let fullWidth = Float(faccia.width) / ppm
+            let fullHeight = Float(faccia.height) / ppm
+            let x = Float(faccia.x) / ppm
+            let fullBottom = Float(
+                manifest.canvas_px[1] - faccia.y - faccia.height) / ppm
+            let y = fullBottom + fullHeight * bottom
+            let height = fullHeight * max(top - bottom, 0)
+
+            let vertices = [
+                SCNVector3(x, y, 0),
+                SCNVector3(x + fullWidth, y, 0),
+                SCNVector3(x + fullWidth, y + height, 0),
+                SCNVector3(x, y + height, 0),
+            ]
+            let textureCoordinates = [
+                CGPoint(x: 0, y: CGFloat(1 - bottom)),
+                CGPoint(x: 1, y: CGFloat(1 - bottom)),
+                CGPoint(x: 1, y: CGFloat(1 - top)),
+                CGPoint(x: 0, y: CGFloat(1 - top)),
+            ]
+            let geometry = SCNGeometry(
+                sources: [
+                    SCNGeometrySource(vertices: vertices),
+                    SCNGeometrySource(textureCoordinates: textureCoordinates),
+                ],
+                elements: [SCNGeometryElement(
+                    indices: [Int32(0), 1, 2, 0, 2, 3],
+                    primitiveType: .triangles,
+                )]
+            )
+            let material = SCNMaterial()
+            material.name = "development_\(faccia.index)"
+            material.diffuse.contents = image
+            material.diffuse.magnificationFilter = .linear
+            material.diffuse.minificationFilter = .linear
+            material.lightingModel = .constant
+            material.isDoubleSided = true
+            if correggiRossoBlu {
+                material.shaderModifiers = [
+                    .fragment: "#pragma body\n_output.color = _output.color.bgra;"
+                ]
+            }
+            geometry.materials = [material]
+            let node = SCNNode(geometry: geometry)
+            node.name = "piano-\(faccia.index)"
+            radice.addChildNode(node)
+
+            let meta = metadata[faccia.index]
+            let fraction = Double(max(top - bottom, 0))
+            piani.append(PianoSviluppato(
+                indice: faccia.index,
+                nome: meta?.nome ?? faccia.name,
+                origineX: x,
+                origineY: y,
+                larghezza: fullWidth,
+                altezza: height,
+                larghezzaM: meta?.width_m ?? Double(fullWidth),
+                altezzaM: (meta?.height_m ?? Double(fullHeight)) * fraction,
+                areaM2: (meta?.area_m2
+                    ?? Double(fullWidth * fullHeight)) * fraction,
+                invertiU: false,
+                trimInferiore: Double(bottom),
+                trimSuperiore: Double(top)))
+            texturePiani[faccia.index] = image
+        }
+
+        radice.simdPosition = SIMD3(-canvasWidth * 0.5, -canvasHeight * 0.5, 0)
+        return SviluppoFacciateDocumento(
+            scena: scena,
+            radice: radice,
+            larghezza: max(canvasWidth, 0.01),
+            altezza: max(canvasHeight, 0.01),
+            numeroPiani: piani.count,
+            piani: piani,
+            texturePiani: texturePiani)
     }
 
     private struct VerticeRitagliato {

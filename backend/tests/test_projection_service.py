@@ -98,6 +98,29 @@ def test_projection_reference_prefers_manifest_proxy():
     }
 
 
+def test_projection_reference_can_require_complete_raw_model():
+    result = {"mesh": {"raw": {"files": [
+        {"name": "model.obj", "path": "raw/model.obj"},
+        {"name": "model.mtl", "path": "raw/model.mtl"},
+        {"name": "raw.png", "path": "raw/raw.png"},
+        {"name": "projection_proxy.obj", "path": "raw/proxy.obj"},
+        {"name": "projection_proxy.mtl", "path": "raw/proxy.mtl"},
+        {"name": "projection_proxy_texture_1.png", "path": "raw/proxy.png"},
+    ]}}}
+    manifest = {"projection_reference": {"files": [
+        "projection_proxy.obj", "projection_proxy.mtl",
+        "projection_proxy_texture_1.png",
+    ]}}
+
+    items = projection_service._projection_reference_items(
+        result, manifest, prefer_proxy=False,
+    )
+
+    assert {item["name"] for item in items} == {
+        "model.obj", "model.mtl", "raw.png",
+    }
+
+
 def test_active_job_without_heartbeat_is_stale():
     assert projection_service._job_is_stale({"state": "running"})
 

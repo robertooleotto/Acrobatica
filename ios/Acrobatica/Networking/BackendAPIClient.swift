@@ -1091,12 +1091,17 @@ actor BackendAPIClient {
     /// manifest ma non devono bloccare l'apertura del modello nell'app.
     func downloadProjectionBundle(
         sessionId: String,
-        files: [MeshFileInfo]
+        files: [MeshFileInfo],
+        includeDevelopment: Bool = false
     ) async throws -> [String: URL] {
         let renderExtensions: Set<String> = ["obj", "mtl", "png", "jpg", "jpeg"]
         let renderFiles = files.filter {
-            renderExtensions.contains(
-                URL(fileURLWithPath: $0.name).pathExtension.lowercased())
+            let url = URL(fileURLWithPath: $0.name)
+            let name = url.lastPathComponent
+            if name.hasPrefix("facade_development_") { return false }
+            if name.hasPrefix("development_plane_") { return includeDevelopment }
+            if name == "development.json" { return includeDevelopment }
+            return renderExtensions.contains(url.pathExtension.lowercased())
         }
         return try await downloadCachedAssetBundle(
             sessionId: sessionId, group: "projection", files: renderFiles)

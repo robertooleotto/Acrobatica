@@ -24,7 +24,7 @@ from scripts.oc_compositing import coverage_rgba, mosaic
 
 def _write_texture_png(path: str, bgra: np.ndarray) -> None:
     """Scrive il buffer OpenCV BGRA senza reinterpretarne i canali."""
-    if not cv2.imwrite(path, ob.seal_texture_edges(bgra)):
+    if not cv2.imwrite(path, bgra):
         raise RuntimeError(f"Impossibile scrivere la texture: {path}")
 
 
@@ -1256,6 +1256,168 @@ def _compose_plane(
     return rgba, coverage, accepted_keys, report
 
 
+def _compose_plane_full_resolution(
+    textured_mesh: registration.TexturedMesh,
+    pf: ob.PlaneFrame,
+    plane: dict,
+    cams: list[ob.Camera],
+    photo_resolver,
+    *,
+    scale_m_per_mesh_unit: float,
+    max_photos: int,
+    registration_ceiling: int,
+    coverage_photos: int,
+    crop: float,
+    depth_m: float,
+    max_residual_px: float,
+    max_rotation_deg: float,
+    max_scale_error: float,
+) -> tuple[np.ndarray, float, list[str], dict]:
+    """Run the same full-resolution Blend registration used by the Mac viewer."""
+    pixel_scale = max(1.0, max(pf.tex_w, pf.tex_h) / 1100.0)
+    scaled_max_residual_px = max_residual_px * pixel_scale
+    normal = registration.orient_normal(
+        np.asarray(plane["normale"], float), pf.corners.mean(0), cams,
+    )
+    horizontal_flipped = registration.orient_frame_for_front_view(pf, normal)
+    reference_rgba, reference_mask, depth = registration.render_oc_reference(
+        textured_mesh, pf, normal, depth_m, scale_m_per_mesh_unit,
+    )
+    reference = reference_rgba[..., :3]
+    polygon = ob._polygon_mask(pf.tex_w, pf.tex_h, pf.polygon_uv)
+    planar_reference = (
+        reference_mask & np.isfinite(depth) & (np.abs(depth) <= 0.35)
+    )
+    dominant_depth_m = (
+        float(np.median(depth[planar_reference])) if planar_reference.any() else None
+    )
+
+    can_register = int(planar_reference.sum()) >= 8_000
+    if can_register:
+        sift = cv2.SIFT_create(
+            nfeatures=5000, contrastThreshold=0.025, edgeThreshold=12,
+        )
+        reference_points, reference_descriptors = sift.detectAndCompute(
+            registration._normalized_gray(reference),
+            planar_reference.astype(np.uint8) * 255,
+        )
+    else:
+        reference_points, reference_descriptors = [], None
+
+    ranked = registration.rank_candidates(pf, normal, cams, crop=crop)
+    camera_by_key = {str(int(cam.key)): cam for cam in cams}
+    initial_candidates = max(
+        max_photos, registration_ceiling, coverage_photos,
+    )
+    if can_register:
+        candidates, candidate_report = \
+            registration.adaptive_registration_candidates(
+                pf, normal, cams, ranked, crop=crop,
+                initial_candidates=initial_candidates,
+            )
+    else:
+        candidates, candidate_report = [], {
+            "available": len(ranked), "initial": 0, "selected": 0,
+            "single_coverage": 0.0, "double_coverage": 0.0,
+            "stop_reason": "riferimento OC insufficiente",
+        }
+
+    accepted_images: list[np.ndarray] = []
+    accepted_planar_masks: list[np.ndarray] = []
+    accepted_full_masks: list[np.ndarray] = []
+    accepted_keys: list[str] = []
+    accepted_items: list[dict[str, object]] = []
+    photo_reports: list[dict[str, object]] = []
+    for rank, candidate in enumerate(candidates, 1):
+        key = str(candidate["key"])
+        resolved = photo_resolver(key)
+        item: dict[str, object] = {
+            "rank": rank, **candidate, "photo_found": bool(resolved),
+        }
+        if not resolved:
+            photo_reports.append(item)
+            continue
+        posed, posed_mask = registration.warp_photo_to_plane(
+            Path(resolved), camera_by_key[key], pf,
+        )
+        aligned, aligned_mask, residual = registration.register_residual(
+            reference, planar_reference, reference_points, reference_descriptors,
+            posed, posed_mask,
+            max_rotation_deg=max_rotation_deg,
+            max_scale_error=max_scale_error,
+            max_residual_px=scaled_max_residual_px,
+        )
+        item["registration"] = residual
+        if bool(residual.get("accepted")):
+            accepted_images.append(aligned)
+            accepted_planar_masks.append(aligned_mask & planar_reference)
+            accepted_full_masks.append(aligned_mask)
+            accepted_keys.append(key)
+            accepted_items.append(item)
+        photo_reports.append(item)
+
+    if accepted_keys:
+        accepted_images, accepted_planar_masks, global_report, corrections = \
+            registration.global_align_photos(
+                accepted_images, accepted_planar_masks, accepted_keys,
+            )
+    else:
+        global_report, corrections = {}, []
+
+    size = (pf.tex_w, pf.tex_h)
+    compositing_masks = [
+        cv2.warpAffine(
+            mask.astype(np.uint8), np.asarray(correction["matrix"], np.float64),
+            size, flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT,
+        ) > 0
+        for mask, correction in zip(accepted_full_masks, corrections)
+    ]
+    for item, correction in zip(accepted_items, corrections):
+        residual = item.get("registration")
+        if isinstance(residual, dict):
+            residual["global_correction"] = correction
+
+    covered = np.zeros((pf.tex_h, pf.tex_w), bool)
+    for mask in compositing_masks:
+        covered |= mask
+    composed = mosaic(
+        accepted_images, compositing_masks, reference,
+        content_aware_seams=True,
+    )
+    rgba = coverage_rgba(composed, compositing_masks)
+    coverage = float(covered[polygon].mean()) if polygon.any() else 0.0
+    report = {
+        "horizontal_flipped_for_front_view": horizontal_flipped,
+        "oc_reference_coverage": round(float(reference_mask[polygon].mean()), 4)
+        if polygon.any() else 0.0,
+        "planar_reference_coverage": round(float(planar_reference[polygon].mean()), 4)
+        if polygon.any() else 0.0,
+        "dominant_reference_depth_m": (
+            round(dominant_depth_m, 4) if dominant_depth_m is not None else None
+        ),
+        "pose_fillers_enabled": False,
+        "accepted_photos": len(accepted_images),
+        "registered_photos": len(accepted_images),
+        "registration_pixel_scale": round(pixel_scale, 4),
+        "max_residual_px": round(scaled_max_residual_px, 3),
+        "mosaic_anchor_key": accepted_keys[0] if accepted_keys else None,
+        "seam_refinements": [],
+        "registration_selection": {
+            "budget": len(candidates),
+            "configured_initial_candidates": registration_ceiling,
+            "attempted": len(candidates),
+            "registered": len(accepted_images),
+            "selected": len(accepted_images),
+            "adaptive_candidates": candidate_report,
+            "pose_only_fillers": 0,
+            "stop_reason": "tutte le foto registrate sono state composte",
+        },
+        "global_alignment": global_report,
+        "photos": photo_reports,
+    }
+    return rgba, coverage, accepted_keys, report
+
+
 def bake_planes(
     clean_mesh_path: str,
     raw_obj_path: str,
@@ -1274,6 +1436,7 @@ def bake_planes(
     target_long_edge_px: int = 0,
     target_height_px: int = 0,
     photo_resolver=None,
+    full_resolution_registration: bool = False,
     progress=None,
     log=print,
 ) -> dict:
@@ -1322,7 +1485,11 @@ def bake_planes(
             projection_plane = plane
             projection_pf = geometry_pf
             uses_texture_frame = False
-        rgba, coverage, used, report = _compose_plane(
+        compose = (
+            _compose_plane_full_resolution
+            if full_resolution_registration else _compose_plane
+        )
+        rgba, coverage, used, report = compose(
             textured_mesh, projection_pf, projection_plane, cams, photo_resolver,
             scale_m_per_mesh_unit=scale_m_per_mesh_unit,
             max_photos=max_photos,

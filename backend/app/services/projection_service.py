@@ -187,12 +187,21 @@ def _projection_mesh(result: dict) -> tuple[Optional[str], str]:
     return _mesh_obj_path(_mesh_entry(result, "raw")), "raw"
 
 
-def _projection_reference_items(result: dict, manifest: dict | None = None) -> list[dict]:
+def _projection_reference_items(
+    result: dict,
+    manifest: dict | None = None,
+    *,
+    prefer_proxy: bool = True,
+) -> list[dict]:
     raw = _mesh_entry(result, "raw")
     files = [item for item in raw.get("files", []) if isinstance(item, dict)]
     proxy = (manifest or {}).get("projection_reference") or {}
     wanted = {Path(name).name for name in proxy.get("files", [])}
-    if wanted and wanted.issubset({Path(item.get("name", "")).name for item in files}):
+    if (
+        prefer_proxy
+        and wanted
+        and wanted.issubset({Path(item.get("name", "")).name for item in files})
+    ):
         return [item for item in files if Path(item.get("name", "")).name in wanted]
     allowed = {".obj", ".mtl", ".png", ".jpg", ".jpeg"}
     return [
@@ -434,7 +443,10 @@ def _worker_payload(sess: dict) -> dict:
         raise InputsMissing("Input del worker Mac incompleti")
 
     raw_files = []
-    for item in _projection_reference_items(result, manifest):
+    # The final compositor needs the complete raw OC surface. The medium proxy
+    # can omit narrow returns even when their texture exists, leaving no visual
+    # reference for registration.
+    for item in _projection_reference_items(result, manifest, prefer_proxy=False):
         name = Path(item.get("name", "")).name
         path = item.get("path")
         if path:
@@ -472,9 +484,7 @@ def _worker_payload(sess: dict) -> dict:
         "planes": _worker_file("planes.json", planes_path),
         "raw_reference": raw_files,
         "reference_cache_key": f"{manifest.get('bundle_id', session_id)}-{reference_hash}",
-        "reference_kind": (
-            "projection_proxy" if manifest.get("projection_reference") else "raw"
-        ),
+        "reference_kind": "raw",
         "photos": photos,
         "config": {
             "texel_mm": float(os.environ.get("ACRO_PROJECTION_TEXEL_MM", "20")),
