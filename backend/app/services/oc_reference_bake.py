@@ -653,47 +653,6 @@ def _planar_surface_support(
     return expanded & reference_mask
 
 
-def _select_registered_cover(
-    masks: list[np.ndarray], target: np.ndarray, max_selected: int,
-) -> tuple[list[int], dict[str, object]]:
-    if not masks or not target.any() or max_selected <= 0:
-        return [], {"selected": 0, "single_coverage": 0.0, "double_coverage": 0.0}
-    counts = np.zeros(target.shape, np.uint16)
-    remaining = list(range(len(masks)))
-    selected: list[int] = []
-    target_pixels = max(int(target.sum()), 1)
-
-    while remaining and len(selected) < max_selected:
-        single = float((counts[target] >= 1).mean())
-        double = float((counts[target] >= 2).mean())
-        if single >= 0.995 and double >= 0.75:
-            break
-        deficit = target & (counts < (1 if single < 0.995 else 2))
-        covered = counts > 0
-        best_position = -1
-        best_score = -1.0
-        best_gain = 0
-        for position, index in enumerate(remaining):
-            mask = masks[index] & target
-            gain = int((mask & deficit).sum())
-            overlap = int((mask & covered).sum()) if selected else 0
-            score = gain + overlap * 0.08 - index * target_pixels * 1e-6
-            if score > best_score:
-                best_position, best_score, best_gain = position, score, gain
-        minimum_gain = max(50, int(target_pixels * 0.001))
-        if best_position < 0 or best_gain < minimum_gain:
-            break
-        index = remaining.pop(best_position)
-        selected.append(index)
-        counts[masks[index] & target] += 1
-
-    return selected, {
-        "selected": len(selected),
-        "single_coverage": round(float((counts[target] >= 1).mean()), 4),
-        "double_coverage": round(float((counts[target] >= 2).mean()), 4),
-    }
-
-
 def _compose_plane_legacy(
     textured_mesh: registration.TexturedMesh,
     pf: ob.PlaneFrame,
@@ -1079,12 +1038,16 @@ def _compose_plane(
     rank_by_key = {
         str(candidate["key"]): rank for rank, candidate in enumerate(ranked, 1)
     }
-    candidate_limit = analysis_candidate_budget(pf, registration_ceiling)
+    registration_candidates, candidate_report = \
+        registration.adaptive_registration_candidates(
+            pf, normal, cams, ranked, crop=crop,
+            initial_candidates=max(1, registration_ceiling),
+        )
     photo_reports: list[dict[str, object]] = []
     accepted_specs: list[dict[str, object]] = []
 
     if can_register:
-        for candidate in ranked[:candidate_limit]:
+        for candidate in registration_candidates:
             key = str(candidate["key"])
             resolved = photo_resolver(key)
             item: dict[str, object] = {
@@ -1127,12 +1090,27 @@ def _compose_plane(
                 "matrix": full_matrix,
             })
 
-    selected_indices, cover_report = _select_registered_cover(
-        [spec["mask"] for spec in accepted_specs],
-        analysis_support,
-        max(max_photos, coverage_photos),
-    )
-    selected_specs = [accepted_specs[index] for index in selected_indices]
+    # Offline composes every photo that passes registration. Keep the same
+    # contract here: the adaptive pose stage limits expensive work, while this
+    # stage must not silently discard valid registered views.
+    selected_specs = accepted_specs
+    analysis_counts = np.zeros(analysis_support.shape, np.uint16)
+    for spec in selected_specs:
+        analysis_counts[spec["mask"] & analysis_support] += 1
+    if analysis_support.any():
+        cover_report = {
+            "selected": len(selected_specs),
+            "single_coverage": round(float(
+                (analysis_counts[analysis_support] >= 1).mean()), 4),
+            "double_coverage": round(float(
+                (analysis_counts[analysis_support] >= 2).mean()), 4),
+        }
+    else:
+        cover_report = {
+            "selected": len(selected_specs),
+            "single_coverage": 0.0,
+            "double_coverage": 0.0,
+        }
     selected_keys = {str(spec["key"]) for spec in selected_specs}
     for item in photo_reports:
         residual = item.get("registration")
@@ -1241,14 +1219,15 @@ def _compose_plane(
     )
     coverage = float(covered[polygon].mean()) if polygon.any() else 0.0
     selection_report = {
-        "budget": candidate_limit,
+        "budget": len(registration_candidates),
         "configured_ceiling": registration_ceiling,
         "analysis_size": list(analysis_size),
-        "attempted": min(candidate_limit, len(ranked)),
+        "attempted": len(registration_candidates),
         "registered": len(accepted_specs),
+        "adaptive_candidates": candidate_report,
         **cover_report,
         "pose_only_fillers": 0,
-        "stop_reason": "copertura composta soltanto da foto registrate",
+        "stop_reason": "tutte le foto registrate sono state composte",
     }
     report = {
         "horizontal_flipped_for_front_view": horizontal_flipped,

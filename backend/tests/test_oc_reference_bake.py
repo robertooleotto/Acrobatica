@@ -211,6 +211,51 @@ def test_registration_selection_exceeds_baseline_when_coverage_requires_it():
     assert report["double_coverage"] >= 0.95
 
 
+def test_shared_adaptive_candidates_can_expand_past_initial_limit(monkeypatch):
+    frame = ortho_bake.PlaneFrame(
+        origin=np.array([0.0, 0.0, 0.0]),
+        u=np.array([1.0, 0.0, 0.0]),
+        v=np.array([0.0, 1.0, 0.0]),
+        corners=np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], float),
+        polygon_uv=np.array([[0, 0], [1, 0], [1, 1], [0, 1]], float),
+        width_world=1.0, height_world=1.0,
+        width_m=1.0, height_m=1.0, area_m2=1.0,
+        tex_w=100, tex_h=100, texel_m=0.01,
+    )
+    cameras = [
+        ortho_bake.Camera(
+            key=str(index), C=np.array([0.5, 0.5, 1.0]), R=np.eye(3),
+            fx=100.0, fy=100.0, cx=50.0, cy=50.0,
+            image_width=100, image_height=100,
+        )
+        for index in range(2)
+    ]
+    ranked = [
+        {"key": "0", "score": 2.0},
+        {"key": "1", "score": 1.0},
+    ]
+
+    def split_projection(camera, points):
+        if camera.key == "0":
+            x = points[:, 0] * 180.0
+        else:
+            x = (points[:, 0] - 0.45) * 180.0
+        y = points[:, 1] * 80.0 + 10.0
+        return x, y, np.ones(len(points))
+
+    monkeypatch.setattr(registration.ob, "_project", split_projection)
+
+    selected, report = registration.adaptive_registration_candidates(
+        frame, np.array([0.0, 0.0, 1.0]), cameras, ranked,
+        crop=0.9, initial_candidates=1,
+    )
+
+    assert [item["key"] for item in selected] == ["0", "1"]
+    assert report["initial"] == 1
+    assert report["selected"] == 2
+    assert report["single_coverage"] > 0.90
+
+
 def test_diagnostic_overlay_accepts_an_empty_overlap():
     reference = np.full((12, 8, 3), 90, np.uint8)
     source = np.full((12, 8, 3), 220, np.uint8)
@@ -292,23 +337,7 @@ def test_overlap_graph_keeps_pairs_that_create_visible_coverage_seams():
     assert (1, 2) in pair_ids
 
 
-def test_registered_cover_requires_redundancy_when_available():
-    target = np.ones((20, 100), bool)
-    masks = [np.zeros_like(target) for _ in range(3)]
-    masks[0][:, :60] = True
-    masks[1][:, 40:] = True
-    masks[2][:, :] = True
-
-    selected, report = oc_reference_bake._select_registered_cover(
-        masks, target, max_selected=3,
-    )
-
-    assert selected == [2, 0, 1]
-    assert report["single_coverage"] == 1.0
-    assert report["double_coverage"] == 1.0
-
-
-def test_compose_plane_registers_broadly_but_composes_a_bounded_set(
+def test_compose_plane_keeps_every_valid_registered_photo(
     monkeypatch, tmp_path,
 ):
     frame = ortho_bake.PlaneFrame(
@@ -348,11 +377,14 @@ def test_compose_plane_registers_broadly_but_composes_a_bounded_set(
                         lambda *args: (reference, mask, np.zeros((100, 100), np.float32)))
     monkeypatch.setattr(oc_reference_bake.registration, "rank_candidates",
                         lambda *args, **kwargs: ranked)
-    monkeypatch.setattr(oc_reference_bake, "_select_registration_candidates",
-                        lambda *args, base_photos, **kwargs: (
-                            ranked[:base_photos],
-                            {"budget": base_photos, "selected": min(base_photos, 4)},
-                        ))
+    monkeypatch.setattr(
+        oc_reference_bake.registration, "adaptive_registration_candidates",
+        lambda *args, **kwargs: (ranked, {
+            "available": 4, "initial": 4, "selected": 4,
+            "single_coverage": 1.0, "double_coverage": 1.0,
+            "stop_reason": "copertura geometrica doppia sufficiente",
+        }),
+    )
     monkeypatch.setattr(oc_reference_bake.registration, "warp_photo_to_plane",
                         lambda *args: (source, mask))
     monkeypatch.setattr(oc_reference_bake.registration, "register_residual",
@@ -379,15 +411,15 @@ def test_compose_plane_registers_broadly_but_composes_a_bounded_set(
         max_rotation_deg=0.5, max_scale_error=0.03,
     )
 
-    assert global_counts == [2]
+    assert global_counts == [4]
     assert coverage == 1.0
-    assert used == ["0"]
+    assert used == ["0", "1", "2", "3"]
     assert report["registration_selection"]["attempted"] == 4
     assert report["registration_selection"]["registered"] == 4
-    assert report["registration_selection"]["selected"] == 2
+    assert report["registration_selection"]["selected"] == 4
     assert report["registration_selection"]["pose_only_fillers"] == 0
     assert report["registration_selection"]["stop_reason"] == \
-        "copertura composta soltanto da foto registrate"
+        "tutte le foto registrate sono state composte"
 
 
 def test_compose_plane_uses_registered_photo_and_preserves_alpha(monkeypatch, tmp_path):

@@ -289,6 +289,120 @@ def rank_candidates(
     return sorted(ranked, key=lambda item: float(item["score"]), reverse=True)
 
 
+def adaptive_registration_candidates(
+    pf: ob.PlaneFrame,
+    normal: np.ndarray,
+    cams: list[ob.Camera],
+    ranked: list[dict[str, float | str]],
+    *,
+    crop: float,
+    initial_candidates: int = 60,
+    max_candidates: int = 0,
+) -> tuple[list[dict[str, float | str]], dict[str, object]]:
+    """Keep the quality-ranked core and add every view needed for redundancy.
+
+    Ranking every pose is cheap. Pixel registration is not, so the initial
+    quality set is expanded only by cameras that cover a still uncovered or
+    singly covered part of the plane. ``max_candidates=0`` means that every
+    geometrically usable pose may be considered.
+    """
+    if not ranked:
+        return [], {
+            "available": 0, "initial": 0, "selected": 0,
+            "single_coverage": 0.0, "double_coverage": 0.0,
+            "stop_reason": "nessuna posa vede il piano",
+        }
+
+    grid_w = min(220, max(32, int(math.ceil(pf.width_m / 0.20))))
+    grid_h = min(220, max(32, int(math.ceil(pf.height_m / 0.20))))
+    cols, rows = np.meshgrid(np.arange(grid_w), np.arange(grid_h))
+    gu = (cols.reshape(-1) + 0.5) / grid_w * pf.width_world
+    gv = (1.0 - (rows.reshape(-1) + 0.5) / grid_h) * pf.height_world
+    world = pf.origin + gu[:, None] * pf.u + gv[:, None] * pf.v
+    polygon = ob._polygon_mask(grid_w, grid_h, pf.polygon_uv).reshape(-1)
+    polygon_pixels = max(int(polygon.sum()), 1)
+    margin = (1.0 - crop) * 0.5
+    n = ob._unit(np.asarray(normal, float))
+    camera_by_key = {str(int(cam.key)): cam for cam in cams}
+
+    usable: list[dict[str, float | str]] = []
+    masks: list[np.ndarray] = []
+    for candidate in ranked:
+        cam = camera_by_key.get(str(candidate["key"]))
+        if cam is None:
+            continue
+        x, y, z = ob._project(cam, world)
+        to_camera = cam.C - world
+        distance = np.linalg.norm(to_camera, axis=1)
+        facing = (to_camera / np.maximum(distance[:, None], 1e-6)) @ n
+        mask = (
+            polygon
+            & (z > 0.01)
+            & (facing > 0.15)
+            & (x >= margin * cam.image_width)
+            & (x <= (1.0 - margin) * cam.image_width)
+            & (y >= margin * cam.image_height)
+            & (y <= (1.0 - margin) * cam.image_height)
+        )
+        if mask.any():
+            usable.append(candidate)
+            masks.append(mask)
+
+    limit = len(usable) if max_candidates <= 0 else min(max_candidates, len(usable))
+    initial = min(max(1, initial_candidates), limit)
+    selected_indices = list(range(initial))
+    selected_set = set(selected_indices)
+    counts = np.zeros(len(world), np.uint16)
+    for index in selected_indices:
+        counts[masks[index]] += 1
+
+    minimum_gain = max(1, int(polygon_pixels * 0.001))
+    stop_reason = "copertura geometrica doppia sufficiente"
+    while len(selected_indices) < limit:
+        single = float((counts[polygon] >= 1).mean())
+        double = float((counts[polygon] >= 2).mean())
+        if single >= 0.995 and double >= 0.95:
+            break
+        deficit = polygon & (counts < 2)
+        covered = counts > 0
+        best_index = -1
+        best_gain = 0
+        best_overlap = -1
+        for index, mask in enumerate(masks):
+            if index in selected_set:
+                continue
+            gain = int((mask & deficit).sum())
+            overlap = int((mask & covered).sum())
+            if gain > best_gain or (gain == best_gain and overlap > best_overlap):
+                best_index, best_gain, best_overlap = index, gain, overlap
+        if best_index < 0 or best_gain < minimum_gain:
+            stop_reason = "le altre pose non migliorano la copertura"
+            break
+        selected_indices.append(best_index)
+        selected_set.add(best_index)
+        counts[masks[best_index]] += 1
+    else:
+        stop_reason = (
+            "analizzate tutte le pose utili" if max_candidates <= 0
+            else "raggiunto il limite di sicurezza"
+        )
+
+    rank_order = {
+        str(candidate["key"]): index for index, candidate in enumerate(ranked)
+    }
+    selected = [usable[index] for index in selected_indices]
+    selected.sort(key=lambda candidate: rank_order[str(candidate["key"])])
+    return selected, {
+        "available": len(usable),
+        "initial": initial,
+        "selected": len(selected),
+        "single_coverage": round(float((counts[polygon] >= 1).mean()), 4),
+        "double_coverage": round(float((counts[polygon] >= 2).mean()), 4),
+        "grid": [grid_w, grid_h],
+        "stop_reason": stop_reason,
+    }
+
+
 def warp_photo_to_plane(
     path: Path,
     cam: ob.Camera,
@@ -1066,8 +1180,16 @@ def main() -> None:
     # OC-reference and photo-graph registration.  The old split registered only
     # ``max_photos`` and then inserted the remaining coverage views from their
     # raw poses, recreating visible seams exactly at the facade borders.
-    registration_limit = max(args.max_photos, args.coverage_photos)
-    registration_candidates = ranked[:registration_limit] if can_register else []
+    initial_candidates = max(args.max_photos, args.coverage_photos)
+    registration_candidates, adaptive_selection = adaptive_registration_candidates(
+        pf, normal, cams, ranked, crop=0.9,
+        initial_candidates=initial_candidates,
+    ) if can_register else ([], {
+        "available": len(ranked), "initial": 0, "selected": 0,
+        "single_coverage": 0.0, "double_coverage": 0.0,
+        "stop_reason": "riferimento OC insufficiente",
+    })
+    registration_limit = len(registration_candidates)
     for rank, candidate in enumerate(registration_candidates, 1):
         key = str(candidate["key"])
         path = _photo_path(args.photos, key)
@@ -1238,6 +1360,7 @@ def main() -> None:
             "pixel_scale": round(registration_pixel_scale, 4),
             "max_rotation_deg": args.max_rotation_deg,
             "max_scale_error": args.max_scale_error,
+            "candidate_selection": adaptive_selection,
         },
         "oc_reference_coverage": round(float(reference_mask.mean()), 4),
         "planar_reference_coverage": round(float(planar_reference.mean()), 4),
