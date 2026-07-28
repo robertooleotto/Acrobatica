@@ -74,9 +74,28 @@ def test_texture_plane_uses_preserved_frame_without_changing_geometry_fields():
     assert plane["corners"] == [[0, 0, 0], [2, 0, 0], [2, 1, 0]]
 
 
-def test_texture_plane_rejects_a_historical_frame_with_changed_inclination():
+def test_texture_plane_keeps_frame_after_small_geometric_regularization():
+    angle = np.radians(0.502)
     plane = {
-        "normale": [0.0, 0.02, 0.9998],
+        "normale": [float(np.sin(angle)), 0.0, float(np.cos(angle))],
+        "punto": [0.0, 0.0, 0.0],
+        "corners": [[0, 0, 0], [1, 0, 0], [1, 20, 0]],
+        "texture_frame": {
+            "normale": [0.0, 0.0, 1.0],
+            "punto": [0.0, 0.0, 0.0],
+            "corners": [[0, 0, 0], [1, 0, 0], [1, 20, 0]],
+        },
+    }
+
+    _, preserved = oc_reference_bake.texture_plane(plane)
+
+    assert preserved is True
+
+
+def test_texture_plane_rejects_a_historical_frame_with_changed_inclination():
+    angle = np.radians(5.0)
+    plane = {
+        "normale": [0.0, float(np.sin(angle)), float(np.cos(angle))],
         "punto": [0.0, 0.0, 0.0],
         "corners": [[0, 0, 0], [10, 0, 0], [10, 20, -0.4]],
         "texture_frame": {

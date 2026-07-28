@@ -22,6 +22,9 @@ from scripts import run_oc_reference_registration_local as registration
 from scripts.oc_compositing import coverage_rgba, mosaic
 
 
+TEXTURE_FRAME_MAX_NORMAL_DELTA_DEG = 2.0
+
+
 def _write_texture_png(path: str, bgra: np.ndarray) -> None:
     """Scrive il buffer OpenCV BGRA senza reinterpretarne i canali."""
     if not cv2.imwrite(path, bgra):
@@ -84,7 +87,7 @@ def _texture_frame_matches_geometry(plane: dict, frame: dict) -> bool:
     if np.linalg.norm(current_normal) < 1e-9 or np.linalg.norm(frame_normal) < 1e-9:
         return False
     normal_cosine = abs(float(np.dot(current_normal, frame_normal)))
-    if normal_cosine < math.cos(math.radians(0.5)):
+    if normal_cosine < math.cos(math.radians(TEXTURE_FRAME_MAX_NORMAL_DELTA_DEG)):
         return False
 
     current_point = np.asarray(plane.get("punto"), np.float64)
