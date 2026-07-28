@@ -388,14 +388,27 @@ def _build_layouts(
     )
     layouts = []
     for index, (plane, result) in enumerate(zip(planes, summary["planes"]), 1):
-        image_path = output / str(result["file"])
+        image_path = output / str(
+            result.get("development_source_file") or result["file"]
+        )
         image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
         if image is None:
             raise RuntimeError(f"Texture Blend non leggibile: {image_path}")
-        corners = np.asarray(plane["corners"], float)
-        topology_sides = _vertical_sides(corners, up)
+        topology_corners = np.asarray(plane["corners"], float)
+        topology_sides = _vertical_sides(topology_corners, up)
+        image_plane = plane
+        development_frame = result.get("development_frame")
+        if isinstance(development_frame, dict) and all(
+            key in development_frame for key in ("normale", "punto", "corners")
+        ):
+            image_plane = dict(plane)
+            image_plane.update({
+                key: development_frame[key]
+                for key in ("normale", "punto", "corners")
+            })
+        image_corners = np.asarray(image_plane["corners"], float)
         image_left, image_right, polygon_uv = _plane_frame_sides(
-            plane, up, vertices, faces, cameras, texel_m, scale,
+            image_plane, up, vertices, faces, cameras, texel_m, scale,
         )
         topology_midpoints = [side.mean(axis=0) for side in topology_sides]
         mapping = [
@@ -403,13 +416,13 @@ def _build_layouts(
             else 1
             for midpoint in topology_midpoints
         ]
-        heights = corners @ up * scale
+        heights = image_corners @ up * scale
         role = str(plane.get("envelope_role") or plane.get("tipo") or "plane")
         rectify = role.lower() in {"return", "spalletta"}
         target_width = image.shape[1]
         source_quad = None
         if rectify:
-            width_m = _average_horizontal_width(corners, up, scale)
+            width_m = _average_horizontal_width(image_corners, up, scale)
             target_width = max(2, int(round(width_m / texel_m)))
             source_quad = _ordered_quad_pixels(
                 polygon_uv, image.shape[1], image.shape[0],

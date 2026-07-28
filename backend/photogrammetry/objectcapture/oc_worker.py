@@ -772,6 +772,11 @@ def process_projection_job(cli: Client, job: dict, dry: bool) -> None:
             mesh, poses, scale,
         )
         summary["development"] = development
+        for item in summary.get("planes", []):
+            source_name = item.pop("development_source_file", None)
+            item.pop("development_frame", None)
+            if source_name:
+                (out_dir / Path(source_name).name).unlink(missing_ok=True)
 
         manifest = {
             "main_obj": summary["main_obj"],

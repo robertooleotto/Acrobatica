@@ -1504,7 +1504,19 @@ def bake_planes(
             max_rotation_deg=0.5,
             max_scale_error=0.03,
         )
+        development_source_file = None
+        development_frame = None
         if uses_texture_frame:
+            development_source_file = (
+                f"_development_source_plane_{index}.png"
+            )
+            _write_texture_png(
+                os.path.join(out_dir, development_source_file), rgba,
+            )
+            development_frame = {
+                key: projection_plane[key]
+                for key in ("normale", "punto", "corners")
+            }
             rgba = _remap_texture_frame(rgba, projection_pf, geometry_pf)
             geometry_mask = ob._polygon_mask(
                 geometry_pf.tex_w, geometry_pf.tex_h, geometry_pf.polygon_uv)
@@ -1529,6 +1541,9 @@ def bake_planes(
             "projection_mode": "oc_reference_registered",
             "texture_frame": report["texture_frame"],
         }
+        if development_source_file and development_frame:
+            result["development_source_file"] = development_source_file
+            result["development_frame"] = development_frame
         results.append(result)
         reports.append({"index": index, "nome": name, **report})
         frames.append((index, name, filename, geometry_pf))

@@ -130,6 +130,58 @@ def test_return_rectification_preserves_every_horizontal_level():
     assert int(rectified[38, :, :3].max()) == 0
 
 
+def test_layout_uses_unremapped_texture_and_its_preserved_frame(
+    monkeypatch, tmp_path,
+):
+    image = np.full((100, 40, 4), 180, np.uint8)
+    source = tmp_path / "_development_source_plane_1.png"
+    assert cv2.imwrite(str(source), image)
+    current_plane = {
+        "id": 0,
+        "nome": "Spalletta",
+        "tipo": "spalletta",
+        "normale": [0.0, 0.0, 1.0],
+        "punto": [0.0, 0.0, 0.0],
+        "corners": [[0, 0, 0], [1, 0, 0], [1, 5, 0], [0, 5, 0]],
+    }
+    preserved = {
+        "normale": [0.02, 0.0, 0.9998],
+        "punto": [0.0, 0.0, 0.0],
+        "corners": [[0, 0, 0], [2, 0, 0], [2, 5, 0], [0, 5, 0]],
+    }
+    summary = {"planes": [{
+        "file": "plane_1.png",
+        "development_source_file": source.name,
+        "development_frame": preserved,
+        "width_m": 1.0,
+        "tex_w": 20,
+    }]}
+    seen = []
+    monkeypatch.setattr(
+        development.ob, "load_obj",
+        lambda *_args: (np.empty((0, 3)), np.empty((0, 3), np.int32)),
+    )
+    monkeypatch.setattr(development.ob, "load_cameras", lambda _poses: [])
+
+    def fake_sides(plane, *_args):
+        seen.append(plane)
+        return (
+            np.array([0.0, 2.5, 0.0]),
+            np.array([2.0, 2.5, 0.0]),
+            np.array([[0, 0], [1, 0], [1, 1], [0, 1]], float),
+        )
+
+    monkeypatch.setattr(development, "_plane_frame_sides", fake_sides)
+
+    layouts, _ = development._build_layouts(
+        [current_plane], summary, tmp_path, Path("mesh.obj"), {}, 1.0,
+    )
+
+    assert layouts[0].image_path == source
+    assert layouts[0].image_width == 40
+    assert seen[0]["corners"] == preserved["corners"]
+
+
 def test_level_shear_flattens_a_sloped_horizontal_band_at_left_anchor():
     image = np.zeros((120, 100, 4), np.uint8)
     image[:, :, 3] = 255
