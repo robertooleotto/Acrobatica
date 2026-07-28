@@ -1159,7 +1159,9 @@ def _compose_plane(
             posed_mask.astype(np.uint8), matrix, size,
             flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT,
         ) > 0
-        aligned_mask &= surface_support
+        # Il supporto planare serve a registrare la parete, non a ritagliare
+        # cornicioni, balconi e altri dettagli reali della stessa facciata.
+        aligned_mask &= reference_mask & polygon
         accepted_images.append(aligned)
         accepted_planar_masks.append(aligned_mask & planar_reference)
         accepted_full_masks.append(aligned_mask)
@@ -1214,7 +1216,9 @@ def _compose_plane(
         ) > 0
         for mask, correction in zip(accepted_full_masks, corrections)
     ]
-    compositing_masks = [mask & surface_support for mask in compositing_masks]
+    compositing_masks = [
+        mask & reference_mask & polygon for mask in compositing_masks
+    ]
     for key, correction in zip(accepted_keys, corrections):
         for item in photo_reports:
             residual = item.get("registration")
@@ -1225,13 +1229,15 @@ def _compose_plane(
     covered = np.zeros((pf.tex_h, pf.tex_w), bool)
     for mask in compositing_masks:
         covered |= mask
+    composed = mosaic(
+        accepted_images, compositing_masks, reference,
+        content_aware_seams=True,
+        content_aware_photo_count=len(accepted_images),
+    )
+    reference_fallback = reference_mask & polygon & ~covered
+    composed[reference_fallback] = reference[reference_fallback]
     rgba = coverage_rgba(
-        mosaic(
-            accepted_images, compositing_masks, reference,
-            content_aware_seams=True,
-            content_aware_photo_count=len(accepted_images),
-        ),
-        compositing_masks,
+        composed, [*compositing_masks, reference_fallback],
     )
     coverage = float(covered[polygon].mean()) if polygon.any() else 0.0
     selection_report = {
@@ -1251,6 +1257,8 @@ def _compose_plane(
         "planar_reference_coverage": round(float(planar_reference[polygon].mean()), 4)
         if polygon.any() else 0.0,
         "surface_support_coverage": round(float(surface_support[polygon].mean()), 4)
+        if polygon.any() else 0.0,
+        "oc_fallback_coverage": round(float(reference_fallback[polygon].mean()), 4)
         if polygon.any() else 0.0,
         "dominant_reference_depth_m": (
             round(dominant_depth_m, 4) if dominant_depth_m is not None else None

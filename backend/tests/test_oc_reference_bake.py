@@ -529,10 +529,12 @@ def test_rejected_photo_never_fills_an_uncovered_region(
     assert used == ["0"]
     assert np.all(rgba[:, :75, :3] == 60)
     assert np.all(rgba[:, :75, 3] == 255)
-    assert np.all(rgba[:, 75:, 3] == 0)
+    assert np.all(rgba[:, 75:, :3] == 80)
+    assert np.all(rgba[:, 75:, 3] == 255)
     rejected_report = next(item for item in report["photos"] if item["key"] == "1")
     assert rejected_report["registration"]["accepted"] is False
     assert report["pose_fillers_enabled"] is False
+    assert report["oc_fallback_coverage"] == 0.25
 
 
 def test_opencv_bgra_texture_is_written_without_swapping_red_and_blue(tmp_path):
