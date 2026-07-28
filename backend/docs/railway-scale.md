@@ -19,12 +19,12 @@ Use separate services from the same repository:
 - `api`: public FastAPI control plane, at least two replicas in one EU region.
 - `geometry-worker`: plane detection only, private service, one concurrent job
   per replica. Do not run CGAL/Open3D in the API process once this worker is on.
-- `vision-worker`: Grounding DINO/SAM, preferably a GPU provider rather than the
-  public API container.
+- `vision-worker`: Grounding DINO/SAM sul pool Mac (MPS) o su un provider GPU,
+  mai nel container API pubblico.
 - Redis: required before moving geometry and vision jobs to independent workers;
   configure retries, leases and a dead-letter queue.
 
-Object Capture and projection remain on the Mac worker pool. Add Macs by giving
+Object Capture, projection and opening detection remain on the Mac worker pool. Add Macs by giving
 each worker the same backend URL; database compare-and-swap prevents duplicate
 claims.
 

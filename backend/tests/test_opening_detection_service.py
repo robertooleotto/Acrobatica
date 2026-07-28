@@ -186,3 +186,127 @@ def test_tiled_segmentation_rejects_a_mask_that_is_the_whole_tile():
 def test_opening_prompts_cover_occluded_balcony_and_storefront_types():
     prompts = {label.lower() for label in service._PROMPT_LABELS[0]}
     assert {"window", "door", "balcony door", "french window", "storefront"} <= prompts
+
+
+def test_start_detection_creates_a_worker_job_id(monkeypatch):
+    session = {"id": "session-1", "result": {"projection": _projection()}}
+
+    monkeypatch.setattr(
+        service.session_store, "get_session", lambda _session_id: deepcopy(session))
+
+    def update_session(_session_id, fields):
+        session.update(deepcopy(fields))
+        return deepcopy(session)
+
+    monkeypatch.setattr(service.session_store, "update_session", update_session)
+
+    result, should_start = service.start_detection("session-1")
+
+    assert should_start is True
+    assert result["state"] == "queued"
+    job = session["result"]["opening_detection_job"]
+    assert job["job_id"]
+    assert job["state"] == "queued"
+
+
+def test_start_detection_migrates_a_legacy_inline_job_to_mac(monkeypatch):
+    session = {
+        "id": "session-1",
+        "result": {
+            "projection": _projection(),
+            "opening_detection_job": {
+                "job_id": "legacy-job",
+                "state": "running",
+                "progress": 0.3,
+                "updated_at": service._now_iso(),
+            },
+        },
+    }
+    monkeypatch.setattr(
+        service.session_store, "get_session", lambda _session_id: deepcopy(session))
+
+    def update_session(_session_id, fields):
+        session.update(deepcopy(fields))
+        return deepcopy(session)
+
+    monkeypatch.setattr(service.session_store, "update_session", update_session)
+
+    result, should_start = service.start_detection("session-1")
+
+    assert should_start is True
+    assert result["state"] == "queued"
+    assert session["result"]["opening_detection_job"]["executor"] == "mac"
+    assert session["result"]["opening_detection_job"]["job_id"] != "legacy-job"
+
+
+def test_worker_payload_contains_signed_plane_textures(monkeypatch):
+    session = {
+        "id": "session-1",
+        "result": {
+            "projection": _projection(),
+            "opening_detection_job": {"job_id": "job-1", "state": "running"},
+        },
+    }
+    monkeypatch.setattr(
+        service.storage_service, "signed_url",
+        lambda path, expires_in_sec: f"signed://{path}",
+    )
+
+    payload = service._worker_payload(session)
+
+    assert payload["job_id"] == "job-1"
+    assert payload["textures"] == [{
+        "plane_index": 1,
+        "name": "plane_1_main.png",
+        "url": "signed://remote/plane.png",
+        "size_bytes": 10,
+        "sha256": None,
+    }]
+    assert payload["projection"]["planes"] == _projection()["planes"]
+
+
+def test_complete_worker_job_recomputes_geometry_and_areas(monkeypatch):
+    candidate = _opening()
+    candidate["id"] = "untrusted"
+    candidate["area_m2"] = 999.0
+    session = {
+        "id": "session-1",
+        "result": {
+            "projection": _projection(),
+            "opening_detection_job": {
+                "job_id": "job-1", "state": "running", "started_at": "now",
+            },
+        },
+    }
+
+    monkeypatch.setattr(
+        service.session_store, "get_session", lambda _session_id: deepcopy(session))
+
+    def update_session(_session_id, fields):
+        session.update(deepcopy(fields))
+        return deepcopy(session)
+
+    monkeypatch.setattr(service.session_store, "update_session", update_session)
+
+    result = service.complete_worker_job("session-1", "job-1", [candidate])
+
+    assert result["state"] == "complete"
+    assert result["count"] == 1
+    assert result["openings"][0]["id"] != "untrusted"
+    assert result["openings"][0]["area_m2"] == pytest.approx(2.4)
+    assert result["excluded_area_m2"] == pytest.approx(2.4, abs=0.05)
+
+
+def test_complete_worker_job_rejects_stale_result(monkeypatch):
+    session = {
+        "id": "session-1",
+        "result": {
+            "projection": _projection(),
+            "opening_detection_job": {"job_id": "new-job", "state": "running"},
+        },
+    }
+    monkeypatch.setattr(
+        service.session_store, "get_session", lambda _session_id: deepcopy(session))
+
+    with pytest.raises(service.DetectionError, match="obsoleto"):
+        service.complete_worker_job("session-1", "old-job", [_opening()])

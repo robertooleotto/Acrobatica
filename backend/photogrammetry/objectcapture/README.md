@@ -95,6 +95,22 @@ Per una macchina dedicata soltanto alla proiezione, senza binari Object Capture:
 BACKEND=https://acrobatica-production.up.railway.app \
 worker-venv/bin/python photogrammetry/objectcapture/oc_worker.py --projection-only
 ```
+
+Lo stesso worker consuma anche la coda Grounding DINO/SAM2. Per abilitarla
+installare le dipendenze vision (i pesi Hugging Face vengono scaricati una sola
+volta e poi restano nella cache del Mac):
+
+```bash
+worker-venv/bin/pip install -r \
+  photogrammetry/objectcapture/requirements-vision-worker.txt
+
+# Solo rilevamento aperture, utile per un Mac dedicato:
+BACKEND=https://acrobatica-production.up.railway.app \
+worker-venv/bin/python photogrammetry/objectcapture/oc_worker.py --opening-only
+```
+
+Su un Mac con Metal il dispositivo predefinito e MPS; usare
+`ACRO_AI_DEVICE=cpu` soltanto per diagnosi o compatibilita.
 Tempo atteso: pochi minuti (`.full`) / 10–30 min (`.raw`) su M2-Pro/M4.
 Se compare `[warn] automatic downsampling` → RAM insufficiente, scendi a `.full`
 o prendi una macchina con più RAM.

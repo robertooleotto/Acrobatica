@@ -227,6 +227,15 @@ class Client:
         r.raise_for_status()
         return r.json()
 
+    def next_opening_job(self) -> dict:
+        r = requests.get(
+            f"{self.base}/facade-sessions/next-opening-job",
+            headers=self.headers, timeout=30)
+        if r.status_code in {404, 405}:
+            return {}
+        r.raise_for_status()
+        return r.json()
+
     def projection_progress(
         self, sid: str, job_id: str, progress: float, message: str,
     ):
@@ -331,6 +340,41 @@ class Client:
         try:
             requests.post(
                 f"{self.base}/facade-sessions/{sid}/projection-worker-fail",
+                json={"job_id": job_id, "reason": reason[:500]},
+                headers=self.headers, timeout=30,
+            )
+        except Exception:
+            pass
+
+    def opening_progress(
+        self, sid: str, job_id: str, progress: float, message: str,
+    ):
+        if self.dry:
+            print(f"  [dry] openings {progress:.0%}: {message}")
+            return
+        requests.post(
+            f"{self.base}/facade-sessions/{sid}/opening-worker-progress",
+            json={"job_id": job_id, "progress": progress, "message": message},
+            headers=self.headers, timeout=30,
+        ).raise_for_status()
+
+    def complete_openings(self, sid: str, job_id: str, openings: list[dict]):
+        if self.dry:
+            print(f"  [dry] complete openings: {len(openings)}")
+            return
+        requests.post(
+            f"{self.base}/facade-sessions/{sid}/opening-worker-complete",
+            json={"job_id": job_id, "openings": openings},
+            headers=self.headers, timeout=120,
+        ).raise_for_status()
+
+    def fail_openings(self, sid: str, job_id: str, reason: str):
+        if self.dry:
+            print(f"  [dry] openings fail: {reason}")
+            return
+        try:
+            requests.post(
+                f"{self.base}/facade-sessions/{sid}/opening-worker-fail",
                 json={"job_id": job_id, "reason": reason[:500]},
                 headers=self.headers, timeout=30,
             )
@@ -795,6 +839,55 @@ def process_projection_job(cli: Client, job: dict, dry: bool) -> None:
     print(f"✔ projection {sid} → texture pronta")
 
 
+def process_opening_job(cli: Client, job: dict, dry: bool) -> None:
+    """Esegue Grounding DINO e SAM2 sulle texture gia sviluppate dei piani."""
+    sid = job["session_id"]
+    job_id = job["job_id"]
+    textures = job.get("textures", [])
+    print(f"▶ openings {sid}: {len(textures)} texture")
+    if dry:
+        print("  [dry] download texture e inferenza Grounding DINO + SAM2")
+        return
+
+    config = job.get("config") or {}
+    if config.get("detector_model"):
+        os.environ["ACRO_OPENING_DETECTOR_MODEL"] = str(config["detector_model"])
+    if config.get("segmenter_model"):
+        os.environ["ACRO_OPENING_SEGMENTER_MODEL"] = str(config["segmenter_model"])
+    os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
+    backend_root = Path(__file__).resolve().parents[2]
+    if str(backend_root) not in sys.path:
+        sys.path.insert(0, str(backend_root))
+    from app.services import opening_detection_service
+
+    cache = projection_cache_root() / "opening_textures" / sid
+    cache.mkdir(parents=True, exist_ok=True)
+    texture_paths = {}
+    for done, record in enumerate(textures, 1):
+        fingerprint = str(record.get("sha256") or record.get("size_bytes") or job_id)[:16]
+        destination = cache / f"{int(record['plane_index']):03d}_{fingerprint}_{Path(record['name']).name}"
+        _cached_download(record, destination)
+        texture_paths[int(record["plane_index"])] = destination
+        cli.opening_progress(
+            sid, job_id, 0.02 + 0.02 * done / max(len(textures), 1),
+            f"Mac: scarico texture {done}/{len(textures)}",
+        )
+
+    openings = opening_detection_service.detect_openings_from_textures(
+        job.get("projection") or {},
+        texture_paths,
+        progress=lambda value, message: cli.opening_progress(
+            sid, job_id, value, message),
+        tile_size=int(config.get("tile_size", 2048)),
+        tile_overlap=int(config.get("tile_overlap", 384)),
+        min_area_m2=float(config.get("min_area_m2", 0.08)),
+    )
+    cli.opening_progress(sid, job_id, 0.97, "Mac: pubblico le aperture")
+    cli.complete_openings(sid, job_id, openings)
+    print(f"✔ openings {sid} → {len(openings)} aperture")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Worker Object Capture (opzione A)")
     ap.add_argument("--backend", default=os.environ.get("BACKEND", "http://localhost:8000"))
@@ -812,7 +905,11 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument(
         "--projection-only", action="store_true",
-        help="non reclama Object Capture; esegue soltanto bake/proiezioni",
+        help="non reclama Object Capture; esegue proiezioni e rilevamento aperture",
+    )
+    ap.add_argument(
+        "--opening-only", action="store_true",
+        help="esegue soltanto Grounding DINO e SAM2",
     )
     args = ap.parse_args()
 
@@ -821,20 +918,27 @@ def main():
     while True:
         job = {}
         kind = ""
-        if not args.projection_only:
+        if not args.projection_only and not args.opening_only:
             try:
                 job = cli.next_job()
                 if job.get("session_id"):
                     kind = "oc"
             except Exception as e:
                 print(f"[warn] next-oc-job fallito: {e}")
-        if not kind:
+        if not kind and not args.opening_only:
             try:
                 job = cli.next_projection_job()
                 if job.get("session_id"):
                     kind = "projection"
             except Exception as e:
                 print(f"[warn] next-projection-job fallito: {e}")
+        if not kind:
+            try:
+                job = cli.next_opening_job()
+                if job.get("session_id"):
+                    kind = "openings"
+            except Exception as e:
+                print(f"[warn] next-opening-job fallito: {e}")
         if not kind:
             if args.once:
                 print("coda vuota, esco (--once)"); return
@@ -843,14 +947,18 @@ def main():
         try:
             if kind == "oc":
                 process_job(cli, job, args.hpg, args.converter, args.detail, args.dry_run)
-            else:
+            elif kind == "projection":
                 process_projection_job(cli, job, args.dry_run)
+            else:
+                process_opening_job(cli, job, args.dry_run)
         except Exception as e:
             print(f"✗ {kind} {sid} FALLITO: {e}")
             if kind == "oc":
                 cli.fail(sid, str(e))
-            else:
+            elif kind == "projection":
                 cli.fail_projection(sid, job.get("job_id", ""), str(e))
+            else:
+                cli.fail_openings(sid, job.get("job_id", ""), str(e))
         if args.once:
             return
 

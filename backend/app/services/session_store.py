@@ -132,6 +132,42 @@ def claim_next_projection_job(job_update: dict) -> Optional[dict]:
     return None
 
 
+def claim_next_opening_job(job_update: dict) -> Optional[dict]:
+    """Claim atomico del prossimo rilevamento aperture destinato al worker Mac."""
+    client = get_supabase()
+    res = (
+        client.table(SESSIONS)
+        .select("*")
+        .contains("result", {"opening_detection_job": {"state": "queued"}})
+        .order("updated_at")
+        .limit(8)
+        .execute()
+    )
+    for sess in res.data or []:
+        result = sess.get("result") or {}
+        previous = result.get("opening_detection_job") or {}
+        job_id = previous.get("job_id")
+        if previous.get("state") != "queued" or not job_id:
+            continue
+        updated_result = {**result, "opening_detection_job": {
+            **job_update,
+            "job_id": job_id,
+            "started_at": previous.get("started_at") or job_update.get("updated_at"),
+        }}
+        claimed = (
+            client.table(SESSIONS)
+            .update({"result": updated_result})
+            .eq("id", sess["id"])
+            .contains("result", {"opening_detection_job": {
+                "state": "queued", "job_id": job_id,
+            }})
+            .execute()
+        )
+        if claimed.data:
+            return claimed.data[0]
+    return None
+
+
 def upsert_photo(session_id: str, order_index: int, storage_path: str, metadata: dict) -> dict:
     client = get_supabase()
     res = client.table(PHOTOS).upsert(

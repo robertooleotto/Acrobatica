@@ -11,6 +11,7 @@ import hashlib
 import os
 import tempfile
 import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -20,6 +21,8 @@ import numpy as np
 from PIL import Image
 
 from . import session_store, storage_service
+
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 
 class InputsMissing(RuntimeError):
@@ -31,7 +34,7 @@ class DetectionError(RuntimeError):
 
 
 _ACTIVE_JOB_STATES = {"queued", "running"}
-_JOB_STALE_SECONDS = 45 * 60
+_JOB_STALE_SECONDS = int(os.environ.get("ACRO_OPENING_STALE_SECONDS", "7200"))
 _INFERENCE_LOCK = threading.Lock()
 _DETECTOR_MODEL = os.environ.get(
     "ACRO_OPENING_DETECTOR_MODEL", "IDEA-Research/grounding-dino-tiny")
@@ -50,6 +53,11 @@ _PROMPT_LABELS = [[
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def uses_mac_worker() -> bool:
+    """L'inferenza pesante gira sul Mac salvo override esplicito per sviluppo."""
+    return os.environ.get("ACRO_OPENING_EXECUTOR", "mac").lower() != "inline"
 
 
 def _job_is_stale(job: dict, now: datetime | None = None) -> bool:
@@ -75,12 +83,18 @@ def _set_job(session_id: str, state: str, progress: float,
     result = sess.get("result") or {}
     previous = result.get("opening_detection_job") or {}
     now = _now_iso()
+    started_at = previous.get("started_at")
+    if state == "queued" or not started_at:
+        started_at = now
+    job_id = str(uuid.uuid4()) if state == "queued" else previous.get("job_id")
     result["opening_detection_job"] = {
+        "job_id": job_id,
+        "executor": "mac" if uses_mac_worker() else "inline",
         "state": state,
         "progress": min(max(float(progress), 0.0), 1.0),
         "message": message,
         "error": error,
-        "started_at": previous.get("started_at") or now,
+        "started_at": started_at,
         "updated_at": now,
     }
     session_store.update_session(session_id, {"result": result})
@@ -259,18 +273,163 @@ def start_detection(session_id: str) -> tuple[dict, bool]:
     _projection(sess)
     job = (sess.get("result") or {}).get("opening_detection_job") or {}
     if job.get("state") in _ACTIVE_JOB_STATES and not _job_is_stale(job):
+        if uses_mac_worker() and job.get("executor") != "mac":
+            _set_job(session_id, "queued", 0.0, "Trasferisco il rilevamento al Mac")
+            return _public_result(session_store.get_session(session_id) or sess), True
         return _public_result(sess), False
     _set_job(session_id, "queued", 0.0, "Rilevamento aperture accodato")
     return _public_result(session_store.get_session(session_id) or sess), True
+
+
+def _worker_payload(sess: dict) -> dict:
+    """Restituisce al Mac soltanto manifesto leggero e URL firmati delle texture."""
+    projection = _projection(sess)
+    files = _file_map(projection)
+    textures = []
+    for plane in projection.get("planes", []):
+        name = Path(plane.get("file", "")).name
+        record = files.get(name)
+        if not name or not record or not record.get("path"):
+            continue
+        textures.append({
+            "plane_index": int(plane["index"]),
+            "name": name,
+            "url": storage_service.signed_url(
+                record["path"], expires_in_sec=12 * 60 * 60),
+            "size_bytes": record.get("size"),
+            "sha256": record.get("checksum"),
+        })
+    if not textures:
+        raise InputsMissing("Il bundle non contiene texture dei piani leggibili")
+    result = sess.get("result") or {}
+    job = result.get("opening_detection_job") or {}
+    return {
+        "session_id": sess["id"],
+        "job_id": job.get("job_id"),
+        "projection": {
+            "planes": projection.get("planes", []),
+            "total_area_m2": projection.get("total_area_m2", 0.0),
+            "scale_m_per_mesh_unit": projection.get("scale_m_per_mesh_unit", 1.0),
+        },
+        "textures": textures,
+        "config": {
+            "tile_size": int(os.environ.get("ACRO_OPENING_TILE_SIZE", "2048")),
+            "tile_overlap": int(os.environ.get("ACRO_OPENING_TILE_OVERLAP", "384")),
+            "min_area_m2": float(os.environ.get("ACRO_OPENING_MIN_AREA_M2", "0.08")),
+            "detector_model": _DETECTOR_MODEL,
+            "segmenter_model": _SEGMENTER_MODEL,
+        },
+    }
+
+
+def claim_next_worker_job() -> dict:
+    now = _now_iso()
+    sess = session_store.claim_next_opening_job({
+        "state": "running",
+        "executor": "mac",
+        "progress": 0.02,
+        "message": "Worker Mac: preparo le texture",
+        "error": "",
+        "updated_at": now,
+    })
+    if sess is None:
+        return {}
+    try:
+        return _worker_payload(sess)
+    except Exception as exc:
+        _set_job(sess["id"], "failed", 1.0, "Input AI non validi", str(exc)[:500])
+        raise
+
+
+def update_worker_progress(
+    session_id: str, job_id: str, progress: float, message: str,
+) -> None:
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        raise InputsMissing("Sessione non trovata")
+    current = ((sess.get("result") or {}).get("opening_detection_job") or {})
+    if current.get("job_id") != job_id or current.get("state") != "running":
+        raise DetectionError("Job aperture non piu corrente")
+    _set_job(session_id, "running", progress, message)
+
+
+def _validated_worker_openings(projection: dict, openings: list[dict]) -> list[dict]:
+    planes = _plane_map(projection)
+    validated = []
+    seen = set()
+    allowed_types = {"window", "door", "shop_window", "unknown"}
+    for raw in openings:
+        plane_index = int(raw.get("plane_index", -1))
+        polygon = [[float(u), float(v)] for u, v in raw.get("polygon_uv", [])]
+        if plane_index not in planes or len(polygon) < 3:
+            raise DetectionError("Risultato AI riferito a un piano non valido")
+        if any(not (0.0 <= value <= 1.0) for point in polygon for value in point):
+            raise DetectionError("Coordinate apertura fuori dal piano")
+        kind = str(raw.get("type", "unknown"))
+        if kind not in allowed_types:
+            kind = "unknown"
+        identifier = _stable_id(plane_index, kind, polygon)
+        if identifier in seen:
+            continue
+        seen.add(identifier)
+        validated.append({
+            "id": identifier,
+            "plane_index": plane_index,
+            "type": kind,
+            "polygon_uv": polygon,
+            "confidence": min(max(float(raw.get("confidence", 0.0)), 0.0), 1.0),
+            "area_m2": 0.0,
+            "excluded": True,
+            "source": "grounded_sam2",
+        })
+    return validated
+
+
+def complete_worker_job(session_id: str, job_id: str, openings: list[dict]) -> dict:
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        raise InputsMissing("Sessione non trovata")
+    result = sess.get("result") or {}
+    current = result.get("opening_detection_job") or {}
+    if current.get("job_id") != job_id or current.get("state") != "running":
+        raise DetectionError("Risultato AI obsoleto o gia sostituito")
+    projection = _projection(sess)
+    validated = _validated_worker_openings(projection, openings)
+    document = {
+        **_totals(projection, validated, _trim_map(sess)),
+        "detector_model": _DETECTOR_MODEL,
+        "segmenter_model": _SEGMENTER_MODEL,
+        "updated_at": _now_iso(),
+    }
+    result["metric_openings"] = document
+    session_store.update_session(session_id, {"result": result})
+    _set_job(session_id, "complete", 1.0, f"Rilevate {len(validated)} aperture")
+    return _public_result(session_store.get_session(session_id) or sess)
+
+
+def fail_worker_job(session_id: str, job_id: str, error: str) -> None:
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        return
+    current = ((sess.get("result") or {}).get("opening_detection_job") or {})
+    if current.get("job_id") == job_id:
+        _set_job(
+            session_id, "failed", 1.0,
+            "Rilevamento non riuscito", error[:500],
+        )
 
 
 def detection_status(session_id: str) -> Optional[dict]:
     sess = session_store.get_session(session_id)
     if sess is not None:
         job = (sess.get("result") or {}).get("opening_detection_job") or {}
-        if _job_is_stale(job):
+        if (job.get("state") in _ACTIVE_JOB_STATES and uses_mac_worker()
+                and job.get("executor") != "mac"):
+            _set_job(session_id, "queued", 0.0, "Trasferisco il rilevamento al Mac")
+            sess = session_store.get_session(session_id) or sess
+        elif _job_is_stale(job):
             _set_job(session_id, "failed", 1.0, "Rilevamento interrotto",
-                     "Il server e stato riavviato durante il calcolo; rilancia il rilevamento.")
+                     "Il worker non ha aggiornato il lavoro; rilancia il rilevamento.")
             sess = session_store.get_session(session_id) or sess
     return _public_result(sess) if sess is not None else None
 
@@ -429,15 +588,36 @@ def _stable_id(plane_index: int, kind: str, polygon: list[list[float]]) -> str:
 def _load_grounding():
     import torch
     from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
+    from transformers.models.grounding_dino import modeling_grounding_dino
 
     # Transformers 4.57 usa questa guardia anche nel processor CPU; Torch 2.2
     # espone `torch.compiler` ma non ancora il metodo. In inferenza eager vale False.
     if not hasattr(torch.compiler, "is_compiling"):
         torch.compiler.is_compiling = lambda: False
+    if not getattr(
+        modeling_grounding_dino.generate_masks_with_special_tokens_and_transfer_map,
+        "_acro_mps_safe", False,
+    ):
+        original_mask_builder = (
+            modeling_grounding_dino.generate_masks_with_special_tokens_and_transfer_map)
+
+        def mps_safe_mask_builder(input_ids):
+            # MPS non garantisce qui lo stesso ordinamento di torch.nonzero e la
+            # funzione Transformers usa un previous_col globale. Costruiamo le
+            # piccole maschere testuali su CPU e rimandiamole al modello Metal.
+            if input_ids.device.type != "mps":
+                return original_mask_builder(input_ids)
+            attention, positions = original_mask_builder(input_ids.cpu())
+            return attention.to(input_ids.device), positions.to(input_ids.device)
+
+        mps_safe_mask_builder._acro_mps_safe = True
+        modeling_grounding_dino.generate_masks_with_special_tokens_and_transfer_map = (
+            mps_safe_mask_builder)
     processor = AutoProcessor.from_pretrained(_DETECTOR_MODEL, use_fast=False)
     model = AutoModelForZeroShotObjectDetection.from_pretrained(_DETECTOR_MODEL)
-    model.eval()
-    return torch, processor, model
+    device = _inference_device(torch)
+    model.to(device).eval()
+    return torch, processor, model, device
 
 
 def _load_sam2():
@@ -448,13 +628,34 @@ def _load_sam2():
         torch.compiler.is_compiling = lambda: False
     processor = Sam2Processor.from_pretrained(_SEGMENTER_MODEL, use_fast=False)
     model = Sam2Model.from_pretrained(_SEGMENTER_MODEL)
-    model.eval()
-    return torch, processor, model
+    device = _inference_device(torch)
+    model.to(device).eval()
+    return torch, processor, model, device
+
+
+def _inference_device(torch) -> str:
+    requested = os.environ.get("ACRO_AI_DEVICE", "auto").strip().lower()
+    if requested != "auto":
+        return requested
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return "mps"
+    if torch.cuda.is_available():
+        return "cuda"
+    return "cpu"
+
+
+def _runtime_parts(runtime):
+    if len(runtime) == 4:
+        return runtime
+    torch, processor, model = runtime
+    return torch, processor, model, "cpu"
 
 
 def _detect_boxes(image: Image.Image, runtime) -> list[dict]:
-    torch, processor, model = runtime
+    torch, processor, model, device = _runtime_parts(runtime)
     inputs = processor(images=image, text=_PROMPT_LABELS, return_tensors="pt")
+    if device != "cpu":
+        inputs = inputs.to(device)
     with torch.inference_mode():
         outputs = model(**inputs)
     result = processor.post_process_grounded_object_detection(
@@ -540,11 +741,14 @@ def _detect_boxes_tiled(
 def _segment_boxes(image: Image.Image, boxes: list[list[float]], runtime) -> list[np.ndarray]:
     if not boxes:
         return []
-    torch, processor, model = runtime
+    torch, processor, model, device = _runtime_parts(runtime)
     inputs = processor(images=image, input_boxes=[boxes], return_tensors="pt")
+    original_sizes = inputs["original_sizes"].cpu()
+    if device != "cpu":
+        inputs = inputs.to(device)
     with torch.inference_mode():
         outputs = model(**inputs, multimask_output=False)
-    masks = processor.post_process_masks(outputs.pred_masks.cpu(), inputs["original_sizes"])[0]
+    masks = processor.post_process_masks(outputs.pred_masks.cpu(), original_sizes)[0]
     return [np.asarray(mask).squeeze() for mask in masks]
 
 
@@ -624,6 +828,74 @@ def run_detection_job(session_id: str) -> None:
         _set_job(session_id, "failed", 1.0, "Rilevamento non riuscito", str(exc)[:500])
 
 
+def detect_openings_from_textures(
+    projection: dict,
+    texture_paths: dict[int, Path],
+    *,
+    progress: Callable[[float, str], None] | None = None,
+    grounding_loader: Callable = _load_grounding,
+    sam_loader: Callable = _load_sam2,
+    tile_size: int = 2048,
+    tile_overlap: int = 384,
+    min_area_m2: float = 0.08,
+) -> list[dict]:
+    """Inferenza pura su file locali, usabile sia da Railway sia dal worker Mac."""
+    report = progress or (lambda _value, _message: None)
+    planes = [
+        plane for plane in projection.get("planes", [])
+        if int(plane.get("index", -1)) in texture_paths
+    ]
+    if not planes:
+        raise InputsMissing("Il bundle non contiene texture dei piani leggibili")
+
+    report(0.04, "Mac: carico Grounding DINO")
+    grounding = grounding_loader()
+    proposals_by_plane: dict[int, list[dict]] = {}
+    for done, plane in enumerate(planes, 1):
+        plane_index = int(plane["index"])
+        image, _ = _read_texture(texture_paths[plane_index])
+        proposals_by_plane[plane_index] = _detect_boxes_tiled(
+            image, grounding, tile_size=tile_size, overlap=tile_overlap)
+        report(
+            0.05 + 0.38 * done / len(planes),
+            f"Mac: cerco aperture, faccia {done}/{len(planes)}",
+        )
+    del grounding
+    gc.collect()
+
+    report(0.46, "Mac: carico SAM2")
+    sam = sam_loader()
+    openings = []
+    for done, plane in enumerate(planes, 1):
+        plane_index = int(plane["index"])
+        proposals = proposals_by_plane.get(plane_index, [])
+        image, _ = _read_texture(texture_paths[plane_index])
+        polygons = _segment_polygons_tiled(image, proposals, sam)
+        for proposal, polygon in zip(proposals, polygons):
+            kind = _opening_type(proposal["label"])
+            candidate = {
+                "id": _stable_id(plane_index, kind, polygon),
+                "plane_index": plane_index,
+                "type": kind,
+                "polygon_uv": polygon,
+                "confidence": round(proposal["score"], 4),
+                "area_m2": 0.0,
+                "excluded": True,
+                "source": "grounded_sam2",
+            }
+            candidate["area_m2"] = round(
+                _opening_area_m2(candidate, plane), 3)
+            if len(polygon) >= 3 and candidate["area_m2"] >= min_area_m2:
+                openings.append(candidate)
+        report(
+            0.48 + 0.47 * done / len(planes),
+            f"Mac: segmento aperture, faccia {done}/{len(planes)}",
+        )
+    del sam
+    gc.collect()
+    return openings
+
+
 def detect_openings(
     session_id: str,
     grounding_loader: Callable = _load_grounding,
@@ -637,12 +909,9 @@ def detect_openings(
         projection = _projection(sess)
         planes = projection.get("planes", [])
         files = _file_map(projection)
-        tile_size = int(os.environ.get("ACRO_OPENING_TILE_SIZE", "2048"))
-        tile_overlap = int(os.environ.get("ACRO_OPENING_TILE_OVERLAP", "384"))
-
         with tempfile.TemporaryDirectory(prefix="acro_openings_") as td:
             root = Path(td)
-            textures: list[tuple[dict, Path]] = []
+            texture_paths: dict[int, Path] = {}
             for plane in planes:
                 filename = Path(plane.get("file", "")).name
                 remote = files.get(filename)
@@ -650,51 +919,18 @@ def detect_openings(
                     continue
                 local = root / filename
                 local.write_bytes(storage_service.download_bytes(remote["path"]))
-                textures.append((plane, local))
-            if not textures:
-                raise InputsMissing("Il bundle non contiene texture dei piani leggibili")
-
-            _set_job(session_id, "running", 0.04, "Carico Grounding DINO")
-            grounding = grounding_loader()
-            proposals_by_plane: dict[int, list[dict]] = {}
-            for done, (plane, path) in enumerate(textures, 1):
-                image, _ = _read_texture(path)
-                proposals = _detect_boxes_tiled(
-                    image, grounding, tile_size=tile_size, overlap=tile_overlap)
-                proposals_by_plane[int(plane["index"])] = proposals
-                _set_job(session_id, "running", 0.05 + 0.38 * done / len(textures),
-                         f"Cerco aperture: faccia {done}/{len(textures)}")
-            del grounding
-            gc.collect()
-
-            _set_job(session_id, "running", 0.46, "Carico SAM2")
-            sam = sam_loader()
-            openings = []
-            min_area = float(os.environ.get("ACRO_OPENING_MIN_AREA_M2", "0.08"))
-            for done, (plane, path) in enumerate(textures, 1):
-                plane_index = int(plane["index"])
-                proposals = proposals_by_plane.get(plane_index, [])
-                image, _ = _read_texture(path)
-                polygons = _segment_polygons_tiled(image, proposals, sam)
-                for proposal, polygon in zip(proposals, polygons):
-                    kind = _opening_type(proposal["label"])
-                    candidate = {
-                        "id": _stable_id(plane_index, kind, polygon),
-                        "plane_index": plane_index,
-                        "type": kind,
-                        "polygon_uv": polygon,
-                        "confidence": round(proposal["score"], 4),
-                        "area_m2": 0.0,
-                        "excluded": True,
-                        "source": "grounded_sam2",
-                    }
-                    candidate["area_m2"] = round(_opening_area_m2(candidate, plane), 3)
-                    if len(polygon) >= 3 and candidate["area_m2"] >= min_area:
-                        openings.append(candidate)
-                _set_job(session_id, "running", 0.48 + 0.47 * done / len(textures),
-                         f"Segmento aperture: faccia {done}/{len(textures)}")
-            del sam
-            gc.collect()
+                texture_paths[int(plane["index"])] = local
+            openings = detect_openings_from_textures(
+                projection,
+                texture_paths,
+                progress=lambda value, message: _set_job(
+                    session_id, "running", value, message.replace("Mac: ", "")),
+                grounding_loader=grounding_loader,
+                sam_loader=sam_loader,
+                tile_size=int(os.environ.get("ACRO_OPENING_TILE_SIZE", "2048")),
+                tile_overlap=int(os.environ.get("ACRO_OPENING_TILE_OVERLAP", "384")),
+                min_area_m2=float(os.environ.get("ACRO_OPENING_MIN_AREA_M2", "0.08")),
+            )
 
         latest = session_store.get_session(session_id) or sess
         document = {

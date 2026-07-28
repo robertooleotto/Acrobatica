@@ -62,6 +62,8 @@ from ..models import (
     OrthorectifySessionResult,
     OpeningDetectionResult,
     OpeningReviewRequest,
+    OpeningWorkerJob,
+    OpeningWorkerResult,
     DetectedPlane,
     DetectPlanesResult,
     DirectUploadFileRequest,
@@ -211,6 +213,19 @@ def next_projection_job():
     except projection_service.InputsMissing as exc:
         raise HTTPException(409, str(exc)) from exc
     return ProjectionWorkerJob(**payload)
+
+
+@router.get(
+    "/next-opening-job", response_model=OpeningWorkerJob,
+    dependencies=[Depends(_require_worker_token)],
+)
+def next_opening_job():
+    """Il Mac reclama Grounding DINO/SAM2 e riceve URL firmati delle texture."""
+    try:
+        payload = opening_detection_service.claim_next_worker_job()
+    except opening_detection_service.InputsMissing as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return OpeningWorkerJob(**payload)
 
 
 @router.post("/{session_id}/photos", response_model=UploadPhotoResponse)
@@ -1790,9 +1805,53 @@ def detect_openings(session_id: str, background_tasks: BackgroundTasks):
         result, should_start = opening_detection_service.start_detection(session_id)
     except opening_detection_service.InputsMissing as exc:
         raise HTTPException(409, str(exc)) from exc
-    if should_start:
+    if should_start and not opening_detection_service.uses_mac_worker():
         background_tasks.add_task(opening_detection_service.run_detection_job, session_id)
     return OpeningDetectionResult(session_id=session_id, **result)
+
+
+@router.post(
+    "/{session_id}/opening-worker-progress",
+    dependencies=[Depends(_require_worker_token)],
+)
+def opening_worker_progress(
+    session_id: str, payload: ProjectionWorkerProgress,
+):
+    try:
+        opening_detection_service.update_worker_progress(
+            session_id, payload.job_id, payload.progress, payload.message)
+    except opening_detection_service.InputsMissing as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except opening_detection_service.DetectionError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"ok": True}
+
+
+@router.post(
+    "/{session_id}/opening-worker-complete", response_model=OpeningDetectionResult,
+    dependencies=[Depends(_require_worker_token)],
+)
+def opening_worker_complete(session_id: str, payload: OpeningWorkerResult):
+    try:
+        result = opening_detection_service.complete_worker_job(
+            session_id, payload.job_id,
+            [item.model_dump() for item in payload.openings],
+        )
+    except opening_detection_service.InputsMissing as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except opening_detection_service.DetectionError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return OpeningDetectionResult(session_id=session_id, **result)
+
+
+@router.post(
+    "/{session_id}/opening-worker-fail",
+    dependencies=[Depends(_require_worker_token)],
+)
+def opening_worker_fail(session_id: str, payload: ProjectionWorkerFailure):
+    opening_detection_service.fail_worker_job(
+        session_id, payload.job_id, payload.reason)
+    return {"ok": True}
 
 
 @router.get("/{session_id}/openings", response_model=OpeningDetectionResult)

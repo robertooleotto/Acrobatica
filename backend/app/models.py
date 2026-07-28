@@ -671,6 +671,28 @@ class OpeningReviewRequest(BaseModel):
     openings: list[MetricOpening]
 
 
+class OpeningWorkerTexture(BaseModel):
+    plane_index: int
+    name: str
+    url: str
+    size_bytes: Optional[int] = None
+    sha256: Optional[str] = None
+
+
+class OpeningWorkerJob(BaseModel):
+    """Input firmati del rilevamento. `session_id=None` indica coda vuota."""
+    session_id: Optional[str] = None
+    job_id: Optional[str] = None
+    projection: dict = {}
+    textures: list[OpeningWorkerTexture] = []
+    config: dict = {}
+
+
+class OpeningWorkerResult(BaseModel):
+    job_id: str
+    openings: list[MetricOpening]
+
+
 class MetricPlaneTrim(BaseModel):
     """Fascia verticale valida di un piano, in UV originali non distruttive."""
     plane_index: int
