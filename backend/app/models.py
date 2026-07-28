@@ -671,6 +671,25 @@ class OpeningReviewRequest(BaseModel):
     openings: list[MetricOpening]
 
 
+class MetricPlaneTrim(BaseModel):
+    """Fascia verticale valida di un piano, in UV originali non distruttive."""
+    plane_index: int
+    bottom: float = Field(0.0, ge=0.0, le=1.0)
+    top: float = Field(1.0, ge=0.0, le=1.0)
+
+
+class MetricTrimsRequest(BaseModel):
+    trims: list[MetricPlaneTrim] = Field(default_factory=list)
+
+
+class MetricTrimsResult(BaseModel):
+    session_id: str
+    trims: list[MetricPlaneTrim] = Field(default_factory=list)
+    gross_area_m2: float = 0.0
+    excluded_area_m2: float = 0.0
+    net_area_m2: float = 0.0
+
+
 class ZonaMarcataModel(BaseModel):
     """Singola zona marcata dall'operatore sull'ortofoto (schema concordato
     con l'editor iOS — i campi/rawValue NON vanno cambiati).

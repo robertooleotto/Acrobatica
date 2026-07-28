@@ -54,6 +54,8 @@ from ..models import (
     MeshFileInfo,
     MeshInfoResult,
     MeshUploadResult,
+    MetricTrimsRequest,
+    MetricTrimsResult,
     ResetDerivedResult,
     ZoneMarkupResult,
     OrthorectifyPhotoResult,
@@ -1561,6 +1563,33 @@ def get_planes_data(session_id: str, require_current: bool = False):
         url=storage_service.signed_url(info["path"], expires_in_sec=3600),
         generator_version=generator_version,
     )
+
+
+@router.get("/{session_id}/metric-trims", response_model=MetricTrimsResult)
+def get_metric_trims(session_id: str):
+    result = opening_detection_service.metric_trims_status(session_id)
+    if result is None:
+        raise HTTPException(404, "Sessione non trovata")
+    return MetricTrimsResult(session_id=session_id, **result)
+
+
+@router.put("/{session_id}/metric-trims", response_model=MetricTrimsResult)
+def put_metric_trims(session_id: str, payload: MetricTrimsRequest):
+    trims = []
+    seen = set()
+    for item in payload.trims:
+        if item.plane_index in seen:
+            raise HTTPException(400, f"Ritaglio duplicato: piano {item.plane_index}")
+        if item.top - item.bottom < 0.02:
+            raise HTTPException(400, "Il ritaglio deve conservare almeno il 2% del piano")
+        seen.add(item.plane_index)
+        if item.bottom > 1e-6 or item.top < 1.0 - 1e-6:
+            trims.append(item.model_dump())
+    try:
+        result = opening_detection_service.save_metric_trims(session_id, trims)
+    except opening_detection_service.InputsMissing as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return MetricTrimsResult(session_id=session_id, **result)
 
 
 # ─── Proiezione foto → piani (passo 8) ──────────────────────────────────────

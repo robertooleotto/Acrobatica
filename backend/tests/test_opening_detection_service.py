@@ -60,6 +60,27 @@ def test_totals_recompute_metric_area_and_union_overlaps():
     assert result["net_area_m2"] == pytest.approx(21.6, abs=0.05)
 
 
+def test_vertical_trim_updates_gross_and_clips_opening_area():
+    result = service._totals(
+        _projection(), [_opening()], {1: (0.5, 1.0)},
+    )
+
+    assert result["gross_area_m2"] == pytest.approx(12.0)
+    assert result["openings"][0]["area_m2"] == pytest.approx(1.2, abs=0.01)
+    assert result["excluded_area_m2"] == pytest.approx(1.2, abs=0.05)
+    assert result["net_area_m2"] == pytest.approx(10.8, abs=0.05)
+
+
+def test_vertical_polygon_clip_preserves_intersections():
+    polygon = [[0.1, 0.2], [0.4, 0.2], [0.4, 0.8], [0.1, 0.8]]
+
+    clipped = service._clip_polygon_y(polygon, 0.35, 0.65)
+
+    assert min(point[1] for point in clipped) == pytest.approx(0.35)
+    assert max(point[1] for point in clipped) == pytest.approx(0.65)
+    assert service._polygon_area_uv(clipped) == pytest.approx(0.09)
+
+
 def test_review_can_only_change_excluded_flag(monkeypatch):
     session = {
         "id": "session-1",

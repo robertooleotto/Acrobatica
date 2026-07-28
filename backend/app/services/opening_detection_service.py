@@ -112,12 +112,61 @@ def _polygon_area_uv(points: list[list[float]] | list[tuple[float, float]]) -> f
     return abs(area) * 0.5
 
 
-def _opening_area_m2(opening: dict, plane: dict) -> float:
+def _trim_map(sess: dict) -> dict[int, tuple[float, float]]:
+    document = (sess.get("result") or {}).get("metric_trims") or {}
+    return {
+        int(item["plane_index"]): (float(item["bottom"]), float(item["top"]))
+        for item in document.get("trims", [])
+        if isinstance(item, dict) and "plane_index" in item
+    }
+
+
+def _clip_polygon_y(
+    points: list[list[float]] | list[tuple[float, float]],
+    bottom: float,
+    top: float,
+) -> list[list[float]]:
+    polygon = [[float(point[0]), float(point[1])] for point in points]
+
+    def clip(source: list[list[float]], boundary: float, keep_above: bool):
+        if not source:
+            return []
+        output = []
+        previous = source[-1]
+        previous_inside = previous[1] >= boundary if keep_above else previous[1] <= boundary
+        for current in source:
+            current_inside = current[1] >= boundary if keep_above else current[1] <= boundary
+            if current_inside != previous_inside:
+                denominator = current[1] - previous[1]
+                ratio = 0.0 if abs(denominator) < 1e-12 else \
+                    (boundary - previous[1]) / denominator
+                output.append([
+                    previous[0] + (current[0] - previous[0]) * ratio,
+                    boundary,
+                ])
+            if current_inside:
+                output.append(current)
+            previous, previous_inside = current, current_inside
+        return output
+
+    return clip(clip(polygon, bottom, True), top, False)
+
+
+def _opening_area_m2(
+    opening: dict,
+    plane: dict,
+    trim: tuple[float, float] = (0.0, 1.0),
+) -> float:
     rectangle_area = float(plane.get("width_m", 0.0)) * float(plane.get("height_m", 0.0))
-    return _polygon_area_uv(opening.get("polygon_uv") or []) * rectangle_area
+    polygon = _clip_polygon_y(opening.get("polygon_uv") or [], *trim)
+    return _polygon_area_uv(polygon) * rectangle_area
 
 
-def _union_area_m2(openings: list[dict], planes: dict[int, dict]) -> float:
+def _union_area_m2(
+    openings: list[dict],
+    planes: dict[int, dict],
+    trims: dict[int, tuple[float, float]] | None = None,
+) -> float:
     """Area unione rasterizzata: evita doppio conteggio di aperture sovrapposte."""
     total = 0.0
     by_plane: dict[int, list[dict]] = {}
@@ -131,11 +180,13 @@ def _union_area_m2(openings: list[dict], planes: dict[int, dict]) -> float:
         width = min(max(int(plane.get("tex_w", 1024)), 128), 2048)
         height = min(max(int(plane.get("tex_h", 1024)), 128), 2048)
         mask = np.zeros((height, width), np.uint8)
+        trim = (trims or {}).get(plane_index, (0.0, 1.0))
         for opening in selected:
             points = np.asarray([
                 [round(min(max(float(u), 0.0), 1.0) * (width - 1)),
                  round((1.0 - min(max(float(v), 0.0), 1.0)) * (height - 1))]
-                for u, v in opening.get("polygon_uv") or []
+                for u, v in _clip_polygon_y(
+                    opening.get("polygon_uv") or [], *trim)
             ], np.int32)
             if len(points) >= 3:
                 cv2.fillPoly(mask, [points], 255)
@@ -144,18 +195,29 @@ def _union_area_m2(openings: list[dict], planes: dict[int, dict]) -> float:
     return total
 
 
-def _totals(projection: dict, openings: list[dict]) -> dict:
+def _totals(
+    projection: dict,
+    openings: list[dict],
+    trims: dict[int, tuple[float, float]] | None = None,
+) -> dict:
     planes = _plane_map(projection)
+    trims = trims or {}
     normalized = []
     for raw in openings:
         item = dict(raw)
         plane = planes.get(int(item.get("plane_index", -1)))
         if not plane:
             continue
-        item["area_m2"] = round(_opening_area_m2(item, plane), 3)
+        item["area_m2"] = round(_opening_area_m2(
+            item, plane, trims.get(int(item["plane_index"]), (0.0, 1.0))), 3)
         normalized.append(item)
-    gross = float(projection.get("total_area_m2", 0.0))
-    excluded = min(_union_area_m2(normalized, planes), gross)
+    gross = sum(
+        float(plane.get("area_m2", 0.0))
+        * max(0.0, trims.get(index, (0.0, 1.0))[1]
+              - trims.get(index, (0.0, 1.0))[0])
+        for index, plane in planes.items()
+    )
+    excluded = min(_union_area_m2(normalized, planes, trims), gross)
     return {
         "openings": normalized,
         "count": len(normalized),
@@ -208,6 +270,65 @@ def detection_status(session_id: str) -> Optional[dict]:
     return _public_result(sess) if sess is not None else None
 
 
+def metric_trims_status(session_id: str) -> Optional[dict]:
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        return None
+    result = sess.get("result") or {}
+    projection = result.get("projection") or {}
+    document = result.get("metric_trims") or {"trims": []}
+    totals = _totals(
+        projection,
+        (result.get("metric_openings") or {}).get("openings", []),
+        _trim_map(sess),
+    )
+    return {
+        "trims": document.get("trims", []),
+        "gross_area_m2": totals["gross_area_m2"],
+        "excluded_area_m2": totals["excluded_area_m2"],
+        "net_area_m2": totals["net_area_m2"],
+    }
+
+
+def save_metric_trims(session_id: str, trims: list[dict]) -> dict:
+    sess = session_store.get_session(session_id)
+    if sess is None:
+        raise InputsMissing("Sessione non trovata")
+    projection = _projection(sess)
+    plane_indices = set(_plane_map(projection))
+    unknown = sorted(
+        int(item["plane_index"]) for item in trims
+        if int(item["plane_index"]) not in plane_indices
+    )
+    if unknown:
+        raise InputsMissing(
+            "Piani non presenti nella proiezione: "
+            + ", ".join(str(index) for index in unknown)
+        )
+    result = sess.get("result") or {}
+    result["metric_trims"] = {
+        "schema": "acro.metric-trims/v1",
+        "trims": trims,
+        "updated_at": _now_iso(),
+    }
+    opening_document = result.get("metric_openings") or {}
+    totals = _totals(
+        projection,
+        opening_document.get("openings", []),
+        {int(item["plane_index"]): (float(item["bottom"]), float(item["top"]))
+         for item in trims},
+    )
+    if "openings" in opening_document:
+        result["metric_openings"] = {**opening_document, **totals}
+    session_store.update_session(session_id, {"result": result})
+    return {
+        "trims": trims,
+        "gross_area_m2": totals["gross_area_m2"],
+        "excluded_area_m2": totals["excluded_area_m2"],
+        "net_area_m2": totals["net_area_m2"],
+    }
+
+
 def save_review(session_id: str, openings: list[dict]) -> dict:
     sess = session_store.get_session(session_id)
     if sess is None:
@@ -226,7 +347,7 @@ def save_review(session_id: str, openings: list[dict]) -> dict:
         # restano quelle validate dal rilevamento server-side.
         reviewed.append({**source, "excluded": bool(item.get("excluded", True))})
     document = {
-        **_totals(projection, reviewed),
+        **_totals(projection, reviewed, _trim_map(sess)),
         "detector_model": _DETECTOR_MODEL,
         "segmenter_model": _SEGMENTER_MODEL,
         "updated_at": _now_iso(),
@@ -570,13 +691,13 @@ def detect_openings(
             del sam
             gc.collect()
 
+        latest = session_store.get_session(session_id) or sess
         document = {
-            **_totals(projection, openings),
+            **_totals(projection, openings, _trim_map(latest)),
             "detector_model": _DETECTOR_MODEL,
             "segmenter_model": _SEGMENTER_MODEL,
             "updated_at": _now_iso(),
         }
-        latest = session_store.get_session(session_id) or sess
         result = latest.get("result") or {}
         result["metric_openings"] = document
         session_store.update_session(session_id, {"result": result})
