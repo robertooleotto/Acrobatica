@@ -29,6 +29,28 @@ def test_pose_registration_budget_is_metric_and_hard_capped():
     assert oc_reference_bake.pose_registration_budget(very_large) == 12
 
 
+def test_analysis_candidate_budget_scales_with_facade_and_respects_cap():
+    small = SimpleNamespace(width_m=2.0, area_m2=8.0)
+    facade = SimpleNamespace(width_m=24.0, area_m2=432.0)
+    very_large = SimpleNamespace(width_m=90.0, area_m2=2700.0)
+
+    assert oc_reference_bake.analysis_candidate_budget(small) == 12
+    assert oc_reference_bake.analysis_candidate_budget(facade) == 48
+    assert oc_reference_bake.analysis_candidate_budget(very_large) == 60
+
+
+def test_analysis_registration_matrix_is_scaled_to_full_resolution():
+    analysis = SimpleNamespace(tex_w=100, tex_h=200)
+    full = SimpleNamespace(tex_w=300, tex_h=800)
+    matrix = np.array([[1.0, 0.0, 2.0], [0.0, 1.0, -3.0]])
+
+    converted = oc_reference_bake._matrix_at_full_resolution(
+        matrix, analysis, full,
+    )
+
+    assert np.allclose(converted, [[1.0, 0.0, 6.0], [0.0, 1.0, -12.0]])
+
+
 def test_texture_plane_uses_preserved_frame_without_changing_geometry_fields():
     plane = {
         "id": 4,
@@ -270,20 +292,23 @@ def test_overlap_graph_keeps_pairs_that_create_visible_coverage_seams():
     assert (1, 2) in pair_ids
 
 
-def test_rejected_registration_is_not_reused_as_pose_filler():
-    ranked = [{"key": str(index), "score": 10 - index} for index in range(5)]
+def test_registered_cover_requires_redundancy_when_available():
+    target = np.ones((20, 100), bool)
+    masks = [np.zeros_like(target) for _ in range(3)]
+    masks[0][:, :60] = True
+    masks[1][:, 40:] = True
+    masks[2][:, :] = True
 
-    fillers = list(oc_reference_bake._pose_filler_candidates(
-        ranked,
-        attempted_keys={"0", "1", "2"},
-        accepted_keys={"0", "2"},
-        limit=5,
-    ))
+    selected, report = oc_reference_bake._select_registered_cover(
+        masks, target, max_selected=3,
+    )
 
-    assert [item[1]["key"] for item in fillers] == ["3", "4"]
+    assert selected == [2, 0, 1]
+    assert report["single_coverage"] == 1.0
+    assert report["double_coverage"] == 1.0
 
 
-def test_compose_plane_does_not_expand_beyond_pose_budget(
+def test_compose_plane_registers_broadly_but_composes_a_bounded_set(
     monkeypatch, tmp_path,
 ):
     frame = ortho_bake.PlaneFrame(
@@ -357,9 +382,12 @@ def test_compose_plane_does_not_expand_beyond_pose_budget(
     assert global_counts == [2]
     assert coverage == 1.0
     assert used == ["0"]
-    assert report["registration_selection"]["rounds"][-1]["connected"] is False
+    assert report["registration_selection"]["attempted"] == 4
+    assert report["registration_selection"]["registered"] == 4
+    assert report["registration_selection"]["selected"] == 2
+    assert report["registration_selection"]["pose_only_fillers"] == 0
     assert report["registration_selection"]["stop_reason"] == \
-        "raggiunto il tetto tecnico"
+        "copertura composta soltanto da foto registrate"
 
 
 def test_compose_plane_uses_registered_photo_and_preserves_alpha(monkeypatch, tmp_path):
@@ -421,7 +449,7 @@ def test_compose_plane_uses_registered_photo_and_preserves_alpha(monkeypatch, tm
     assert float(rgba[..., 2].mean()) == 240.0
 
 
-def test_pose_filler_feathers_across_registered_photo_boundary(
+def test_rejected_photo_never_fills_an_uncovered_region(
     monkeypatch, tmp_path,
 ):
     frame = ortho_bake.PlaneFrame(
@@ -464,20 +492,21 @@ def test_pose_filler_feathers_across_registered_photo_boundary(
     ranked = [{"key": "0", "score": 2.0}, {"key": "1", "score": 1.0}]
     monkeypatch.setattr(oc_reference_bake.registration, "rank_candidates",
                         lambda *args, **kwargs: ranked)
-    monkeypatch.setattr(
-        oc_reference_bake, "_select_registration_candidates",
-        lambda *args, **kwargs: (ranked[:1], {"budget": 1, "selected": 1}),
-    )
-
     def fake_warp(_path, camera, _frame):
         if camera.key == "0":
             return registered, registered_mask
         return filler, full_mask
 
     monkeypatch.setattr(oc_reference_bake.registration, "warp_photo_to_plane", fake_warp)
+
+    def fake_register(*args, **_kwargs):
+        source_image = args[4]
+        if int(source_image.mean()) == 60:
+            return source_image, registered_mask, {"accepted": True}
+        return source_image, full_mask, {"accepted": False, "reason": "no match"}
+
     monkeypatch.setattr(
-        oc_reference_bake.registration, "register_residual",
-        lambda *args, **kwargs: (registered, registered_mask, {"accepted": True}),
+        oc_reference_bake.registration, "register_residual", fake_register,
     )
     monkeypatch.setattr(
         oc_reference_bake.registration, "global_align_photos",
@@ -491,20 +520,19 @@ def test_pose_filler_feathers_across_registered_photo_boundary(
     rgba, coverage, used, report = oc_reference_bake._compose_plane(
         object(), frame, {"normale": [0, 0, 1]}, cameras,
         lambda key: str(tmp_path / f"{key}.jpg"),
-        scale_m_per_mesh_unit=1.0, max_photos=1, registration_ceiling=1,
+        scale_m_per_mesh_unit=1.0, max_photos=1, registration_ceiling=2,
         coverage_photos=2, crop=0.9, depth_m=2.0, max_residual_px=40.0,
         max_rotation_deg=0.5, max_scale_error=0.03,
     )
 
-    assert coverage == 1.0
-    assert used == ["0", "1"]
-    assert np.all(rgba[:, :65, :3] == 60)
-    # The compositor also applies its bounded color correction (-18 here).
-    assert np.all(rgba[:, 85:, :3] == 202)
-    assert np.all((rgba[:, 70:75, :3] > 60) & (rgba[:, 70:75, :3] < 202))
-    filler_report = next(item for item in report["photos"] if item["key"] == "1")
-    assert filler_report["registration"]["gap_only"] is False
-    assert filler_report["registration"]["coverage_pixels"] == 10_000
+    assert coverage == 0.75
+    assert used == ["0"]
+    assert np.all(rgba[:, :75, :3] == 60)
+    assert np.all(rgba[:, :75, 3] == 255)
+    assert np.all(rgba[:, 75:, 3] == 0)
+    rejected_report = next(item for item in report["photos"] if item["key"] == "1")
+    assert rejected_report["registration"]["accepted"] is False
+    assert report["pose_fillers_enabled"] is False
 
 
 def test_opencv_bgra_texture_is_written_without_swapping_red_and_blue(tmp_path):

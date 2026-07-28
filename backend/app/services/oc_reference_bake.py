@@ -608,7 +608,93 @@ def _select_registration_candidates(
     }
 
 
-def _compose_plane(
+def analysis_candidate_budget(
+    pf: ob.PlaneFrame, hard_cap: int = 60,
+) -> int:
+    """Candidate da verificare a bassa risoluzione in base alla scala reale."""
+    width_need = math.ceil(pf.width_m) * 2
+    area_need = math.ceil(pf.area_m2 / 10.0)
+    return min(max(1, hard_cap), max(12, width_need, area_need))
+
+
+def _scaled_frame(pf: ob.PlaneFrame, max_edge: int = 1400) -> ob.PlaneFrame:
+    scale = min(1.0, max_edge / max(pf.tex_w, pf.tex_h))
+    width = max(1, int(round(pf.tex_w * scale)))
+    height = max(1, int(round(pf.tex_h * scale)))
+    return ob.PlaneFrame(
+        origin=pf.origin, u=pf.u, v=pf.v, corners=pf.corners,
+        polygon_uv=pf.polygon_uv, width_world=pf.width_world,
+        height_world=pf.height_world, width_m=pf.width_m,
+        height_m=pf.height_m, area_m2=pf.area_m2,
+        tex_w=width, tex_h=height,
+        texel_m=pf.texel_m / max(scale, 1e-9),
+    )
+
+
+def _matrix_at_full_resolution(
+    matrix: np.ndarray, analysis_pf: ob.PlaneFrame, full_pf: ob.PlaneFrame,
+) -> np.ndarray:
+    sx = analysis_pf.tex_w / max(full_pf.tex_w, 1)
+    sy = analysis_pf.tex_h / max(full_pf.tex_h, 1)
+    analysis_scale = np.diag([sx, sy, 1.0])
+    transform = np.eye(3, dtype=np.float64)
+    transform[:2] = np.asarray(matrix, np.float64)
+    return (np.linalg.inv(analysis_scale) @ transform @ analysis_scale)[:2]
+
+
+def _planar_surface_support(
+    planar_reference: np.ndarray, reference_mask: np.ndarray, texel_m: float,
+) -> np.ndarray:
+    radius = min(24, max(2, int(round(0.15 / max(texel_m, 1e-6)))))
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1),
+    )
+    expanded = cv2.dilate(planar_reference.astype(np.uint8), kernel) > 0
+    return expanded & reference_mask
+
+
+def _select_registered_cover(
+    masks: list[np.ndarray], target: np.ndarray, max_selected: int,
+) -> tuple[list[int], dict[str, object]]:
+    if not masks or not target.any() or max_selected <= 0:
+        return [], {"selected": 0, "single_coverage": 0.0, "double_coverage": 0.0}
+    counts = np.zeros(target.shape, np.uint16)
+    remaining = list(range(len(masks)))
+    selected: list[int] = []
+    target_pixels = max(int(target.sum()), 1)
+
+    while remaining and len(selected) < max_selected:
+        single = float((counts[target] >= 1).mean())
+        double = float((counts[target] >= 2).mean())
+        if single >= 0.995 and double >= 0.75:
+            break
+        deficit = target & (counts < (1 if single < 0.995 else 2))
+        covered = counts > 0
+        best_position = -1
+        best_score = -1.0
+        best_gain = 0
+        for position, index in enumerate(remaining):
+            mask = masks[index] & target
+            gain = int((mask & deficit).sum())
+            overlap = int((mask & covered).sum()) if selected else 0
+            score = gain + overlap * 0.08 - index * target_pixels * 1e-6
+            if score > best_score:
+                best_position, best_score, best_gain = position, score, gain
+        minimum_gain = max(50, int(target_pixels * 0.001))
+        if best_position < 0 or best_gain < minimum_gain:
+            break
+        index = remaining.pop(best_position)
+        selected.append(index)
+        counts[masks[index] & target] += 1
+
+    return selected, {
+        "selected": len(selected),
+        "single_coverage": round(float((counts[target] >= 1).mean()), 4),
+        "double_coverage": round(float((counts[target] >= 2).mean()), 4),
+    }
+
+
+def _compose_plane_legacy(
     textured_mesh: registration.TexturedMesh,
     pf: ob.PlaneFrame,
     plane: dict,
@@ -926,6 +1012,263 @@ def _compose_plane(
     return rgba, coverage, accepted_keys, report
 
 
+def _compose_plane(
+    textured_mesh: registration.TexturedMesh,
+    pf: ob.PlaneFrame,
+    plane: dict,
+    cams: list[ob.Camera],
+    photo_resolver,
+    *,
+    scale_m_per_mesh_unit: float,
+    max_photos: int,
+    registration_ceiling: int,
+    coverage_photos: int,
+    crop: float,
+    depth_m: float,
+    max_residual_px: float,
+    max_rotation_deg: float,
+    max_scale_error: float,
+) -> tuple[np.ndarray, float, list[str], dict]:
+    """Register many candidates cheaply, then compose only validated views."""
+    normal = registration.orient_normal(
+        np.asarray(plane["normale"], float), pf.corners.mean(0), cams,
+    )
+    horizontal_flipped = registration.orient_frame_for_front_view(pf, normal)
+    reference_rgba, reference_mask, depth = registration.render_oc_reference(
+        textured_mesh, pf, normal, depth_m, scale_m_per_mesh_unit,
+    )
+    reference = reference_rgba[..., :3]
+    planar_reference, dominant_depth_m = _dominant_planar_reference(
+        reference_mask, depth,
+    )
+    polygon = ob._polygon_mask(pf.tex_w, pf.tex_h, pf.polygon_uv)
+    surface_support = _planar_surface_support(
+        planar_reference, reference_mask, pf.texel_m,
+    ) & polygon
+
+    analysis_pf = _scaled_frame(pf)
+    analysis_size = (analysis_pf.tex_w, analysis_pf.tex_h)
+    analysis_reference = cv2.resize(
+        reference, analysis_size, interpolation=cv2.INTER_AREA,
+    )
+    analysis_planar = cv2.resize(
+        planar_reference.astype(np.uint8), analysis_size,
+        interpolation=cv2.INTER_NEAREST,
+    ) > 0
+    analysis_support = cv2.resize(
+        surface_support.astype(np.uint8), analysis_size,
+        interpolation=cv2.INTER_NEAREST,
+    ) > 0
+    analysis_pixel_scale = max(1.0, max(analysis_size) / 1100.0)
+    analysis_max_residual_px = max_residual_px * analysis_pixel_scale
+
+    can_register = int(analysis_planar.sum()) >= 8_000
+    if can_register:
+        sift = cv2.SIFT_create(
+            nfeatures=5000, contrastThreshold=0.025, edgeThreshold=12,
+        )
+        reference_points, reference_descriptors = sift.detectAndCompute(
+            registration._normalized_gray(analysis_reference),
+            analysis_planar.astype(np.uint8) * 255,
+        )
+    else:
+        reference_points, reference_descriptors = [], None
+
+    ranked = registration.rank_candidates(pf, normal, cams, crop=crop)
+    camera_by_key = {str(int(cam.key)): cam for cam in cams}
+    rank_by_key = {
+        str(candidate["key"]): rank for rank, candidate in enumerate(ranked, 1)
+    }
+    candidate_limit = analysis_candidate_budget(pf, registration_ceiling)
+    photo_reports: list[dict[str, object]] = []
+    accepted_specs: list[dict[str, object]] = []
+
+    if can_register:
+        for candidate in ranked[:candidate_limit]:
+            key = str(candidate["key"])
+            resolved = photo_resolver(key)
+            item: dict[str, object] = {
+                "rank": rank_by_key.get(key, len(ranked) + 1),
+                **candidate,
+                "photo_found": bool(resolved),
+            }
+            if not resolved:
+                photo_reports.append(item)
+                continue
+            posed, posed_mask = registration.warp_photo_to_plane(
+                Path(resolved), camera_by_key[key], analysis_pf,
+            )
+            _, aligned_mask, residual = registration.register_residual(
+                analysis_reference, analysis_planar,
+                reference_points, reference_descriptors,
+                posed, posed_mask,
+                max_rotation_deg=max_rotation_deg,
+                max_scale_error=max_scale_error,
+                max_residual_px=analysis_max_residual_px,
+            )
+            item["registration"] = residual
+            photo_reports.append(item)
+            if not bool(residual.get("accepted")):
+                continue
+            matrix_value = residual.get("matrix")
+            if matrix_value is None:
+                matrix_value = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+            analysis_matrix = np.asarray(matrix_value, np.float64)
+            full_matrix = _matrix_at_full_resolution(
+                analysis_matrix, analysis_pf, pf,
+            )
+            residual["analysis_matrix"] = analysis_matrix.tolist()
+            residual["matrix"] = full_matrix.tolist()
+            residual["analysis_size"] = list(analysis_size)
+            accepted_specs.append({
+                "key": key,
+                "path": str(resolved),
+                "mask": aligned_mask & analysis_support,
+                "matrix": full_matrix,
+            })
+
+    selected_indices, cover_report = _select_registered_cover(
+        [spec["mask"] for spec in accepted_specs],
+        analysis_support,
+        max(max_photos, coverage_photos),
+    )
+    selected_specs = [accepted_specs[index] for index in selected_indices]
+    selected_keys = {str(spec["key"]) for spec in selected_specs}
+    for item in photo_reports:
+        residual = item.get("registration")
+        if isinstance(residual, dict) and residual.get("accepted"):
+            residual["selected_for_full_resolution"] = \
+                str(item.get("key")) in selected_keys
+
+    accepted_images: list[np.ndarray] = []
+    accepted_planar_masks: list[np.ndarray] = []
+    accepted_full_masks: list[np.ndarray] = []
+    accepted_keys: list[str] = []
+    size = (pf.tex_w, pf.tex_h)
+    for spec in selected_specs:
+        key = str(spec["key"])
+        posed, posed_mask = registration.warp_photo_to_plane(
+            Path(str(spec["path"])), camera_by_key[key], pf,
+        )
+        matrix = np.asarray(spec["matrix"], np.float64)
+        aligned = cv2.warpAffine(
+            posed, matrix, size, flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+        )
+        aligned_mask = cv2.warpAffine(
+            posed_mask.astype(np.uint8), matrix, size,
+            flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT,
+        ) > 0
+        aligned_mask &= surface_support
+        accepted_images.append(aligned)
+        accepted_planar_masks.append(aligned_mask & planar_reference)
+        accepted_full_masks.append(aligned_mask)
+        accepted_keys.append(key)
+
+    if accepted_keys:
+        accepted_images, accepted_planar_masks, global_report, corrections = \
+            registration.global_align_photos(
+                accepted_images, accepted_planar_masks, accepted_keys,
+            )
+    else:
+        global_report, corrections = {}, []
+
+    dominant_keys = _dominant_component_keys(global_report, accepted_keys)
+    if dominant_keys and len(dominant_keys) < len(accepted_keys):
+        discarded_keys = [key for key in accepted_keys if key not in dominant_keys]
+        keep = [
+            index for index, key in enumerate(accepted_keys)
+            if key in dominant_keys
+        ]
+        accepted_images = [accepted_images[index] for index in keep]
+        accepted_planar_masks = [accepted_planar_masks[index] for index in keep]
+        accepted_full_masks = [accepted_full_masks[index] for index in keep]
+        corrections = [corrections[index] for index in keep]
+        accepted_keys = [accepted_keys[index] for index in keep]
+        cover_report["discarded_disconnected"] = discarded_keys
+        for item in photo_reports:
+            if str(item.get("key")) in discarded_keys:
+                registration_report = item.get("registration")
+                if isinstance(registration_report, dict):
+                    registration_report["excluded_disconnected"] = True
+
+    anchor_key = _stable_mosaic_anchor(accepted_keys, ranked)
+    if anchor_key is not None:
+        anchor_index = accepted_keys.index(anchor_key)
+        if anchor_index != 0:
+            order = [anchor_index, *(
+                index for index in range(len(accepted_keys))
+                if index != anchor_index
+            )]
+            accepted_images = [accepted_images[index] for index in order]
+            accepted_planar_masks = [accepted_planar_masks[index] for index in order]
+            accepted_full_masks = [accepted_full_masks[index] for index in order]
+            corrections = [corrections[index] for index in order]
+            accepted_keys = [accepted_keys[index] for index in order]
+
+    compositing_masks = [
+        cv2.warpAffine(
+            mask.astype(np.uint8),
+            np.asarray(correction["matrix"], np.float64),
+            size, flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT,
+        ) > 0
+        for mask, correction in zip(accepted_full_masks, corrections)
+    ]
+    compositing_masks = [mask & surface_support for mask in compositing_masks]
+    for key, correction in zip(accepted_keys, corrections):
+        for item in photo_reports:
+            residual = item.get("registration")
+            if str(item.get("key")) == key and isinstance(residual, dict):
+                residual["global_correction"] = correction
+                break
+
+    covered = np.zeros((pf.tex_h, pf.tex_w), bool)
+    for mask in compositing_masks:
+        covered |= mask
+    rgba = coverage_rgba(
+        mosaic(
+            accepted_images, compositing_masks, reference,
+            content_aware_seams=True,
+            content_aware_photo_count=len(accepted_images),
+        ),
+        compositing_masks,
+    )
+    coverage = float(covered[polygon].mean()) if polygon.any() else 0.0
+    selection_report = {
+        "budget": candidate_limit,
+        "configured_ceiling": registration_ceiling,
+        "analysis_size": list(analysis_size),
+        "attempted": min(candidate_limit, len(ranked)),
+        "registered": len(accepted_specs),
+        **cover_report,
+        "pose_only_fillers": 0,
+        "stop_reason": "copertura composta soltanto da foto registrate",
+    }
+    report = {
+        "horizontal_flipped_for_front_view": horizontal_flipped,
+        "oc_reference_coverage": round(float(reference_mask[polygon].mean()), 4)
+        if polygon.any() else 0.0,
+        "planar_reference_coverage": round(float(planar_reference[polygon].mean()), 4)
+        if polygon.any() else 0.0,
+        "surface_support_coverage": round(float(surface_support[polygon].mean()), 4)
+        if polygon.any() else 0.0,
+        "dominant_reference_depth_m": (
+            round(dominant_depth_m, 4) if dominant_depth_m is not None else None
+        ),
+        "pose_fillers_enabled": False,
+        "accepted_photos": len(accepted_images),
+        "registered_photos": len(accepted_images),
+        "registration_pixel_scale": round(analysis_pixel_scale, 4),
+        "max_residual_px": round(analysis_max_residual_px, 3),
+        "mosaic_anchor_key": anchor_key,
+        "seam_refinements": [],
+        "registration_selection": selection_report,
+        "global_alignment": global_report,
+        "photos": photo_reports,
+    }
+    return rgba, coverage, accepted_keys, report
+
+
 def bake_planes(
     clean_mesh_path: str,
     raw_obj_path: str,
@@ -937,7 +1280,7 @@ def bake_planes(
     *,
     texel_mm: float = 20.0,
     max_photos: int = 12,
-    registration_ceiling: int = 12,
+    registration_ceiling: int = 60,
     coverage_photos: int = 24,
     crop: float = 0.9,
     scale_m_per_mesh_unit: float = 1.0,

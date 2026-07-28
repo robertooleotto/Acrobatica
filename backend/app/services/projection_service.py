@@ -484,7 +484,7 @@ def _worker_payload(sess: dict) -> dict:
                 "ACRO_PROJECTION_TARGET_HEIGHT_PX", "3000")),
             "max_photos": int(os.environ.get("ACRO_PROJECTION_REGISTER_PHOTOS", "12")),
             "registration_ceiling": int(os.environ.get(
-                "ACRO_PROJECTION_MAX_REGISTER_PHOTOS", "12")),
+                "ACRO_PROJECTION_MAX_REGISTER_PHOTOS", "60")),
             "coverage_photos": int(os.environ.get(
                 "ACRO_PROJECTION_COVERAGE_PHOTOS", "24")),
             "oc_reference_bake": os.environ.get(
@@ -701,7 +701,7 @@ def project(session_id: str) -> dict:
                 "ACRO_PROJECTION_TARGET_HEIGHT_PX", "3000"))
             max_photos = int(os.environ.get("ACRO_PROJECTION_REGISTER_PHOTOS", "12"))
             registration_ceiling = int(os.environ.get(
-                "ACRO_PROJECTION_MAX_REGISTER_PHOTOS", "12"))
+                "ACRO_PROJECTION_MAX_REGISTER_PHOTOS", "60"))
             coverage_photos = int(os.environ.get("ACRO_PROJECTION_COVERAGE_PHOTOS", "24"))
             fallback_reason = ""
             raw_reference = inp.get("raw_reference")

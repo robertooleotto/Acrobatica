@@ -718,7 +718,7 @@ def process_projection_job(cli: Client, job: dict, dry: bool) -> None:
                     max_photos=int(cfg.get("max_photos", 12)),
                     target_long_edge_px=int(cfg.get("target_long_edge_px", 0)),
                     target_height_px=int(cfg.get("target_height_px", 3000)),
-                    registration_ceiling=int(cfg.get("registration_ceiling", 12)),
+                    registration_ceiling=int(cfg.get("registration_ceiling", 60)),
                     coverage_photos=int(cfg.get("coverage_photos", 24)),
                     crop=0.9, scale_m_per_mesh_unit=scale,
                     photo_resolver=resolve_photo,
