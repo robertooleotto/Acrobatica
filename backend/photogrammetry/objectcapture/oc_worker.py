@@ -18,6 +18,8 @@ import argparse, hashlib, json, os, shutil, subprocess, sys, tempfile, time, uui
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
+
 try:
     import requests
 except ImportError:
@@ -38,6 +40,7 @@ OBJECT_CAPTURE_PRESET = {
     "requests": ["model_file", "projection_reference", "poses"],
     "model_and_poses_same_session": True,
     "photo_naming": "{order_index:04d}.jpg",
+    "metric_alignment": "umeyama-oc-to-arkit-v1",
 }
 
 
@@ -72,6 +75,130 @@ def merge_intrinsics(poses_path: str, intrinsics_by_index: dict[int, list]) -> i
     return done
 
 
+def _umeyama_similarity(source: np.ndarray, target: np.ndarray) -> tuple[float, np.ndarray, np.ndarray]:
+    """Stima target = scale * rotation * source + translation."""
+    source = np.asarray(source, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+    if source.shape != target.shape or source.ndim != 2 or source.shape[1] != 3:
+        raise ValueError("Le traiettorie OC e ARKit devono essere Nx3")
+    if len(source) < 3:
+        raise ValueError("Servono almeno tre pose abbinate")
+    source_mean = source.mean(axis=0)
+    target_mean = target.mean(axis=0)
+    source_centered = source - source_mean
+    target_centered = target - target_mean
+    variance = float(np.sum(source_centered ** 2) / len(source))
+    if not np.isfinite(variance) or variance <= 1e-12:
+        raise ValueError("Traiettoria Object Capture degenere")
+    covariance = target_centered.T @ source_centered / len(source)
+    u, singular, vt = np.linalg.svd(covariance)
+    correction = np.ones(3)
+    if np.linalg.det(u @ vt) < 0:
+        correction[-1] = -1.0
+    rotation = u @ np.diag(correction) @ vt
+    scale = float(np.sum(singular * correction) / variance)
+    if not np.isfinite(scale) or scale <= 0:
+        raise ValueError("Scala metrica non valida")
+    translation = target_mean - scale * (rotation @ source_mean)
+    return scale, rotation, translation
+
+
+def _camera_center_arkit(transform: list) -> np.ndarray | None:
+    if not isinstance(transform, list) or len(transform) != 16:
+        return None
+    matrix = np.asarray(transform, dtype=np.float64).reshape(4, 4, order="F")
+    center = matrix[:3, 3]
+    return center if np.all(np.isfinite(center)) else None
+
+
+def estimate_metric_calibration(
+    poses_path: str | Path,
+    arkit_transforms_by_index: dict[int, list],
+) -> dict:
+    """Allinea i centri camera OC alle pose ARKit metriche della stessa sessione.
+
+    Il fit robusto elimina eventuali pose OC/ARKit non coerenti. La mesh resta
+    nel frame nativo OC; nel manifesto salviamo scala, rotazione e asse verticale.
+    """
+    poses = json.loads(Path(poses_path).read_text(encoding="utf-8"))
+    source, target = [], []
+    for sample_idx, record in poses.items():
+        image = record.get("image", "")
+        order_index = order_index_of(image) if image else None
+        if order_index is None and str(sample_idx).isdigit():
+            order_index = int(sample_idx)
+        translation = record.get("translation")
+        center = _camera_center_arkit(arkit_transforms_by_index.get(order_index, []))
+        if (
+            center is not None and isinstance(translation, list)
+            and len(translation) == 3
+        ):
+            oc_center = np.asarray(translation, dtype=np.float64)
+            if np.all(np.isfinite(oc_center)):
+                source.append(oc_center)
+                target.append(center)
+    if len(source) < 3:
+        raise RuntimeError("Servono almeno 3 foto con pose OC e ARKit abbinate")
+
+    source_arr = np.asarray(source)
+    target_arr = np.asarray(target)
+    baseline = float(np.linalg.norm(target_arr[:, None] - target_arr[None, :], axis=2).max())
+    if baseline < 0.5:
+        raise RuntimeError("Percorso ARKit troppo corto per una scala metrica affidabile")
+
+    # RANSAC deterministico: evita che una singola posa errata alteri la scala.
+    count = len(source_arr)
+    rng = np.random.default_rng(20260722)
+    candidates: list[np.ndarray] = []
+    if count <= 12:
+        import itertools
+        candidates = [np.asarray(c) for c in itertools.combinations(range(count), 3)]
+    else:
+        candidates = [rng.choice(count, 3, replace=False) for _ in range(256)]
+    threshold = max(0.12, 0.03 * baseline)
+    best_inliers = np.ones(count, dtype=bool)
+    best_score = (-1, float("-inf"))
+    for indices in candidates:
+        try:
+            scale, rotation, translation = _umeyama_similarity(
+                source_arr[indices], target_arr[indices],
+            )
+        except (ValueError, np.linalg.LinAlgError):
+            continue
+        predicted = (scale * (rotation @ source_arr.T)).T + translation
+        errors = np.linalg.norm(predicted - target_arr, axis=1)
+        inliers = errors <= threshold
+        score = (int(inliers.sum()), -float(np.median(errors[inliers])) if inliers.any() else -np.inf)
+        if inliers.sum() >= 3 and score > best_score:
+            best_score, best_inliers = score, inliers
+
+    try:
+        scale, rotation, translation = _umeyama_similarity(
+            source_arr[best_inliers], target_arr[best_inliers],
+        )
+    except (ValueError, np.linalg.LinAlgError) as exc:
+        raise RuntimeError(f"Calibrazione metrica non calcolabile: {exc}") from exc
+    predicted = (scale * (rotation @ source_arr[best_inliers].T)).T + translation
+    errors = np.linalg.norm(predicted - target_arr[best_inliers], axis=1)
+    rmse = float(np.sqrt(np.mean(errors ** 2)))
+    if rmse > max(0.25, 0.05 * baseline):
+        raise RuntimeError(f"Calibrazione metrica incoerente (RMSE {rmse:.3f} m)")
+    up_mesh = rotation.T @ np.asarray([0.0, 1.0, 0.0])
+    up_mesh /= np.linalg.norm(up_mesh)
+    return {
+        "method": "umeyama-oc-to-arkit-v1",
+        "scale_m_per_mesh_unit": scale,
+        "rotation_oc_to_arkit": rotation.tolist(),
+        "translation_arkit_m": translation.tolist(),
+        "up_vector_mesh": up_mesh.tolist(),
+        "pair_count": count,
+        "inlier_count": int(best_inliers.sum()),
+        "rmse_m": rmse,
+        "max_error_m": float(errors.max()),
+        "arkit_baseline_m": baseline,
+    }
+
+
 def sha256_file(path: str | Path) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
@@ -86,6 +213,7 @@ def write_bundle_manifest(
     *,
     photo_count: int,
     detail: str,
+    metric_calibration: dict | None = None,
 ) -> dict:
     """Lega mesh e pose alla singola esecuzione Object Capture corrente."""
     records = {
@@ -114,6 +242,9 @@ def write_bundle_manifest(
         "poses_file": "oc_poses.json",
         "files": records,
     }
+    if metric_calibration:
+        document["metric_calibration"] = metric_calibration
+        document["scale_m_per_mesh_unit"] = metric_calibration["scale_m_per_mesh_unit"]
     proxy_obj = next((name for name, _ in files if name == "projection_proxy.obj"), None)
     proxy_mtl = next((name for name, _ in files if name == "projection_proxy.mtl"), None)
     if proxy_obj and proxy_mtl:
@@ -444,9 +575,11 @@ def process_job(cli: Client, job: dict, hpg: str, converter: str,
     with tempfile.TemporaryDirectory(prefix=f"oc_{sid[:8]}_") as tmp:
         pdir = Path(tmp) / "photos"; pdir.mkdir()
         intr: dict[int, list] = {}
+        arkit_transforms: dict[int, list] = {}
         for ph in photos:
             oi = ph["order_index"]
             intr[oi] = ph.get("camera_intrinsics") or []
+            arkit_transforms[oi] = ph.get("camera_transform") or []
             dest = pdir / f"{oi:04d}.jpg"
             if dry:
                 print(f"  [dry] download → {dest.name}"); dest.write_bytes(b"")
@@ -465,6 +598,13 @@ def process_job(cli: Client, job: dict, hpg: str, converter: str,
             subprocess.run([hpg, str(pdir), str(usdz), detail, "sequential", "high"], check=True)
             n = merge_intrinsics(str(poses), intr)
             print(f"  intrinseci uniti a {n}/{len(photos)} pose")
+            metric_calibration = estimate_metric_calibration(poses, arkit_transforms)
+            print(
+                "  scala metrica: "
+                f"{metric_calibration['scale_m_per_mesh_unit']:.8f} m/unità "
+                f"({metric_calibration['inlier_count']}/{metric_calibration['pair_count']} pose, "
+                f"RMSE {metric_calibration['rmse_m']:.3f} m)"
+            )
             subprocess.run([converter, str(usdz), str(obj)], check=True)
             textures = materialize_usdz_textures(
                 usdz, obj.with_suffix(".mtl"), Path(tmp),
@@ -499,6 +639,7 @@ def process_job(cli: Client, job: dict, hpg: str, converter: str,
                 generated,
                 photo_count=len(photos),
                 detail=detail,
+                metric_calibration=metric_calibration,
             )
             generated.append((bundle_manifest.name, str(bundle_manifest)))
             print(f"  bundle OC {bundle['bundle_id']} verificato")
@@ -745,8 +886,10 @@ def process_projection_job(cli: Client, job: dict, dry: bool) -> None:
             return str(local)
 
         cfg = job.get("config") or {}
-        scale = float(planes.get(
-            "scale_m_per_mesh_unit", cfg.get("default_scale", 6.0927)))
+        raw_scale = planes.get("scale_m_per_mesh_unit", cfg.get("default_scale"))
+        if raw_scale is None:
+            raise RuntimeError("Il job non contiene scale_m_per_mesh_unit")
+        scale = float(raw_scale)
         out_dir = root / "output"
         fallback_reason = ""
 

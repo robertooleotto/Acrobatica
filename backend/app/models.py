@@ -551,6 +551,7 @@ class DetectPlanesResult(BaseModel):
     engine: str = ""                   # "open3d" (v2) | "istogrammi" (fallback v1)
     engine_error: str = ""             # se v2 è caduto in fallback: perché (diagnosi)
     mesh_kind: str = ""                # "raw" | "clean": sorgente realmente analizzata
+    scale_m_per_mesh_unit: float = 1.0
     planes: list[DetectedPlane] = []
 
 
@@ -764,11 +765,14 @@ class UploadPhotoResponse(BaseModel):
 # ─── Worker Object Capture (opzione A: Mac dedicato che consuma la coda) ─────
 
 class OcJobPhoto(BaseModel):
-    """Una foto del job: URL firmato per il download + intrinseci ARKit (da
-    unire alle pose OC, che non le contengono)."""
+    """Una foto del job con calibrazione ARKit associata allo stesso scatto."""
     order_index: int
     url: str
     camera_intrinsics: list[float] = Field(default_factory=list, description="K col-major 9 float")
+    camera_transform: list[float] = Field(
+        default_factory=list,
+        description="camera→world ARKit, matrice 4x4 col-major (metri)",
+    )
 
 
 class OcJobResponse(BaseModel):

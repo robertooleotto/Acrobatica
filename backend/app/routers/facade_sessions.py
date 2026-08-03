@@ -196,6 +196,7 @@ def next_oc_job():
             order_index=p["order_index"],
             url=storage_service.signed_url(p["storage_path"], expires_in_sec=3600),
             camera_intrinsics=(p.get("metadata") or {}).get("camera_intrinsics") or [],
+            camera_transform=(p.get("metadata") or {}).get("camera_transform") or [],
         )
         for p in photos
     ]
@@ -1905,12 +1906,40 @@ def detect_planes(session_id: str, payload: Optional[dict] = Body(None)):
                   "Nessuna mesh .obj caricata per questa sessione")
         raise HTTPException(409, detail)
 
-    up = payload.get("up")
-    up_vec = up if (isinstance(up, list) and len(up) == 3) else [0.0, 1.0, 0.0]
-    requested_scale = payload.get("scale_m_per_mesh_unit", payload.get("scale"))
+    calibration = {}
     try:
-        oc_scale = float(requested_scale if requested_scale is not None
-                         else os.environ.get("ACRO_OC_SCALE", "6.0927"))
+        bundle = projection_service.validate_oc_bundle(result)
+        calibration = bundle.get("metric_calibration") or {}
+    except projection_service.InputsMissing:
+        # Le mesh legacy restano utilizzabili soltanto con scala esplicita.
+        bundle = {}
+
+    up = payload.get("up")
+    calibrated_up = calibration.get("up_vector_mesh")
+    up_vec = (
+        up if (isinstance(up, list) and len(up) == 3)
+        else calibrated_up
+        if (isinstance(calibrated_up, list) and len(calibrated_up) == 3)
+        else [0.0, 1.0, 0.0]
+    )
+    requested_scale = payload.get("scale_m_per_mesh_unit", payload.get("scale"))
+    calibrated_scale = calibration.get(
+        "scale_m_per_mesh_unit", bundle.get("scale_m_per_mesh_unit"),
+    )
+    legacy_scale = os.environ.get("ACRO_OC_SCALE")
+    resolved_scale = (
+        requested_scale if requested_scale is not None
+        else calibrated_scale if calibrated_scale is not None
+        else legacy_scale if legacy_scale not in (None, "")
+        else None
+    )
+    if resolved_scale is None:
+        raise HTTPException(
+            409,
+            "La mesh non contiene una calibrazione metrica: rigenerare Object Capture",
+        )
+    try:
+        oc_scale = float(resolved_scale)
     except (TypeError, ValueError):
         raise HTTPException(422, "scale_m_per_mesh_unit deve essere un numero positivo")
     if not math.isfinite(oc_scale) or oc_scale <= 0:
@@ -2007,7 +2036,8 @@ def detect_planes(session_id: str, payload: Optional[dict] = Body(None)):
     detected = DetectPlanesResult(
         session_id=session_id, up=doc.get("up", up_vec),
         count=len(planes), engine=engine, engine_error=engine_error,
-        mesh_kind=mesh_kind, planes=planes,
+        mesh_kind=mesh_kind, scale_m_per_mesh_unit=oc_scale, planes=planes,
+        balcony_detection=doc.get("balcony_detection") or {},
     )
     if payload.get("persist"):
         save_planes(session_id, _automatic_planes_payload(detected))
@@ -2016,10 +2046,6 @@ def detect_planes(session_id: str, payload: Optional[dict] = Body(None)):
 
 def _automatic_planes_payload(detected: DetectPlanesResult) -> dict:
     """Converte il risultato del detector nel documento usato dal baker."""
-    try:
-        scale = float(os.environ.get("ACRO_OC_SCALE", "6.0927"))
-    except ValueError:
-        scale = 6.0927
     planes = []
     for index, plane in enumerate(detected.planes, 1):
         item = plane.model_dump()
@@ -2034,7 +2060,7 @@ def _automatic_planes_payload(detected: DetectPlanesResult) -> dict:
         "stato": "proposta_automatica",
         "engine": detected.engine,
         "mesh_kind": detected.mesh_kind,
-        "scale_m_per_mesh_unit": scale,
+        "scale_m_per_mesh_unit": detected.scale_m_per_mesh_unit,
         "piano_base": {"up": detected.up},
         "planes": planes,
     }
@@ -2046,9 +2072,7 @@ def _run_automatic_mesh_pipeline(session_id: str) -> None:
         projection_service._set_job(
             session_id, "running", 0.02, "Riconosco i piani della facciata",
         )
-        detected = detect_planes(session_id, {
-            "up": [0.0, 1.0, 0.0], "mesh_kind": "raw",
-        })
+        detected = detect_planes(session_id, {"mesh_kind": "raw"})
         if detected.count == 0:
             raise RuntimeError("Il riconoscimento non ha prodotto piani utilizzabili")
         projection_service._set_job(
